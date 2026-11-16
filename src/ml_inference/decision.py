@@ -245,6 +245,46 @@ def residual_samples(bundle: Bundle) -> tuple[str, np.ndarray]:
     return samples
 
 
+def row_quantiles(
+    bundle: Bundle, frame: pd.DataFrame, quantiles: np.ndarray
+) -> tuple[np.ndarray, bool]:
+    """
+    行ごとの誤りの分位点を返す関数 (何段も先の予測の行は, 測ってあれば
+    その段の外れ方)
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+    frame: pd.DataFrame
+        予測の表 (何段も先の予測は step の列を持つ)
+    quantiles: np.ndarray
+        1 段目 (全ての行) の誤りの 1 % から 99 % の分位点
+
+    Returns
+    ----------
+    result: tuple[np.ndarray, bool]
+        (行の数, 99) の分位点と, 段ごとの外れ方を使った行があるか
+    """
+    # 測った段より先は, 測った中で最も先の段
+    rows = np.tile(quantiles, (len(frame), 1))
+    steps = (bundle.info.get("uncertainty") or {}).get("steps") or {}
+    measured = sorted(int(k) for k in steps if k != "rows")
+    if not measured or "step" not in frame.columns:
+        return rows, False
+    step = pd.to_numeric(frame["step"], errors="coerce").to_numpy()
+    used = False
+    for number in np.unique(step[np.isfinite(step)]).astype(int):
+        near = [m for m in measured if m <= number]
+        if not near:
+            continue
+        rows[step == number] = np.asarray(steps[str(near[-1])], dtype=float)
+        used = True
+    result = (rows, used)
+
+    return result
+
+
 def outcomes(
     prediction: np.ndarray, kind: str, quantiles: np.ndarray
 ) -> np.ndarray:
@@ -258,7 +298,8 @@ def outcomes(
     kind: str
         relative か absolute
     quantiles: np.ndarray
-        誤りの 1 % から 99 % の分位点
+        誤りの 1 % から 99 % の分位点 (全ての行で 1 つか, (行の数, 99)
+        の行ごと)
 
     Returns
     ----------
@@ -267,10 +308,11 @@ def outcomes(
         外の裾は含まないので, τ が 0.99 に近いと見込みの損は甘い)
     """
     # 比は掛け, 差は足す
+    grid = quantiles if quantiles.ndim == 2 else quantiles[None, :]
     if kind == "relative":
-        values = prediction[:, None] * np.exp(quantiles[None, :])
+        values = prediction[:, None] * np.exp(grid)
     else:
-        values = prediction[:, None] + quantiles[None, :]
+        values = prediction[:, None] + grid
 
     return values
 
@@ -385,7 +427,8 @@ def decide_quantity(
     step = float(decision.get("step", 1))
     tau = under / np.maximum(under + over, 1e-12)
     index = np.clip(np.round(tau * 100).astype(int), 1, 99) - 1
-    possible = outcomes(prediction, kind, quantiles)
+    grid, by_step = row_quantiles(bundle, frame, quantiles)
+    possible = outcomes(prediction, kind, grid)
     goal = possible[np.arange(len(frame)), index]
     action = best_amount(goal, stock, step, possible, under, over)
     action = np.where(tau <= 0, 0.0, action)
@@ -411,6 +454,7 @@ def decide_quantity(
         "tau_min": float(tau[ok].min()) if ok.any() else None,
         "tau_max": float(tau[ok].max()) if ok.any() else None,
         "kind": kind,
+        "by_step": by_step,
     }
     result = (columns, summary)
 
@@ -791,8 +835,13 @@ def caveats(
             pd.to_numeric(prediction["step"], errors="coerce") > 1
         ).any():
             notes.append(
+                "2 段目より先の予測には, 段ごとに測った外れ方を当てた ("
+                f"{uncertainty.get('horizon')} 段まで. それより先は最も"
+                "先の段の外れ方)"
+                if summary.get("by_step") else
                 "2 段目より先の予測にも 1 つ先の外れ方を当てている (先の段"
-                "ほど外れ方は大きく, 量は少なめ)"
+                "ほど外れ方は大きく, 量は少なめ. 実績で段ごとの外れ方を"
+                "測り直せる)"
             )
         return notes
 
@@ -848,6 +897,10 @@ def sentences_of(
     # 前提のもとの比べは前提から必ずそうなるので, 実際の差はたどり直しで
     rows = summary["rows"]
     target = bundle.dataset.info.get("target") or "値"
+    if rows == 0:
+        sentences = ["決められる行がありません (予測でき, 損得の値が揃った"
+                     "行が要る)"]
+        return sentences
     tail = (
         " (同じ前提から計算した比べなので, この方針は必ず同じか良く出る. "
         "実際の差は過去のデータでたどり直して確かめる)"
