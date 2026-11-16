@@ -292,7 +292,7 @@ def step_time(
     ----------
     ValueError
         分類の一式, 目的の列の過去の値を使わない一式, 段の数が 2 より
-        小さい場合, 時刻の列が無い場合
+        小さい場合, 時刻の列が無い場合と日時として読めない場合
     """
     # 何段も先まで予測できる一式と, 時刻の列
     settings = lag_settings(bundle)
@@ -306,6 +306,17 @@ def step_time(
     column = time or (times[0] if times else None)
     if column is None or column not in table.columns:
         raise ValueError("予測を始める時刻の列 (time) を指定してください")
+    # 整数の列 (期の番号) は順番として認め, 他の数の列と, 日時として
+    # 読めない値の多い列の除外
+    values = table[column]
+    if pd.api.types.is_integer_dtype(values) and not (
+        pd.api.types.is_bool_dtype(values)
+    ):
+        return str(column)
+    parsed = pd.to_datetime(values, errors="coerce", format="mixed")
+    if pd.api.types.is_numeric_dtype(values) or parsed.notna().mean() < 0.5:
+        raise ValueError(f"列 {column} は日時として読めません. 予測を始める"
+                         "時刻の列を選んでください")
 
     return str(column)
 
