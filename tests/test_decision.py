@@ -307,3 +307,34 @@ def test_review_fixes(tmp_path: Path) -> None:
               "false_alarm_cost": 1}
     policies = backtest(tmp_path / "nb", past, triage)["policies"]
     assert policies["どれも回さない"] < 0
+
+
+def test_default_decision(tmp_path: Path) -> None:
+    """
+    一式の既定の意思決定を infer が使い, 空の辞書で外せることを確かめる
+    関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 既定値を持つ一式
+    path = classifier_bundle(tmp_path)
+    triage = {"type": "triage", "positive": "yes", "miss_cost": 9,
+              "false_alarm_cost": 1}
+    make_bundle(tmp_path / "with", tmp_path / "bundle" / "model_spec.yaml",
+                tmp_path / "ds", tmp_path / "w.pt", decision=triage)
+    frame = pd.DataFrame({"x": [1.0, -1.0]})
+    assert "decision" in infer(tmp_path / "with", frame)
+    assert "decision" not in infer(tmp_path / "with", frame, decision={})
+    with pytest.raises(ValueError, match="意思決定の決め方の誤り"):
+        make_bundle(tmp_path / "bad", tmp_path / "bundle" / "model_spec.yaml",
+                    tmp_path / "ds", tmp_path / "w.pt",
+                    decision={"type": "quantity", "under_cost": 1,
+                              "over_cost": 1})
+    assert path.exists()

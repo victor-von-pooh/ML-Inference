@@ -41,7 +41,8 @@ def infer(
         目的の列が空の先の行を順に予測し, 先の行だけの結論を出すか
         (何段も先の予測)
     decision: Optional[dict] = None
-        意思決定の決め方 (渡すと, 行ごとの行動と見込みも出す)
+        意思決定の決め方 (渡すと, 行ごとの行動と見込みも出す. 省略すると
+        一式の既定値. 空の辞書で意思決定しない)
 
     Returns
     ----------
@@ -82,6 +83,8 @@ def infer(
     else:
         prediction = predict(bundle, source, options, batch_size, device)
     conclusion = conclude(prediction, bundle.task, bundle.classes, merged)
+    if decision is None:
+        decision = bundle.info.get("decision")
     if decision:
         decided = decide(bundle, conclusion["frame"], decision)
         conclusion["frame"] = decided.pop("frame")

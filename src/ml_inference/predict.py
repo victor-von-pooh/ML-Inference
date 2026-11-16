@@ -690,6 +690,7 @@ def describe_bundle(bundle: Union[str, Path, Bundle]) -> dict:
         },
         "run": info.get("run"),
         "conclusion": info.get("conclusion") or {},
+        "decision": info.get("decision"),
         "forecastable": bundle.task != "classification" and (
             bundle.dataset.info.get("target") in lag_settings(bundle)[
                 "columns"

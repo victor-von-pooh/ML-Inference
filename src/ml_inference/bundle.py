@@ -20,7 +20,7 @@ BUNDLE_FORMAT_VERSION = 2
 # inference.yaml の一番上の項目
 TOP_KEYS = (
     "format_version", "name", "created_at", "model", "inputs", "dataset",
-    "run", "conclusion", "check", "uncertainty", "notes"
+    "run", "conclusion", "decision", "check", "uncertainty", "notes"
 )
 
 # 出力の扱い方
@@ -505,7 +505,7 @@ def make_bundle(
     inputs: Optional[dict] = None, output: Optional[str] = None,
     kind: Optional[str] = None,
     target_scale: Union[dict, str, None] = None,
-    conclusion: Optional[dict] = None,
+    conclusion: Optional[dict] = None, decision: Optional[dict] = None,
     name: Optional[str] = None, copy_weights: bool = True,
     overwrite: bool = False
 ) -> dict:
@@ -535,6 +535,8 @@ def make_bundle(
         の学習用の分割の目的の値の平均と標準偏差 (よくある決め方)
     conclusion: Optional[dict] = None
         結論の決め方の既定値
+    decision: Optional[dict] = None
+        意思決定の決め方の既定値 (損得と制約. 将来は問題の設定から)
     name: Optional[str] = None
         一式の名前 (省略するとディレクトリの名前)
     copy_weights: bool = True
@@ -610,6 +612,7 @@ def make_bundle(
             "dataset": "dataset",
             "run": run,
             "conclusion": plain(conclusion or {}),
+            "decision": plain(decision) if decision else None,
             "notes": bundle_notes(full, run),
         }
         (target / "inference.yaml").write_text(
@@ -617,11 +620,19 @@ def make_bundle(
             encoding="utf-8"
         )
         bundle = load_bundle(target)
-        # 結論の決め方は重い推論の前に確かめる
+        # 結論と意思決定の決め方は重い推論の前に確かめる
         if conclusion:
             errors = check_rules(conclusion, bundle.task, bundle.classes)
             if errors:
                 raise ValueError("結論の決め方の誤り: " + " / ".join(errors))
+        if decision:
+            from ml_inference.decision import check_decision
+
+            errors = check_decision(decision, bundle)
+            if errors:
+                raise ValueError(
+                    "意思決定の決め方の誤り: " + " / ".join(errors)
+                )
         check_sample(bundle, full)
         # 記録との比べは注意のためなので, 失敗しても作るのは止めない
         try:
