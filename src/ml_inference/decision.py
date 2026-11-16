@@ -801,6 +801,9 @@ def caveats(
             f"確率と実際に当たった割合のずれは平均 {ece * 100:.1f} ポイント"
             + (" (大きいので, 確率を額面どおりに使う判断は粗い)"
                if ece > 0.05 else "")
+            + (f". 渡した実績の {uncertainty.get('rows', 0):,} 行で測り"
+               "直した値"
+               if uncertainty.get("split") == "recent" else "")
         )
     if kind == "select":
         notes.append(

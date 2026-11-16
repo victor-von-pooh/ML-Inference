@@ -1,5 +1,6 @@
 import datetime as dt
 from pathlib import Path
+import uuid
 from typing import Any, Optional, Union
 
 import numpy as np
@@ -8,7 +9,7 @@ import yaml
 from ml_eda import Data
 
 from ml_inference.bundle import Bundle, load_bundle
-from ml_inference.decision import label_text
+from ml_inference.decision import amount_text, label_text
 from ml_inference.predict import predict
 from ml_inference.uncertainty import (
     class_calibration, interval, residual_quantiles
@@ -41,7 +42,8 @@ def counted_rows(
     Raises
     ----------
     ValueError
-        目的の列が無い場合と, 測る行が少ない場合
+        目的の列が無い場合, 印の数が行の数と違う場合, 測る行が少ない
+        場合
     """
     # 目的の列と, backtest と同じ行の選び方
     target = bundle.dataset.info.get("target")
@@ -51,7 +53,13 @@ def counted_rows(
         (table["status"] == "ok") & table[target].notna(), dtype=bool
     )
     if count is not None:
-        keep &= np.asarray(count, dtype=bool)
+        mark = np.asarray(count, dtype=bool)
+        if mark.shape != keep.shape:
+            raise ValueError(
+                f"count の印の数 ({mark.size:,}) が行の数 ({len(keep):,}) "
+                "と違います"
+            )
+        keep &= mark
     if keep.sum() < REMEASURE_MIN_ROWS:
         raise ValueError(
             f"測り直せる行 (予測し, 目的の値が分かる行) が {int(keep.sum())}"
@@ -79,17 +87,24 @@ def regression_remeasure(
     Returns
     ----------
     result: tuple[dict, dict]
-        前の記録の当たり具合 (coverage. 記録が無ければ空) と, 新しい
-        誤りの分位点
+        前の記録の当たり具合 (coverage と, 比の形で幅を出せずに除いた
+        行の数 excluded. 記録が無ければ空) と, 新しい誤りの分位点
     """
-    # 前の記録の 80 % と 90 % の幅 (比の形で正でない予測は覆わない扱い)
+    # 前の記録の 80 % と 90 % の幅 (比の形は正の予測の行だけ)
     before: dict = {}
     if old.get("kind") and old.get(old["kind"]):
-        before["coverage"] = {}
-        for name, (low, high) in (("80", (10, 90)), ("90", (5, 95))):
-            lower, upper = interval(prediction, old, low, high)
-            inside = (answers >= lower) & (answers <= upper)
-            before["coverage"][name] = float(inside.mean())
+        usable = prediction > 0 if old["kind"] == "relative" else (
+            np.ones(len(prediction), dtype=bool)
+        )
+        before["excluded"] = int((~usable).sum())
+        if usable.any():
+            before["coverage"] = {}
+            for name, (low, high) in (("80", (10, 90)), ("90", (5, 95))):
+                lower, upper = interval(prediction[usable], old, low, high)
+                inside = (answers[usable] >= lower) & (
+                    answers[usable] <= upper
+                )
+                before["coverage"][name] = float(inside.mean())
     quantiles = residual_quantiles(prediction, answers)
     result = (before, quantiles)
 
@@ -116,7 +131,9 @@ def class_remeasure(
     Returns
     ----------
     result: tuple[dict, dict]
-        前の記録のずれ (ece) と, 新しい calibration と calibration_of
+        前の記録のずれ (ece. 記録したときの値で, 渡した実績で測った
+        値ではない) と一式のクラスに無いラベルで除いた行の数 (dropped),
+        新しい calibration と calibration_of
 
     Raises
     ----------
@@ -140,7 +157,9 @@ def class_remeasure(
         bundle, columns, labels[known].to_numpy(dtype=int)
     )
     recorded = old.get("test_ece", (old.get("calibration") or {}).get("ece"))
-    before = {} if recorded is None else {"ece": float(recorded)}
+    before: dict = {"dropped": int((~known).sum())}
+    if recorded is not None:
+        before["ece"] = float(recorded)
     result = (before, {"calibration": calibration, "calibration_of": of})
 
     return result
@@ -172,20 +191,28 @@ def remeasure_sentences(
     sentences = []
     if bundle.task != "classification":
         coverage = before.get("coverage")
+        excluded = before.get("excluded", 0)
         if coverage:
             low = coverage["80"] < 0.75
             sentences.append(
-                f"今の記録の 80 % の幅は, 渡した実績の {rows:,} 行の "
-                f"{coverage['80'] * 100:.0f} % を覆った (90 % の幅は "
+                f"今の記録の 80 % の幅は, 渡した実績の {rows - excluded:,} "
+                f"行の {coverage['80'] * 100:.0f} % を覆った (90 % の幅は "
                 f"{coverage['90'] * 100:.0f} %)"
                 + (". 外れ方を小さく見積もっていた" if low else "")
+            )
+        if excluded:
+            sentences.append(
+                f"予測が 0 以下の {excluded:,} 行は, 今の記録 (比の形) では"
+                "幅を出せないので確かめから除いた"
             )
         kind = uncertainty["kind"]
         lower, upper = uncertainty[kind][9], uncertainty[kind][89]
         width = (
             f"予測の {np.exp(lower):.2f} 倍から {np.exp(upper):.2f} 倍"
             if kind == "relative"
-            else f"予測に {lower:+,.4g} から {upper:+,.4g}"
+            else f"予測に {'+' if lower >= 0 else '-'}"
+            f"{amount_text(abs(lower))} から "
+            f"{'+' if upper >= 0 else '-'}{amount_text(abs(upper))}"
         )
         sentences.append(
             f"測り直した外れ方の 80 % の幅は, {width} ({rows:,} 行で測った)"
@@ -197,8 +224,12 @@ def remeasure_sentences(
         f"渡した実績の {rows:,} 行で, 確率と実際に当たった割合のずれは平均"
         f" {ece * 100:.1f} ポイント"
         + ("" if recorded is None
-           else f" (今の記録は {recorded * 100:.1f} ポイント)")
+           else f" (記録したときは {recorded * 100:.1f} ポイント)")
     )
+    if before.get("dropped"):
+        sentences.append(
+            f"一式のクラスに無いラベルの {before['dropped']:,} 行は除いた"
+        )
 
     return sentences
 
@@ -218,11 +249,12 @@ def write_uncertainty(bundle: Bundle, uncertainty: dict) -> None:
     ----------
     None
     """
-    # 一時のファイルに書いてから置き換える (途中で止まっても壊さない)
+    # 一時のファイル (呼び出しごとに別の名前) への書き込みと置き換え
+    # (途中で止まっても壊さないため)
     path = bundle.path / "inference.yaml"
     info = yaml.safe_load(path.read_text(encoding="utf-8"))
     info["uncertainty"] = uncertainty
-    temporary = path.with_name("inference.yaml.tmp")
+    temporary = path.with_name(f"inference.yaml.{uuid.uuid4().hex}.tmp")
     temporary.write_text(
         yaml.safe_dump(info, allow_unicode=True, sort_keys=False),
         encoding="utf-8"
@@ -257,13 +289,17 @@ def remeasure(
     Returns
     ----------
     result: dict
-        rows (測った行), before (今の記録の当たり具合. 回帰は coverage,
-        分類は ece), uncertainty (新しい記録), sentences, written
+        rows (測った行), before (回帰は今の記録の幅が渡した実績を
+        覆った割合 coverage と除いた行の数 excluded, 分類は記録した
+        ときの確率のずれ ece と除いた行の数 dropped. 分類の確率は
+        直さないので, 渡した実績でのずれは uncertainty の方),
+        uncertainty (新しい記録), sentences, written
 
     Raises
     ----------
     ValueError
-        目的の列が無い場合と, 測れる行が少ない場合
+        目的の列が無い場合, 印の数が行の数と違う場合, 測れる行が少ない
+        場合, 一式のクラスに合うラベルの行が少ない場合
     """
     # 予測と, 測る行
     if not isinstance(bundle, Bundle):

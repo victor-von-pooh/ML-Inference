@@ -33,14 +33,14 @@ def test_remeasure_regression(tmp_path: Path) -> None:
     decision = {"type": "quantity", "under_cost": 9, "over_cost": 1}
     before = decide(bundle, predict(bundle, recent), decision)
 
-    # 書き戻さない場合は一式が変わらない
+    # 書き戻さない場合の一式 (変わらない)
     checked = remeasure(path, recent, write=False)
     assert checked["rows"] == 300 and checked["written"] is False
     assert checked["before"]["coverage"]["80"] < 0.75
     assert "外れ方を小さく見積もっていた" in checked["sentences"][0]
     assert load_bundle(path).info["uncertainty"]["split"] == "valid"
 
-    # 書き戻すと, 実績の分割の記録になり, 9 : 1 の量が増える
+    # 書き戻した後の実績の分割の記録と, 9 : 1 の量の増え
     result = remeasure(path, recent)
     saved = load_bundle(path).info["uncertainty"]
     assert saved["split"] == "recent" and saved["rows"] == 300
@@ -69,7 +69,7 @@ def test_remeasure_count_and_errors(tmp_path: Path) -> None:
     ----------
     None
     """
-    # 印のある行と目的の値の分かる行だけを測る
+    # 印のある行と目的の値の分かる行だけの測り直し
     path = regression_bundle(tmp_path)
     x = np.linspace(1, 10, 50)
     recent = pd.DataFrame({"x": x, "y": 10 * x})
@@ -83,6 +83,15 @@ def test_remeasure_count_and_errors(tmp_path: Path) -> None:
         remeasure(path, recent.head(15), write=False)
     with pytest.raises(ValueError, match="目的の列"):
         remeasure(path, recent.drop(columns="y"), write=False)
+    with pytest.raises(ValueError, match="印の数"):
+        remeasure(path, recent, count=count[:10], write=False)
+
+    # 比の形の記録では, 予測が 0 以下の行を確かめから除く
+    negative = pd.DataFrame({"x": np.linspace(-5, 5, 60),
+                             "y": np.linspace(-50, 50, 60)})
+    checked = remeasure(path, negative, write=False)
+    assert checked["before"]["excluded"] == 30
+    assert any("0 以下の 30 行" in s for s in checked["sentences"])
 
 
 def test_remeasure_classification(tmp_path: Path) -> None:
@@ -110,4 +119,11 @@ def test_remeasure_classification(tmp_path: Path) -> None:
     assert saved["split"] == "recent" and saved["calibration_of"] == "yes"
     assert saved["calibration"]["ece"] > 0.2
     assert result["before"]["ece"] < saved["calibration"]["ece"]
-    assert "今の記録は" in result["sentences"][0]
+    assert "記録したときは" in result["sentences"][0]
+    assert result["before"]["dropped"] == 0
+    bundle = load_bundle(path)
+    triage = {"type": "triage", "positive": "yes", "miss_cost": 3,
+              "false_alarm_cost": 1}
+    notes = decide(bundle, predict(bundle, pd.DataFrame({"x": x})),
+                   triage)["notes"]
+    assert any("400 行で測り直した値" in note for note in notes)
