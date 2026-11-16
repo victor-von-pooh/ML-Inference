@@ -20,7 +20,7 @@ BUNDLE_FORMAT_VERSION = 1
 # inference.yaml の一番上の項目
 TOP_KEYS = (
     "format_version", "name", "created_at", "model", "inputs", "dataset",
-    "run", "conclusion", "notes"
+    "run", "conclusion", "check", "notes"
 )
 
 # 出力の扱い方
@@ -34,6 +34,13 @@ SAMPLE_ROWS = 8
 
 # 読める ML-Found の run.json の版
 RUN_FORMAT_VERSION = 1
+
+# 実験の記録と比べるときに推論する行の上限と, 合うとみなす差 (割合)
+CHECK_ROWS = 20000
+CHECK_TOLERANCE = 0.02
+
+# 実験の監視した指標の名前 (/ の後) から, 比べられる指標
+METRIC_NAMES = {"acc": "acc", "accuracy": "acc", "mae": "mae"}
 
 
 @dataclass
@@ -595,6 +602,13 @@ def make_bundle(
         )
         bundle = load_bundle(target)
         check_sample(bundle, full)
+        info["check"] = check_against_run(bundle, full, run)
+        if info["check"] and info["check"]["matches"] is False:
+            info["notes"].append(check_note(info["check"]))
+        (target / "inference.yaml").write_text(
+            yaml.safe_dump(info, allow_unicode=True, sort_keys=False),
+            encoding="utf-8"
+        )
         if conclusion:
             errors = check_rules(conclusion, bundle.task, bundle.classes)
             if errors:
@@ -658,3 +672,113 @@ def check_sample(bundle: Bundle, dataset: Dataset) -> None:
             f"見本の推論に失敗しました ({type(error).__name__}: {error}). "
             "入力のつなぎ方 (inputs) と定義の入力の形を確かめてください"
         ) from error
+
+
+def check_against_run(
+    bundle: Bundle, dataset: Dataset, run: Optional[dict]
+) -> Optional[dict]:
+    """
+    データセットの分割を一式で推論した評価を, 実験の記録と比べる関数
+
+    学習のスクリプトが前処理の外でしたこと (並びの先頭の番号, 目的の値の
+    標準化など) を一式に書き忘れると, 形は合っても予測が誤る. 検証用の
+    分割の正解率か平均絶対誤差が, 実験の記録 (ベストの値) と合うかで見つける
+
+    Parameters
+    ----------
+    bundle: Bundle
+        作っている一式
+    dataset: Dataset
+        分割の表を持つデータセット
+    run: Optional[dict]
+        実験の状態 (run_summary の結果)
+
+    Returns
+    ----------
+    check: Optional[dict]
+        split, rows, metric, value, recorded (実験の記録. 比べられなければ
+        None), matches (合うか. 比べられなければ None). 目的の値の無い
+        データセットは None
+    """
+    # 予測の関数はこのモジュールを読むので, 使うときに読み込む
+    from ml_inference.predict import (
+        decode, inverse_target, run_model, shape_inputs
+    )
+
+    # 検証用の分割 (無ければテスト用, 学習用) の前処理の後の配列
+    if not dataset.target or not dataset.frames:
+        return None
+    split = next(
+        (s for s in ("valid", "test", "train") if s in dataset.frames), None
+    )
+    if split is None:
+        return None
+    x, y = dataset.arrays(split)
+    if y is None or len(y) == 0:
+        return None
+    rows = min(len(y), CHECK_ROWS)
+    sources = {}
+    if bundle.kind in ("table", "timeseries"):
+        sources["features"] = np.array(x[:rows])
+    else:
+        sources["items"] = np.array(x[:rows])
+    columns = decode(
+        bundle, run_model(bundle, shape_inputs(bundle, sources), 256, "cpu")
+    )
+
+    # 分類は正解率, 回帰と予測は元の単位の平均絶対誤差
+    if bundle.task == "classification":
+        answers = np.array([bundle.classes[int(i)] for i in y[:rows]])
+        metric = "acc"
+        value = float(np.mean(np.array(columns["prediction"]) == answers))
+    else:
+        answers = inverse_target(bundle, np.asarray(y[:rows]))
+        metric = "mae"
+        value = float(np.mean(np.abs(columns["prediction"] - answers)))
+
+    # 監視した指標が同じで, 最終の重みがベストのときだけ記録と比べる
+    recorded, matches = None, None
+    monitor = str((run or {}).get("monitor") or "")
+    phase, _, name = monitor.partition("/")
+    comparable = (
+        run is not None and phase == split and rows == len(y)
+        and METRIC_NAMES.get(name) == metric
+        and run.get("final_weights") == "best"
+        and isinstance(run.get("best_value"), (int, float))
+    )
+    if comparable:
+        recorded = float(run["best_value"])
+        gap = abs(value - recorded) / max(abs(recorded), 1e-12)
+        matches = bool(gap <= CHECK_TOLERANCE)
+    check = {
+        "split": split, "rows": int(rows), "metric": metric, "value": value,
+        "recorded": recorded, "matches": matches,
+    }
+
+    return check
+
+
+def check_note(check: dict) -> str:
+    """
+    実験の記録と合わない評価の注意の文を返す関数
+
+    Parameters
+    ----------
+    check: dict
+        check_against_run の結果
+
+    Returns
+    ----------
+    note: str
+        注意の文
+    """
+    # 前処理の外でしたことの書き忘れを疑う
+    note = (
+        f"{check['split']} の分割を一式で推論した {check['metric']} "
+        f"{check['value']:.4g} が, 実験の記録 {check['recorded']:.4g} と"
+        "合いません. 学習のスクリプトが前処理の外でしたこと (並びの先頭の"
+        "番号 prepend, 目的の値の標準化 target_scale など) を一式に書いたか"
+        "確かめてください"
+    )
+
+    return note
