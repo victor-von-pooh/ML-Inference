@@ -59,8 +59,12 @@ def infer(
     if forecast:
         prediction = forecast_rows(bundle, source, options, batch_size,
                                    device)
-        target = bundle.dataset.info.get("target")
-        ahead = prediction["step"].notna() | prediction[target].isna()
+        ahead = prediction.attrs.get("ahead")
+        if ahead is None or not ahead.any():
+            raise ValueError(
+                "先の行 (系列ごとに最後の分かる値より後の, 目的の列が空の行)"
+                "がありません. 予測したい行の目的の列を空にして渡してください"
+            )
         prediction = prediction[ahead].reset_index(drop=True)
     else:
         prediction = predict(bundle, source, options, batch_size, device)

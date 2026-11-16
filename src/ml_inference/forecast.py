@@ -150,7 +150,8 @@ def forecast(
     ----------
     result: pd.DataFrame
         predict の表に, step (何段目の予測か. 先の行でなければ欠損) を
-        足した表. 先の行の目的の列には予測した値が入る
+        足した表. 先の行の目的の列には予測した値が入る. 先の行の印は
+        result.attrs["ahead"] (行ごとの真偽値)
 
     Raises
     ----------
@@ -189,8 +190,12 @@ def forecast(
     behind = pd.Series(left).groupby(keys).cumsum().to_numpy() > 1
     blocked = left & (behind | (result["reason"] == "").to_numpy())
     result.loc[blocked, "reason"] = BLOCKED
+    result["ahead"] = future
     result.index = order
     result = result.sort_index().reset_index(drop=True)
+    # 先の行の印は表の外に (列は predict の表と同じにする)
+    ahead = result.pop("ahead").to_numpy(dtype=bool)
+    result.attrs["ahead"] = ahead
 
     return result
 
