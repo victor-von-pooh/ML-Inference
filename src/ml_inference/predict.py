@@ -98,6 +98,11 @@ def features_of(
     try:
         frame = bundle.dataset.transform(data.frame)
         failed = [""] * len(frame)
+        # 行を落とす手順で落ちた行 (ML-EDA が手順の名前を返す場合)
+        for row, op in (frame.attrs.get("dropped") or {}).items():
+            failed[int(row)] = (
+                f"前処理の手順 {op} で除く行です (学習でも使わない行)"
+            )
     except ValueError as error:
         steps = [s["op"] for s in bundle.dataset.recipe.get("steps", [])]
         if "lag" in steps or "前処理の後に, 学習に使う列が足りません" in str(

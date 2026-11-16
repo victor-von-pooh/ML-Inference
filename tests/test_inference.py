@@ -684,3 +684,41 @@ def test_rule_combinations(
     file.write_text(yaml.safe_dump(info, allow_unicode=True), "utf-8")
     with pytest.raises(ValueError, match="使えません"):
         load_bundle(path)
+
+
+def test_rows_dropped_by_recipe(tmp_path: Path) -> None:
+    """
+    レシピの行を落とす手順で落ちる行を, 理由を付けて飛ばすことを確かめる
+    関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 負の a の行を落とすレシピ
+    rng = np.random.default_rng(2)
+    frame = pd.DataFrame({"a": rng.normal(size=30), "y": rng.normal(size=30)})
+    source = tmp_path / "d.csv"
+    frame.to_csv(source, index=False)
+    recipe = {
+        "format_version": 1, "target": "y", "task": "regression",
+        "steps": [{"op": "filter_rows", "column": "a", "compare": ">=",
+                   "value": 0}],
+        "split": {"method": "random", "valid": 0.2, "seed": 0},
+    }
+    dataset = tmp_path / "dataset"
+    export_dataset(load_data(source), recipe, dataset)
+    spec = linear_spec(1, 1)
+    weights = save_weights(spec, tmp_path / "w.pt")
+    path = tmp_path / "bundle"
+    make_bundle(path, spec, dataset, weights)
+
+    # 負の行は理由付きで飛ばし, 他は予測
+    result = predict(path, pd.DataFrame({"a": [-1.0, 0.5]}))
+    assert list(result["status"]) == ["skipped", "ok"]
+    assert "filter_rows" in result.loc[0, "reason"]
