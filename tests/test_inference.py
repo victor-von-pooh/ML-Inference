@@ -765,6 +765,7 @@ def test_check_against_run(tmp_path: Path, table_dataset: Path) -> None:
         assert np.isclose(info["check"]["value"], accuracy)
         assert info["check"]["matches"] is expected
         assert any("合いません" in n for n in info["notes"]) is not expected
+        assert describe_bundle(tmp_path / "b")["check"] == info["check"]
 
     # 監視した指標が違えば比べない
     state["monitor"] = "valid/loss"
