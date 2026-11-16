@@ -8,7 +8,7 @@ from conftest import linear_spec
 from ml_eda import export_dataset, load_data
 from ml_modelcontrol import build_model
 
-from ml_inference import forecast, make_bundle, predict
+from ml_inference import forecast, infer, make_bundle, predict
 
 
 def test_forecast_steps_per_series(tmp_path: Path) -> None:
@@ -62,6 +62,11 @@ def test_forecast_steps_per_series(tmp_path: Path) -> None:
     assert np.allclose(tail["y"], [30, 130, 31, 131, 32])
     assert result["step"].iloc[:60].isna().all()
     assert (tail["status"] == "ok").all()
+
+    # infer では先の行だけの結論
+    concluded = infer(tmp_path / "bundle", given, forecast=True)
+    assert len(concluded["frame"]) == 5
+    assert concluded["sentences"][0] == "5 件のうち 5 件を予測"
 
 
 def test_forecast_edge_cases(tmp_path: Path) -> None:
