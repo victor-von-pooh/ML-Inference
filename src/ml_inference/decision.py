@@ -266,7 +266,8 @@ def row_quantiles(
     result: tuple[np.ndarray, bool]
         (行の数, 99) の分位点と, 段ごとの外れ方を使った行があるか
     """
-    # 測った段より先は, 測った中で最も先の段
+    # 1 段目は全ての行で測った記録のまま (段ごとの 1 段目は予測を始めた
+    # 時刻の行だけで少ない). 測った段より先は, 測った中で最も先の段
     rows = np.tile(quantiles, (len(frame), 1))
     steps = (bundle.info.get("uncertainty") or {}).get("steps") or {}
     measured = sorted(int(k) for k in steps if k != "rows")
@@ -275,7 +276,9 @@ def row_quantiles(
     step = pd.to_numeric(frame["step"], errors="coerce").to_numpy()
     used = False
     for number in np.unique(step[np.isfinite(step)]).astype(int):
-        near = [m for m in measured if m <= number]
+        if number <= 1:
+            continue
+        near = [m for m in measured if 1 < m <= number]
         if not near:
             continue
         rows[step == number] = np.asarray(steps[str(near[-1])], dtype=float)
@@ -283,6 +286,27 @@ def row_quantiles(
     result = (rows, used)
 
     return result
+
+
+def max_step(uncertainty: dict) -> int:
+    """
+    段ごとの外れ方を測れた最も先の段を返す関数
+
+    Parameters
+    ----------
+    uncertainty: dict
+        一式の外れ方の記録
+
+    Returns
+    ----------
+    step: int
+        段 (測れていなければ 0)
+    """
+    # rows 以外の段の名前
+    steps = uncertainty.get("steps") or {}
+    step = max((int(k) for k in steps if k != "rows"), default=0)
+
+    return step
 
 
 def outcomes(
@@ -836,8 +860,8 @@ def caveats(
         ).any():
             notes.append(
                 "2 段目より先の予測には, 段ごとに測った外れ方を当てた ("
-                f"{uncertainty.get('horizon')} 段まで. それより先は最も"
-                "先の段の外れ方)"
+                f"{max_step(uncertainty)} 段まで. それより先は最も先の段の"
+                "外れ方)"
                 if summary.get("by_step") else
                 "2 段目より先の予測にも 1 つ先の外れ方を当てている (先の段"
                 "ほど外れ方は大きく, 量は少なめ. 実績で段ごとの外れ方を"

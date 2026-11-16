@@ -169,6 +169,35 @@ def class_remeasure(
     return result
 
 
+def history_length(bundle: Bundle) -> int:
+    """
+    過去の値の列を作るのに要る, 予測を始める時刻より前の時刻の数を返す
+    関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+
+    Returns
+    ----------
+    count: int
+        過去の値の手順の最も長いずらしと窓の和の 2 倍と 2 (日の抜けなど
+        への余裕)
+    """
+    # lag の手順の lags と windows の最大
+    longest = 1
+    for spec in bundle.dataset.recipe.get("steps", []):
+        if spec["op"] != "lag":
+            continue
+        lags = [int(v) for v in spec.get("lags") or [1]]
+        windows = [int(v) for v in spec.get("windows") or [0]]
+        longest = max(longest, max(lags) + max(windows))
+    count = 2 * longest + 2
+
+    return count
+
+
 def step_errors(
     bundle: Bundle, frame: pd.DataFrame, keep: np.ndarray, horizon: int,
     time: str
@@ -202,12 +231,16 @@ def step_errors(
     times = np.sort(when[keep].dropna().unique())
     origins = times[::horizon][-MAX_ORIGINS:]
     every = np.sort(when.dropna().unique())
+    history = history_length(bundle)
     parts = []
     for origin in origins:
-        # 始めの時刻から horizon 個の時刻を空にして, それより後は渡さない
+        # 始めの時刻から horizon 個の時刻の目的の値は空にし, それより後の
+        # 行と, 過去の値に要らない前の行は除く (計算を軽くするため)
         later = every[every >= origin]
         end = later[min(horizon, len(later)) - 1]
-        part = frame[(when <= end).to_numpy()].copy()
+        earlier = every[every < origin]
+        first = earlier[-history] if len(earlier) >= history else every[0]
+        part = frame[((when <= end) & (when >= first)).to_numpy()].copy()
         inside = (when[part.index] >= origin).to_numpy()
         actual = pd.to_numeric(part[target], errors="coerce").to_numpy(
             dtype=float, copy=True
@@ -499,7 +532,8 @@ def remeasure(
     # 予測と, 測る行
     if not isinstance(bundle, Bundle):
         bundle = load_bundle(bundle)
-    table = predict(bundle, source, options)
+    data = read_source(bundle, source, options)
+    table = predict(bundle, data)
     keep = counted_rows(bundle, table, count)
     target = str(bundle.dataset.info.get("target"))
     old = dict(bundle.info.get("uncertainty") or {})
@@ -539,9 +573,7 @@ def remeasure(
     # 何段も先の外れ方 (1 段目の記録と同じ形)
     if horizon is not None:
         time = step_time(bundle, table, horizon, time)
-        frame = read_source(bundle, source, options).frame.reset_index(
-            drop=True
-        )
+        frame = data.frame.reset_index(drop=True)
         errors = step_errors(bundle, frame, keep, int(horizon), time)
         uncertainty["steps"] = step_quantiles(errors, uncertainty["kind"])
         uncertainty["horizon"] = int(horizon)
