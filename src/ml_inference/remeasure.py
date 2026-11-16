@@ -10,13 +10,17 @@ from ml_eda import Data
 
 from ml_inference.bundle import Bundle, load_bundle
 from ml_inference.decision import amount_text, label_text
-from ml_inference.predict import predict
+from ml_inference.forecast import forecast
+from ml_inference.predict import lag_settings, predict, read_source
 from ml_inference.uncertainty import (
-    class_calibration, interval, residual_quantiles
+    adjusted_levels, class_calibration, interval, residual_quantiles
 )
 
 # 測り直すのに要る行の数の下限
 REMEASURE_MIN_ROWS = 20
+
+# 何段も先の外れ方で, 予測を始める時刻の数の上限 (新しい方から)
+MAX_ORIGINS = 30
 
 
 def counted_rows(
@@ -165,6 +169,219 @@ def class_remeasure(
     return result
 
 
+def history_length(bundle: Bundle) -> int:
+    """
+    過去の値の列を作るのに要る, 予測を始める時刻より前の時刻の数を返す
+    関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+
+    Returns
+    ----------
+    count: int
+        過去の値の手順の最も長いずらしと窓の和の 2 倍と 2 (日の抜けなど
+        への余裕)
+    """
+    # lag の手順の lags と windows の最大
+    longest = 1
+    for spec in bundle.dataset.recipe.get("steps", []):
+        if spec["op"] != "lag":
+            continue
+        lags = [int(v) for v in spec.get("lags") or [1]]
+        windows = [int(v) for v in spec.get("windows") or [0]]
+        longest = max(longest, max(lags) + max(windows))
+    count = 2 * longest + 2
+
+    return count
+
+
+def step_errors(
+    bundle: Bundle, frame: pd.DataFrame, keep: np.ndarray, horizon: int,
+    time: str
+) -> pd.DataFrame:
+    """
+    予測を始める時刻をずらしながら何段も先まで予測し, 段ごとの予測と実際
+    の値を集める関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式 (目的の列の過去の値を使う回帰と予測の一式)
+    frame: pd.DataFrame
+        読み込んだ実績 (目的の列が分かる)
+    keep: np.ndarray
+        測る行の印 (予測を始める時刻と, 誤りを数える行はこの中だけ)
+    horizon: int
+        何段先まで
+    time: str
+        時刻の列
+
+    Returns
+    ----------
+    errors: pd.DataFrame
+        origin (予測を始めた時刻), step, prediction, actual
+    """
+    # 予測を始める時刻は, 測る行の時刻を horizon おきに (新しい方から
+    # MAX_ORIGINS まで)
+    target = str(bundle.dataset.info.get("target"))
+    when = pd.to_datetime(frame[time], errors="coerce", format="mixed")
+    times = np.sort(when[keep].dropna().unique())
+    origins = times[::horizon][-MAX_ORIGINS:]
+    every = np.sort(when.dropna().unique())
+    history = history_length(bundle)
+    parts = []
+    for origin in origins:
+        # 始めの時刻から horizon 個の時刻の目的の値は空にし, それより後の
+        # 行と, 過去の値に要らない前の行は除く (計算を軽くするため)
+        later = every[every >= origin]
+        end = later[min(horizon, len(later)) - 1]
+        earlier = every[every < origin]
+        first = earlier[-history] if len(earlier) >= history else every[0]
+        part = frame[((when <= end) & (when >= first)).to_numpy()].copy()
+        inside = (when[part.index] >= origin).to_numpy()
+        actual = pd.to_numeric(part[target], errors="coerce").to_numpy(
+            dtype=float, copy=True
+        )
+        part.loc[inside, target] = np.nan
+        result = forecast(bundle, part.reset_index(drop=True))
+        step = result["step"].to_numpy(dtype=float)
+        counted = inside & keep[part.index] & ~np.isnan(step) & np.isfinite(
+            actual
+        )
+        parts.append(pd.DataFrame({
+            "origin": origin,
+            "step": step[counted].astype(int),
+            "prediction": pd.to_numeric(
+                result["prediction"], errors="coerce"
+            ).to_numpy(dtype=float)[counted],
+            "actual": actual[counted],
+        }))
+    errors = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(
+        columns=["origin", "step", "prediction", "actual"]
+    )
+
+    return errors
+
+
+def step_time(
+    bundle: Bundle, table: pd.DataFrame, horizon: Any, time: Optional[str]
+) -> str:
+    """
+    何段も先の外れ方を測れるかを確かめ, 時刻の列を返す関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+    table: pd.DataFrame
+        predict の表
+    horizon: Any
+        段の数
+    time: Optional[str]
+        時刻の列 (省略は前処理の時刻でずらす列)
+
+    Returns
+    ----------
+    column: str
+        時刻の列
+
+    Raises
+    ----------
+    ValueError
+        分類の一式, 目的の列の過去の値を使わない一式, 段の数が 2 より
+        小さい場合, 時刻の列が無い場合
+    """
+    # 何段も先まで予測できる一式と, 時刻の列
+    settings = lag_settings(bundle)
+    target = bundle.dataset.info.get("target")
+    if bundle.task == "classification" or target not in settings["columns"]:
+        raise ValueError("何段も先の外れ方は, 目的の列の過去の値を使う回帰"
+                         "と予測の一式だけで測れます")
+    if not isinstance(horizon, (int, np.integer)) or horizon < 2:
+        raise ValueError("horizon は 2 以上の整数にしてください")
+    times = sorted(c for c in settings["time"] if c in table.columns)
+    column = time or (times[0] if times else None)
+    if column is None or column not in table.columns:
+        raise ValueError("予測を始める時刻の列 (time) を指定してください")
+
+    return str(column)
+
+
+def step_quantiles(errors: pd.DataFrame, kind: str) -> dict:
+    """
+    段ごとの誤りの分位点を求める関数
+
+    Parameters
+    ----------
+    errors: pd.DataFrame
+        step_errors の結果
+    kind: str
+        relative か absolute (1 段目の記録と同じ形)
+
+    Returns
+    ----------
+    steps: dict
+        段 (文字) ごとの, 1 % から 99 % の分位点 (誤りが 20 より少ない段は
+        除く) と, rows (段ごとの誤りの数)
+    """
+    # 比の形は, 予測と実際の値が正の行だけ
+    usable = errors
+    if kind == "relative":
+        usable = errors[(errors["prediction"] > 0) & (errors["actual"] > 0)]
+        gap = np.log(usable["actual"] / usable["prediction"])
+    else:
+        gap = usable["actual"] - usable["prediction"]
+    steps: dict = {"rows": {}}
+    for step, values in gap.groupby(usable["step"]):
+        steps["rows"][str(step)] = int(len(values))
+        if len(values) >= REMEASURE_MIN_ROWS:
+            steps[str(step)] = [
+                float(v) for v in np.percentile(
+                    values, adjusted_levels(len(values))
+                )
+            ]
+
+    return steps
+
+
+def step_sentence(uncertainty: dict) -> str:
+    """
+    段ごとの外れ方の 80 % の幅を述べる文を作る関数
+
+    Parameters
+    ----------
+    uncertainty: dict
+        steps と kind と origins を持つ記録
+
+    Returns
+    ----------
+    sentence: str
+        文
+    """
+    # 段ごとの 10 % と 90 % の点
+    kind = uncertainty["kind"]
+    steps = uncertainty["steps"]
+    measured = sorted(int(k) for k in steps if k != "rows")
+    parts = []
+    for step in measured:
+        lower, upper = steps[str(step)][9], steps[str(step)][89]
+        parts.append(
+            f"{step} 段目 {np.exp(lower):.2f} から {np.exp(upper):.2f} 倍"
+            if kind == "relative"
+            else f"{step} 段目 {lower:+.4g} から {upper:+.4g}"
+        )
+    sentence = (
+        f"何段も先の外れ方 (予測を始める時刻 {uncertainty['origins']} 個): "
+        "80 % の幅は " + ", ".join(parts)
+        if parts else "何段も先の外れ方は, 誤りが少なく測れませんでした"
+    )
+
+    return sentence
+
+
 def remeasure_sentences(
     bundle: Bundle, rows: int, before: dict, uncertainty: dict
 ) -> list[str]:
@@ -217,6 +434,9 @@ def remeasure_sentences(
         sentences.append(
             f"測り直した外れ方の 80 % の幅は, {width} ({rows:,} 行で測った)"
         )
+        steps = uncertainty.get("steps")
+        if steps:
+            sentences.append(step_sentence(uncertainty))
         return sentences
     ece = uncertainty["calibration"]["ece"]
     recorded = before.get("ece")
@@ -267,7 +487,8 @@ def remeasure(
     bundle: Union[str, Path, Bundle],
     source: Union[str, Path, pd.DataFrame, Data],
     options: Optional[dict] = None, count: Optional[Any] = None,
-    write: bool = True
+    write: bool = True, horizon: Optional[int] = None,
+    time: Optional[str] = None
 ) -> dict:
     """
     目的の列が分かる新しい実績で, 一式の予測の外れ方を測り直す関数
@@ -285,6 +506,12 @@ def remeasure(
         渡し, 新しい期間だけで測る場合など. 省略は全ての行)
     write: bool = True
         一式に書き戻すか
+    horizon: Optional[int] = None
+        何段も先の外れ方も測る場合の段の数 (目的の列の過去の値を使う
+        回帰と予測の一式だけ. 予測を始める時刻を horizon おきにずらし
+        ながら何段も先まで予測し, 段ごとの誤りの分位点を steps に残す)
+    time: Optional[str] = None
+        horizon で予測を始める時刻の列 (省略は前処理の時刻でずらす列)
 
     Returns
     ----------
@@ -299,12 +526,14 @@ def remeasure(
     ----------
     ValueError
         目的の列が無い場合, 印の数が行の数と違う場合, 測れる行が少ない
-        場合, 一式のクラスに合うラベルの行が少ない場合
+        場合, 一式のクラスに合うラベルの行が少ない場合, horizon が使え
+        ない場合
     """
     # 予測と, 測る行
     if not isinstance(bundle, Bundle):
         bundle = load_bundle(bundle)
-    table = predict(bundle, source, options)
+    data = read_source(bundle, source, options)
+    table = predict(bundle, data)
     keep = counted_rows(bundle, table, count)
     target = str(bundle.dataset.info.get("target"))
     old = dict(bundle.info.get("uncertainty") or {})
@@ -340,6 +569,15 @@ def remeasure(
     )
     if original:
         uncertainty["original"] = original
+
+    # 何段も先の外れ方 (1 段目の記録と同じ形)
+    if horizon is not None:
+        time = step_time(bundle, table, horizon, time)
+        frame = data.frame.reset_index(drop=True)
+        errors = step_errors(bundle, frame, keep, int(horizon), time)
+        uncertainty["steps"] = step_quantiles(errors, uncertainty["kind"])
+        uncertainty["horizon"] = int(horizon)
+        uncertainty["origins"] = int(errors["origin"].nunique())
 
     # 文と, 書き戻し
     sentences = remeasure_sentences(bundle, rows, before, uncertainty)

@@ -3,11 +3,15 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+import torch
+from conftest import linear_spec
+from ml_eda import export_dataset, load_data
+from ml_modelcontrol import build_model
 from test_decision import classifier_bundle, regression_bundle
 
 from ml_inference import (
-    decide, describe_bundle, load_bundle, predict, remeasure,
-    restore_uncertainty
+    decide, describe_bundle, forecast, load_bundle, make_bundle, predict,
+    remeasure, restore_uncertainty
 )
 
 
@@ -139,3 +143,106 @@ def test_remeasure_classification(tmp_path: Path) -> None:
     notes = decide(bundle, predict(bundle, pd.DataFrame({"x": x})),
                    triage)["notes"]
     assert any("400 行で測り直した値" in note for note in notes)
+
+
+def walk_bundle(tmp_path: Path) -> tuple[Path, pd.DataFrame]:
+    """
+    2 つの店の売上が日ごとにランダムウォークする時系列と, 前の日の値を
+    そのまま予測する一式を作る関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    result: tuple[Path, pd.DataFrame]
+        一式のディレクトリと, 元のデータ
+    """
+    # k 段先の誤りの広がりは 1 段先の √k 倍
+    rng = np.random.default_rng(0)
+    days = pd.date_range("2025-01-01", periods=200).strftime("%Y-%m-%d")
+    walks = [500 + np.cumsum(rng.normal(0, 5, 200)) for _ in range(2)]
+    frame = pd.DataFrame({
+        "date": np.r_[days, days], "s": ["a"] * 200 + ["b"] * 200,
+        "y": np.r_[walks[0], walks[1]],
+    })
+    source = tmp_path / "w.csv"
+    frame.to_csv(source, index=False)
+    recipe = {
+        "format_version": 1, "target": "y", "task": "forecasting",
+        "steps": [
+            {"op": "lag", "columns": ["y"], "lags": [1], "by": ["s"],
+             "time": "date"},
+            {"op": "drop_missing"},
+            {"op": "drop_columns", "columns": ["s", "date"]},
+        ],
+        "split": {"method": "random", "valid": 0.3, "seed": 0},
+    }
+    export_dataset(load_data(source), recipe, tmp_path / "ds")
+    spec = linear_spec(1, 1)
+    model = build_model(spec)
+    with torch.no_grad():
+        model.nodes["head"].weight.fill_(1.0)
+        model.nodes["head"].bias.zero_()
+    torch.save(model.state_dict(), tmp_path / "w.pt")
+    make_bundle(tmp_path / "bundle", spec, tmp_path / "ds", tmp_path / "w.pt")
+    result = (tmp_path / "bundle", frame)
+
+    return result
+
+
+def test_remeasure_steps(tmp_path: Path) -> None:
+    """
+    何段も先の外れ方を段ごとに測り, 先の段ほど広く, 量の判断がその段の
+    外れ方を使うことを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 後ろ 100 日で, 5 段先まで
+    path, frame = walk_bundle(tmp_path)
+    count = (pd.to_datetime(frame["date"]) >= "2025-04-11").to_numpy()
+    result = remeasure(path, frame, count=count, horizon=5)
+    steps = result["uncertainty"]["steps"]
+    assert result["uncertainty"]["horizon"] == 5
+    assert set(steps) == {"rows", "1", "2", "3", "4", "5"}
+    width = {k: steps[k][89] - steps[k][9] for k in ("1", "5")}
+    assert width["5"] > 1.5 * width["1"]
+    assert any("何段も先の外れ方" in s for s in result["sentences"])
+
+    # 先の 5 日を予測して 9 : 1 で置くと, 5 段目は段ごとの外れ方で多め
+    future = pd.DataFrame({
+        "date": np.repeat(pd.date_range("2025-07-20", periods=5).strftime(
+            "%Y-%m-%d"
+        ), 2),
+        "s": ["a", "b"] * 5, "y": np.nan,
+    })
+    ahead = forecast(path, pd.concat([frame, future], ignore_index=True))
+    rows = ahead[ahead["step"].notna()].reset_index(drop=True)
+    decision = {"type": "quantity", "under_cost": 9, "over_cost": 1}
+    bundle = load_bundle(path)
+    decided = decide(bundle, rows, decision)
+    assert decided["summary"]["by_step"] is True
+    gap = decided["frame"]["level"] - rows["prediction"]
+    assert gap[rows["step"] == 5].mean() > gap[rows["step"] == 1].mean()
+    assert any("段ごとに測った外れ方" in n for n in decided["notes"])
+    empty = decide(bundle, rows.head(0), decision)
+    assert "決められる行がありません" in empty["sentences"][0]
+    skipped = rows.head(3).assign(status="skipped")
+    assert "決められる行" in decide(bundle, skipped, decision)["sentences"][0]
+
+    # 使えない場合
+    with pytest.raises(ValueError, match="2 以上"):
+        remeasure(path, frame, horizon=1, write=False)
+    (tmp_path / "r").mkdir()
+    reg = regression_bundle(tmp_path / "r")
+    with pytest.raises(ValueError, match="過去の値を使う"):
+        remeasure(reg, frame.assign(x=1.0), horizon=3, write=False)
