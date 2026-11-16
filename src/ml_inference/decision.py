@@ -770,6 +770,11 @@ def caveats(
                 + (" (外れ方を小さく見積もっている. 量は少なめ)"
                    if below[level - 1] < level / 100 - 0.05 else "")
             )
+        elif uncertainty.get("split") == "recent":
+            notes.append(
+                f"外れ方は渡した実績の {uncertainty.get('rows', 0):,} 行で"
+                "測り直した (その後に傾向が変われば, また測り直す)"
+            )
         if uncertainty.get("kind") == "absolute":
             notes.append(
                 "外れ方は水準に依らない差で持っている (大きな行では外れ方"
