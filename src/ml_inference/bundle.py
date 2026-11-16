@@ -35,8 +35,11 @@ SAMPLE_ROWS = 8
 # 読める ML-Found の run.json の版
 RUN_FORMAT_VERSION = 1
 
-# 実験の記録と比べるときに推論する行の上限と, 合うとみなす差 (割合)
-CHECK_ROWS = 20000
+# 実験の記録と比べるときに推論する行の上限, 比べられないときの行の数,
+# 1 回に推論する行の数, 合うとみなす差 (割合)
+CHECK_ROWS = 50000
+CHECK_SAMPLE_ROWS = 256
+CHECK_BATCH = 256
 CHECK_TOLERANCE = 0.02
 
 # 実験の監視した指標の名前 (/ の後) から, 比べられる指標
@@ -602,7 +605,14 @@ def make_bundle(
         )
         bundle = load_bundle(target)
         check_sample(bundle, full)
-        info["check"] = check_against_run(bundle, full, run)
+        # 記録との比べは注意のためなので, 失敗しても作るのは止めない
+        try:
+            info["check"] = check_against_run(bundle, full, run)
+        except Exception as error:
+            info["check"] = None
+            info["notes"].append(
+                f"検証用の分割を推論して記録と比べられませんでした ({error})"
+            )
         if info["check"] and info["check"]["matches"] is False:
             info["notes"].append(check_note(info["check"]))
         (target / "inference.yaml").write_text(
@@ -621,6 +631,45 @@ def make_bundle(
     target.rename(final)
 
     return info
+
+
+def split_sources(
+    bundle: Bundle, dataset: Dataset, split: str, start: int, stop: int
+) -> dict:
+    """
+    前処理を済ませた分割の一部を, 中身の出どころごとの配列にする関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        一式
+    dataset: Dataset
+        分割の表を持つデータセット
+    split: str
+        分割の名前
+    start: int
+        最初の行
+    stop: int
+        最後の行の次
+
+    Returns
+    ----------
+    sources: dict
+        features と items の配列 (あるものだけ)
+    """
+    # 中身の配列はファイルから必要な行だけを読む
+    x, _ = dataset.arrays(split)
+    sources = {}
+    if bundle.kind in ("table", "timeseries"):
+        sources["features"] = np.asarray(x[start:stop])
+    else:
+        sources["items"] = np.asarray(x[start:stop])
+        if dataset.features:
+            sources["features"] = dataset.frames[split][
+                dataset.features
+            ].to_numpy(dtype=np.float32)[start:stop]
+
+    return sources
 
 
 def check_sample(bundle: Bundle, dataset: Dataset) -> None:
@@ -650,16 +699,7 @@ def check_sample(bundle: Bundle, dataset: Dataset) -> None:
     split = "train" if "train" in dataset.frames else next(
         iter(dataset.frames)
     )
-    x, _ = dataset.arrays(split)
-    sources = {}
-    if bundle.kind in ("table", "timeseries"):
-        sources["features"] = np.array(x[:SAMPLE_ROWS])
-    else:
-        sources["items"] = np.array(x[:SAMPLE_ROWS])
-        if dataset.features:
-            sources["features"] = dataset.frames[split][
-                dataset.features
-            ].to_numpy(dtype=np.float32)[:SAMPLE_ROWS]
+    sources = split_sources(bundle, dataset, split, 0, SAMPLE_ROWS)
 
     # 形の誤りは分かりやすい文に (つなぎ方の誤りの文はそのまま)
     try:
@@ -705,7 +745,7 @@ def check_against_run(
         decode, inverse_target, run_model, shape_inputs
     )
 
-    # 検証用の分割 (無ければテスト用, 学習用) の前処理の後の配列
+    # 検証用の分割 (無ければテスト用, 学習用) と指標
     if not dataset.target or not dataset.frames:
         return None
     split = next(
@@ -713,39 +753,42 @@ def check_against_run(
     )
     if split is None:
         return None
-    x, y = dataset.arrays(split)
+    _, y = dataset.arrays(split)
     if y is None or len(y) == 0:
         return None
-    rows = min(len(y), CHECK_ROWS)
-    sources = {}
-    if bundle.kind in ("table", "timeseries"):
-        sources["features"] = np.array(x[:rows])
-    else:
-        sources["items"] = np.array(x[:rows])
-    columns = decode(
-        bundle, run_model(bundle, shape_inputs(bundle, sources), 256, "cpu")
-    )
+    metric = "acc" if bundle.task == "classification" else "mae"
 
-    # 分類は正解率, 回帰と予測は元の単位の平均絶対誤差
-    if bundle.task == "classification":
-        answers = np.array([bundle.classes[int(i)] for i in y[:rows]])
-        metric = "acc"
-        value = float(np.mean(np.array(columns["prediction"]) == answers))
-    else:
-        answers = inverse_target(bundle, np.asarray(y[:rows]))
-        metric = "mae"
-        value = float(np.mean(np.abs(columns["prediction"] - answers)))
-
-    # 監視した指標が同じで, 最終の重みがベストのときだけ記録と比べる
-    recorded, matches = None, None
+    # 監視した指標が同じで, 最終の重みがベストのときだけ記録と比べる.
+    # 比べられない場合は, 値を残すだけなので少しの行で済ませる
     monitor = str((run or {}).get("monitor") or "")
     phase, _, name = monitor.partition("/")
     comparable = (
-        run is not None and phase == split and rows == len(y)
+        run is not None and phase == split and len(y) <= CHECK_ROWS
         and METRIC_NAMES.get(name) == metric
         and run.get("final_weights") == "best"
         and isinstance(run.get("best_value"), (int, float))
     )
+    rows = len(y) if comparable else min(len(y), CHECK_SAMPLE_ROWS)
+
+    # 少しずつ推論して, 正解の数か誤差の合計だけを積み上げる
+    total = 0.0
+    for start in range(0, rows, CHECK_BATCH):
+        stop = min(rows, start + CHECK_BATCH)
+        sources = split_sources(bundle, dataset, split, start, stop)
+        columns = decode(
+            bundle,
+            run_model(bundle, shape_inputs(bundle, sources), stop, "cpu")
+        )
+        if metric == "acc":
+            answers = [bundle.classes[int(i)] for i in y[start:stop]]
+            total += float(np.sum(
+                np.array(columns["prediction"]) == np.array(answers)
+            ))
+        else:
+            answers = inverse_target(bundle, np.asarray(y[start:stop]))
+            total += float(np.sum(np.abs(columns["prediction"] - answers)))
+    value = total / rows
+    recorded, matches = None, None
     if comparable:
         recorded = float(run["best_value"])
         gap = abs(value - recorded) / max(abs(recorded), 1e-12)
@@ -778,7 +821,8 @@ def check_note(check: dict) -> str:
         f"{check['value']:.4g} が, 実験の記録 {check['recorded']:.4g} と"
         "合いません. 学習のスクリプトが前処理の外でしたこと (並びの先頭の"
         "番号 prepend, 目的の値の標準化 target_scale など) を一式に書いたか"
-        "確かめてください"
+        "確かめてください (学習のスクリプトが指標を元の単位でない値や違う"
+        "決まりで求めている場合も合いません)"
     )
 
     return note
