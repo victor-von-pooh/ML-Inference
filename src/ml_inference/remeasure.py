@@ -332,6 +332,14 @@ def remeasure(
         key: old.get(key) for key in ("split", "rows", "kind")
         if old.get(key) is not None
     }
+    # 一式を作ったときの記録は丸ごと残す (restore_uncertainty で戻すため.
+    # 何度測り直しても最初の記録)
+    original = old.get("original") if old.get("split") == "recent" else (
+        {key: value for key, value in old.items() if key != "original"}
+        if old else None
+    )
+    if original:
+        uncertainty["original"] = original
 
     # 文と, 書き戻し
     sentences = remeasure_sentences(bundle, rows, before, uncertainty)
@@ -346,3 +354,36 @@ def remeasure(
     }
 
     return result
+
+
+def restore_uncertainty(bundle: Union[str, Path, Bundle]) -> dict:
+    """
+    測り直した一式の外れ方を, 一式を作ったときの記録に戻す関数
+
+    Parameters
+    ----------
+    bundle: Union[str, Path, Bundle]
+        推論の一式かそのディレクトリ
+
+    Returns
+    ----------
+    uncertainty: dict
+        戻した記録
+
+    Raises
+    ----------
+    ValueError
+        測り直していない一式と, 作ったときの記録が残っていない場合
+    """
+    # 測り直した記録の original を書き戻す
+    if not isinstance(bundle, Bundle):
+        bundle = load_bundle(bundle)
+    now = bundle.info.get("uncertainty") or {}
+    if now.get("split") != "recent" or not now.get("original"):
+        raise ValueError("戻せる記録がありません (測り直していない一式か,"
+                         " 作ったときの記録が残っていない一式です)")
+    uncertainty = dict(now["original"])
+    write_uncertainty(bundle, uncertainty)
+
+    return uncertainty
+

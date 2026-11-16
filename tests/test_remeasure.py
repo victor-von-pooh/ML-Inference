@@ -6,7 +6,8 @@ import pytest
 from test_decision import classifier_bundle, regression_bundle
 
 from ml_inference import (
-    decide, describe_bundle, load_bundle, predict, remeasure
+    decide, describe_bundle, load_bundle, predict, remeasure,
+    restore_uncertainty
 )
 
 
@@ -54,6 +55,17 @@ def test_remeasure_regression(tmp_path: Path) -> None:
     summary = describe_bundle(path)["uncertainty"]
     assert summary["split"] == "recent" and summary["rows"] == 300
     assert summary["measured_at"] and "absolute" not in summary
+    assert summary["restorable"] is True
+
+    # 2 回測り直しても, 戻すのは一式を作ったときの記録
+    first = load_bundle(path).info["uncertainty"]["original"]
+    remeasure(path, recent.head(100))
+    assert load_bundle(path).info["uncertainty"]["original"] == first
+    restored = restore_uncertainty(path)
+    assert restored["split"] == "valid" and "test_below" in restored
+    assert load_bundle(path).info["uncertainty"] == first
+    with pytest.raises(ValueError, match="戻せる記録"):
+        restore_uncertainty(path)
 
 
 def test_remeasure_count_and_errors(tmp_path: Path) -> None:

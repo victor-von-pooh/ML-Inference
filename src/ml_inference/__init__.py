@@ -10,7 +10,7 @@ from ml_inference.decision import backtest, check_decision, decide
 from ml_inference.explain import explain
 from ml_inference.forecast import forecast
 from ml_inference.predict import OK, SKIPPED, describe_bundle, predict
-from ml_inference.remeasure import remeasure
+from ml_inference.remeasure import remeasure, restore_uncertainty
 from ml_inference.result import infer, write_result
 
 try:
@@ -38,5 +38,6 @@ __all__ = [
     "make_bundle",
     "predict",
     "remeasure",
+    "restore_uncertainty",
     "write_result",
 ]

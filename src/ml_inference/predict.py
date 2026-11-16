@@ -658,8 +658,8 @@ def uncertainty_summary(uncertainty: Optional[dict]) -> Optional[dict]:
     Returns
     ----------
     summary: Optional[dict]
-        split, rows, kind, measured_at, coverage, ece (記録が無ければ
-        None)
+        split, rows, kind, measured_at, coverage, ece, restorable
+        (作ったときの記録に戻せるか). 記録が無ければ None
     """
     # 画面に出す値だけ (分位点と区間ごとの表は大きいので除く)
     if not uncertainty:
@@ -672,6 +672,7 @@ def uncertainty_summary(uncertainty: Optional[dict]) -> Optional[dict]:
         "measured_at": uncertainty.get("measured_at"),
         "coverage": uncertainty.get("coverage"),
         "ece": uncertainty.get("test_ece", calibration.get("ece")),
+        "restorable": bool(uncertainty.get("original")),
     }
 
     return summary

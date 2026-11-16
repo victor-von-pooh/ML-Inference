@@ -116,6 +116,26 @@ def test_backtest_quantity(tmp_path: Path) -> None:
     half = backtest(path, frame, decision, count=np.arange(300) < 150)
     assert half["rows"] == 150
 
+    # 時刻でずらさない一式の自動は行ごと. まとまりで選び直すと幅が広がる
+    # (10 行ずつ同じ値の並び: 似た行のまとまり)
+    assert result["group"] is None
+    block = frame.iloc[np.repeat(np.arange(30), 10)].reset_index(drop=True)
+    rowwise = backtest(path, block, decision, group=None)
+    grouped = backtest(path, block, decision,
+                       group=np.repeat(np.arange(30), 10))
+    assert grouped["group"] == {"name": "渡したまとまり", "count": 30}
+    low, high = rowwise["gaps"]["予測の値どおりに置く"]["range"]
+    wide_low, wide_high = grouped["gaps"]["予測の値どおりに置く"]["range"]
+    assert wide_high - wide_low > 2 * (high - low)
+    assert "ごとに選び直した" in grouped["sentences"][1]
+    named = backtest(path, block.assign(day=np.repeat(np.arange(30), 10)),
+                     decision, group="day")
+    assert named["group"]["count"] == 30
+    with pytest.raises(ValueError, match="まとまり"):
+        backtest(path, block, decision, group="no_such")
+    with pytest.raises(ValueError, match="まとまり"):
+        backtest(path, block, decision, group=np.arange(5))
+
 
 def classifier_bundle(tmp_path: Path) -> Path:
     """
