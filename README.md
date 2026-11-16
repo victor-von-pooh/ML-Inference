@@ -104,7 +104,7 @@ result = forecast("bundles/sales", "sales_with_next_week.csv")
 print(result[result["step"].notna()][["date", "store", "step", "prediction"]])
 ```
 
-`step` は何段目の予測か (過去の行は空). 先ほど誤りが積み重なる.
+`step` は何段目の予測か (過去の行は空). 先の段ほど誤りが積み重なる.
 
 ### どの列が予測を動かしているか
 
