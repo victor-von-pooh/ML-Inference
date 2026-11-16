@@ -245,6 +245,10 @@ def test_remeasure_steps(tmp_path: Path) -> None:
     for column in ("s", "y"):
         with pytest.raises(ValueError, match="日時として読めません"):
             remeasure(path, frame, horizon=5, time=column, write=False)
+    numbered = frame.assign(t=np.r_[np.arange(200), np.arange(200)])
+    counted = remeasure(path, numbered, horizon=5, time="t", write=False,
+                        count=count)
+    assert counted["uncertainty"]["origins"] > 0
     (tmp_path / "r").mkdir()
     reg = regression_bundle(tmp_path / "r")
     with pytest.raises(ValueError, match="過去の値を使う"):

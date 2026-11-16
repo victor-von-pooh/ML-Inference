@@ -306,8 +306,13 @@ def step_time(
     column = time or (times[0] if times else None)
     if column is None or column not in table.columns:
         raise ValueError("予測を始める時刻の列 (time) を指定してください")
-    # 数の列と, 日時に読めない値の多い列は時刻にしない
+    # 整数の列 (期の番号) は順番として認め, 他の数の列と, 日時として
+    # 読めない値の多い列の除外
     values = table[column]
+    if pd.api.types.is_integer_dtype(values) and not (
+        pd.api.types.is_bool_dtype(values)
+    ):
+        return str(column)
     parsed = pd.to_datetime(values, errors="coerce", format="mixed")
     if pd.api.types.is_numeric_dtype(values) or parsed.notna().mean() < 0.5:
         raise ValueError(f"列 {column} は日時として読めません. 予測を始める"
