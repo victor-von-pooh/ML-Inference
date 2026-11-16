@@ -263,7 +263,7 @@ def test_review_fixes(tmp_path: Path) -> None:
     assert result["frame"]["action"].iloc[0] == 0
     assert np.isnan(result["frame"]["action"].iloc[1])
     assert result["summary"]["missing"] == 1
-    assert any("欠けた 1 行" in note for note in result["notes"])
+    assert any("範囲の外の) 1 行" in note for note in result["notes"])
 
     # 費用の上限では, 費用あたりの得の順の方が良ければそれを使い, 比べる
     # やり方も上限を守る
@@ -338,3 +338,52 @@ def test_default_decision(tmp_path: Path) -> None:
                     decision={"type": "quantity", "under_cost": 1,
                               "over_cost": 1})
     assert path.exists()
+
+
+def test_bool_labels_and_row_values(tmp_path: Path) -> None:
+    """
+    真偽の目的の列のたどり直しと, 列で書いた範囲の外の値を確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 真偽の目的の列 (クラスは False, True)
+    rng = np.random.default_rng(4)
+    x = rng.normal(size=200)
+    source = tmp_path / "b.csv"
+    pd.DataFrame({"x": x, "label": x > 0}).to_csv(source, index=False)
+    recipe = {
+        "format_version": 1, "target": "label", "task": "classification",
+        "steps": [],
+        "split": {"method": "random", "valid": 0.3, "seed": 0},
+    }
+    export_dataset(load_data(source), recipe, tmp_path / "ds")
+    spec = linear_spec(1, 2)
+    model = build_model(spec)
+    with torch.no_grad():
+        model.nodes["head"].weight.copy_(torch.tensor([[-3.0], [3.0]]))
+        model.nodes["head"].bias.zero_()
+    torch.save(model.state_dict(), tmp_path / "w.pt")
+    make_bundle(tmp_path / "bundle", spec, tmp_path / "ds", tmp_path / "w.pt")
+    positive = load_bundle(tmp_path / "bundle").classes[1]
+    triage = {"type": "triage", "positive": positive, "miss_cost": 5,
+              "false_alarm_cost": 1}
+    past = pd.DataFrame({"x": x, "label": x > 0})
+    policies = backtest(tmp_path / "bundle", past, triage)["policies"]
+    assert policies["どれも回さない"] < 0
+
+    # 範囲の外の効果の行と, 整数でない件数
+    frame = pd.DataFrame({"x": [1.0, 1.0], "effect": [0.5, 5.0]})
+    table = predict(tmp_path / "bundle", frame)
+    select = {"type": "select", "positive": positive, "value": 100,
+              "cost": 1, "effect": "effect"}
+    result = decide(tmp_path / "bundle", table, select)
+    assert result["summary"]["missing"] == 1
+    bundle = load_bundle(tmp_path / "bundle")
+    assert check_decision({**select, "budget": 1.5}, bundle)

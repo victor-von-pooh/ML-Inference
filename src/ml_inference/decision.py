@@ -138,6 +138,10 @@ def check_decision(
             name == "step" and value == 0
         )):
             errors.append(f"{name} は正の数にしてください")
+        elif name in ("budget", "capacity") and value is not None and (
+            value != int(value)
+        ):
+            errors.append(f"{name} は件数なので整数にしてください")
     current = decision.get("current")
     if current is not None and columns is not None and current not in columns:
         errors.append(f"current の列 {current} が予測の表にありません")
@@ -190,14 +194,17 @@ def amounts_of(
     result: tuple[dict[str, np.ndarray], np.ndarray]
         項目ごとの行ごとの値と, 値の欠けた行の印
     """
-    # 欠けた値の行は決めない (0 とみなすと, ただの行動や 1 % の点になる)
+    # 欠けた値と範囲の外の値 (負, 1 を超える効果) の行は決めない (0 と
+    # みなすと, ただの行動や 1 % の点になる)
     values = {
         name: values_of(frame, decision.get(name))
         for name in AMOUNTS[decision["type"]]
     }
     missing = np.zeros(len(frame), dtype=bool)
-    for array in values.values():
-        missing |= np.isnan(array)
+    for name, array in values.items():
+        missing |= np.isnan(array) | (array < 0)
+        if name == "effect":
+            missing |= array > 1
     result = (values, missing)
 
     return result
@@ -735,7 +742,8 @@ def caveats(
     notes = []
     if summary["missing"]:
         notes.append(
-            f"損得の値が欠けた {summary['missing']:,} 行は決めていない"
+            f"損得の値が欠けた (か範囲の外の) {summary['missing']:,} 行は"
+            "決めていない"
         )
     rows = uncertainty.get("rows")
     if rows is not None and rows < 100:
@@ -754,7 +762,8 @@ def caveats(
         if below and summary["tau_min"] is not None:
             level = int(np.clip(round(summary["tau_min"] * 100), 1, 99))
             notes.append(
-                f"外れ方は{SPLIT_NAMES.get(uncertainty.get('split'), '')}"
+                f"外れ方は"
+                f"{SPLIT_NAMES.get(uncertainty.get('split'), '検証用')}"
                 f"の分割で測った. {level}"
                 f" % の点を, テスト用の分割の実際の値が下回ったのは "
                 f"{below[level - 1] * 100:.0f} %"
@@ -829,8 +838,8 @@ def sentences_of(
     rows = summary["rows"]
     target = bundle.dataset.info.get("target") or "値"
     tail = (
-        " (同じ前提から計算した比べなので必ずこの方針が良く出る. 実際の差"
-        "は過去のデータでたどり直して確かめる)"
+        " (同じ前提から計算した比べなので, この方針は必ず同じか良く出る. "
+        "実際の差は過去のデータでたどり直して確かめる)"
     )
     if kind == "quantity":
         tau = range_text(summary["tau_min"], summary["tau_max"], True)
@@ -1101,12 +1110,17 @@ def label_text(values: pd.Series) -> pd.Series:
     texts: pd.Series
         文字 (1.0 のような整数の小数は 1 に)
     """
-    # 数の列は整数なら整数の文字に (空欄があると小数で読まれるため)
+    # 真偽の列はそのまま文字に (True, False). 数の列は, 整数の値だけ
+    # 整数の文字に (空欄があると小数で読まれるため)
+    if pd.api.types.is_bool_dtype(values):
+        texts = values.astype(str)
+        return texts
     numbers = pd.to_numeric(values, errors="coerce")
-    whole = numbers.notna() & (numbers == numbers.round())
-    texts = values.astype(str).where(
-        ~whole, numbers.round().astype("Int64").astype(str)
-    )
+    whole = numbers.notna() & np.isfinite(numbers) & (
+        numbers == numbers.round()
+    ) & (numbers.abs() < 2 ** 53)
+    texts = values.astype(str)
+    texts[whole] = numbers[whole].astype("int64").astype(str)
 
     return texts
 

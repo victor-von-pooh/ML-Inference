@@ -77,11 +77,10 @@ def adjusted_levels(count: int) -> np.ndarray:
     levels: np.ndarray
         1 % から 99 % に対応する, ずらした水準 (0 から 100)
     """
-    # 上側は (n + 1) q / n, 下側は 1 から同じだけ離す
+    # 中央 (50 %) からの離れを (n + 1) / n 倍に広げる (中央は動かさない.
+    # 量の判断の τ = 0.5 が偏らないように)
     q = np.asarray(LEVELS, dtype=float) / 100
-    upper = np.minimum(q * (count + 1) / count, 1.0)
-    lower = np.maximum(1 - (1 - q) * (count + 1) / count, 0.0)
-    levels = np.where(q >= 0.5, upper, lower) * 100
+    levels = np.clip(0.5 + (q - 0.5) * (count + 1) / count, 0.0, 1.0) * 100
 
     return levels
 
