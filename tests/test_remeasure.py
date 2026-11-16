@@ -242,6 +242,9 @@ def test_remeasure_steps(tmp_path: Path) -> None:
     # 使えない場合
     with pytest.raises(ValueError, match="2 以上"):
         remeasure(path, frame, horizon=1, write=False)
+    for column in ("s", "y"):
+        with pytest.raises(ValueError, match="日時として読めません"):
+            remeasure(path, frame, horizon=5, time=column, write=False)
     (tmp_path / "r").mkdir()
     reg = regression_bundle(tmp_path / "r")
     with pytest.raises(ValueError, match="過去の値を使う"):
