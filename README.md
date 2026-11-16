@@ -46,6 +46,28 @@ make_bundle(
 - 出力が複数のモデルは `output="logits"` のように使う出力を書く
 - 学習のスクリプトで目的の値を `(y - center) / scale` にして学習した場合は `target_scale={"center": ..., "scale": ...}` を書く (予測を元の単位に戻す)
 
+### 学習のスクリプトの最後に作る (勧める形)
+
+学習のスクリプトが前処理の外でしたこと (並びの先頭に足した番号, 目的の値の標準化など) は, レシピとモデルの定義からは分からない. それを知っている学習のスクリプトが, 学習の最後に実験のディレクトリの中に一式を作ると, 書き忘れが起きない (実験のディレクトリには, プロジェクトが自分のファイルを足してよい. ML-Found の約束).
+
+```python
+# ML-Found の学習スクリプトの最後 (fit の後)
+from pathlib import Path
+
+from ml_inference import make_bundle
+
+info = make_bundle(
+    Path(experiment.run_dir) / "inference",
+    spec="models/regressor.yaml",
+    dataset="outputs/dataset",
+    weights=experiment.run_dir,                        # final_model.pt と run.json
+    target_scale={"center": center, "scale": scale},   # 目的の値を標準化して学習した場合
+)
+experiment.logger.info(f"推論の一式の検証用の評価: {info['check']}")
+```
+
+`info["check"]` の `matches` が `False` の場合は, 前処理の外でしたことの書き忘れか, 指標の決め方の違いを疑う.
+
 ### 推論して結論を出す
 
 推論するデータは, 学習のときと同じ列を持つファイル (目的の列は有っても無くてもよい), 表 (`DataFrame`), 画像や点群のディレクトリ.
