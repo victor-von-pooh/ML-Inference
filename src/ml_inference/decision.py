@@ -7,7 +7,7 @@ from ml_eda import Data
 
 from ml_inference.bundle import Bundle, load_bundle
 from ml_inference.conclude import is_number, plain
-from ml_inference.predict import predict
+from ml_inference.predict import lag_settings, predict
 
 # 意思決定の型と, 型ごとに書ける項目
 DECISION_KEYS = {
@@ -38,6 +38,9 @@ SPLIT_NAMES = {"train": "学習用", "valid": "検証用", "test": "テスト用
 # たどり直しの差の幅を求める選び直しの回数と乱数のシード
 BOOTSTRAP = 500
 BOOTSTRAP_SEED = 0
+
+# まとまりごとに選び直すのに要るまとまりの数の下限 (少ないと幅が狭く出る)
+MIN_GROUPS = 20
 
 
 def check_amount(
@@ -1076,7 +1079,8 @@ def policies_of(
 
 
 def bootstrap_gap(
-    first: np.ndarray, second: np.ndarray
+    first: np.ndarray, second: np.ndarray,
+    groups: Optional[np.ndarray] = None
 ) -> tuple[float, float]:
     """
     2 つの方針の行ごとの得の合計の差の, 90 % の幅を求める関数
@@ -1087,15 +1091,21 @@ def bootstrap_gap(
         1 つ目の方針の行ごとの得
     second: np.ndarray
         2 つ目の方針の行ごとの得
+    groups: Optional[np.ndarray] = None
+        行のまとまりの番号 (0 から. group_labels の結果). 渡すと
+        まとまりごとに選び直す (同じまとまりの行は似ているので, 行ごと
+        では幅が狭く出る)
 
     Returns
     ----------
     bounds: tuple[float, float]
-        行を選び直した差の合計の 5 % と 95 % の点
+        選び直した差の合計の 5 % と 95 % の点
     """
-    # 行を重複を許して選び直す (乱数は固定)
+    # 行 (かまとまりごとの差の合計) の, 重複を許した選び直し (乱数は固定)
     rng = np.random.default_rng(BOOTSTRAP_SEED)
     gap = first - second
+    if groups is not None:
+        gap = np.bincount(groups, weights=gap)
     picks = rng.integers(0, len(gap), size=(BOOTSTRAP, len(gap)))
     totals = gap[picks].sum(axis=1)
     bounds = (float(np.percentile(totals, 5)),
@@ -1133,10 +1143,105 @@ def label_text(values: pd.Series) -> pd.Series:
     return texts
 
 
+def group_codes(values: Any) -> np.ndarray:
+    """
+    まとまりの値を 0 からの番号にする関数 (欠けた値の行は 1 行ずつ別の
+    まとまり)
+
+    Parameters
+    ----------
+    values: Any
+        行ごとのまとまりの値
+
+    Returns
+    ----------
+    codes: np.ndarray
+        行ごとの番号
+    """
+    # 欠けた値 (-1) には, 使っていない番号を 1 つずつ
+    codes = pd.factorize(pd.Series(values))[0].astype(int)
+    missing = codes < 0
+    codes[missing] = codes.max(initial=-1) + 1 + np.arange(missing.sum())
+
+    return codes
+
+
+def group_labels(
+    bundle: Bundle, part: pd.DataFrame, rows: np.ndarray, size: int,
+    group: Any
+) -> tuple[Optional[np.ndarray], Optional[str], Optional[str]]:
+    """
+    たどり直しの幅を選び直すまとまりを返す関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+    part: pd.DataFrame
+        数えて決めた行の表
+    rows: np.ndarray
+        part の行の, 渡したデータの行の位置
+    size: int
+        渡したデータの行の数
+    group: Any
+        "auto" (時刻でずらす一式は時刻の列, 他は行ごと), None (行ごと),
+        列の名前, 行ごとの値の並び (渡したデータの行の数)
+
+    Returns
+    ----------
+    result: tuple[Optional[np.ndarray], Optional[str], Optional[str]]
+        part の行ごとのまとまりの番号 (行ごとなら None), まとまりの名前
+        (列の名前か「渡したまとまり」), 文に添える選び直し方 (「date
+        ごとに選び直した」など. まとまりが MIN_GROUPS より少なければ,
+        行ごとに戻したことを述べる)
+
+    Raises
+    ----------
+    ValueError
+        列が無い場合と, 並びの数が行の数と違う場合
+    """
+    # 自動は時刻の列 (同じ時刻の系列どうしは似ている. 名前の順で最初)
+    if group is None:
+        return None, None, None
+    if isinstance(group, str) and group == "auto":
+        times = sorted(
+            c for c in lag_settings(bundle)["time"] if c in part.columns
+        )
+        if not times:
+            return None, None, None
+        group = times[0]
+    if np.ndim(group) == 0:
+        if group not in part.columns:
+            raise ValueError(f"まとまりの列 {group} がありません")
+        values, name, way = part[group].to_numpy(), str(group), (
+            f"{group} ごと"
+        )
+    else:
+        given = np.asarray(group)
+        if given.ndim != 1 or len(given) != size:
+            raise ValueError(
+                f"まとまりの並びの数 ({len(given):,}) が, 渡したデータの"
+                f"行の数 ({size:,}) と違います"
+            )
+        values, name, way = given[rows], "渡したまとまり", (
+            "渡したまとまりごと"
+        )
+    codes = group_codes(values)
+    count = int(codes.max(initial=-1)) + 1
+    if count < MIN_GROUPS:
+        result = (None, name, f"{way}ではまとまりが {count} しか無いので,"
+                  " 行ごとに選び直した")
+        return result
+    result = (codes, name, f"{way}に選び直した")
+
+    return result
+
+
 def backtest(
     bundle: Union[str, Path, Bundle],
     source: Union[str, Path, pd.DataFrame, Data], decision: dict,
-    options: Optional[dict] = None, count: Optional[Any] = None
+    options: Optional[dict] = None, count: Optional[Any] = None,
+    group: Any = "auto"
 ) -> dict:
     """
     目的の列が分かる過去のデータで, 方針を取っていた場合の実際の得と損を
@@ -1155,12 +1260,17 @@ def backtest(
     count: Optional[Any] = None
         数える行の印 (行ごとの真偽値. 過去の値の列を作るために前の行も
         渡し, 比べる期間だけを数える場合など. 省略は全ての行)
+    group: Any = "auto"
+        差の幅を選び直すまとまり. "auto" は時刻でずらす一式なら時刻の
+        列 (同じ時刻の系列どうしは似ているので, 行ごとでは幅が狭く出る),
+        他は行ごと. None は行ごと. 列の名前か, 行ごとの値の並びも書ける
 
     Returns
     ----------
     result: dict
         rows (数えた行), policies (方針ごとの実際の得 (正) と損 (負) の
         合計), gaps (この方針と他の方針の差の合計と 90 % の幅),
+        group (幅を選び直したまとまりの名前と数. 行ごとなら None),
         sentences, decision
 
     Raises
@@ -1186,7 +1296,11 @@ def backtest(
                          "ありません")
     decided = decide(bundle, table[keep].reset_index(drop=True), decision)
     frame, decision = decided["frame"], decided["decision"]
-    part = frame[frame["action"].notna().to_numpy()]
+    acted = frame["action"].notna().to_numpy()
+    part = frame[acted]
+    groups, group_name, group_note = group_labels(
+        bundle, part, np.flatnonzero(keep)[acted], len(table), group
+    )
 
     # 方針ごとの行ごとの実際の得と, この方針との差の幅
     kind = decision["type"]
@@ -1202,7 +1316,7 @@ def backtest(
     policies = {name: float(values.sum()) for name, values in rows.items()}
     gaps = {
         name: {"gap": policies["この方針"] - value,
-               "range": bootstrap_gap(rows["この方針"], rows[name])}
+               "range": bootstrap_gap(rows["この方針"], rows[name], groups)}
         for name, value in policies.items() if name != "この方針"
     }
 
@@ -1217,18 +1331,20 @@ def backtest(
         ),
     ]
     for name, item in gaps.items():
-        # 改善 (得の増え方, 損の減り方) と, 行を選び直した 90 % の幅
+        # 改善 (得の増え方, 損の減り方) と, 選び直した 90 % の幅
         low, high = item["range"]
         better = "多い" if kind == "select" else "少ない"
         worse = "少ない" if kind == "select" else "多い"
         verdict = "この方針が良い" if low > 0 else (
-            "この方針が悪い" if high < 0 else "差は行の選び方の揺れの範囲"
+            "この方針が悪い" if high < 0 else "差は選び直しの揺れの範囲"
         )
         sentences.append(
             f"{name}と比べて, この方針は{word}が "
             f"{amount_text(abs(item['gap']))} "
             f"{better if item['gap'] >= 0 else worse} (改善の 90 % の幅 "
-            f"{amount_text(low)} から {amount_text(high)}. {verdict})"
+            f"{amount_text(low)} から {amount_text(high)}"
+            + (f". {group_note}" if group_note else "")
+            + f". {verdict})"
         )
     if kind == "select":
         sentences.append(
@@ -1239,6 +1355,10 @@ def backtest(
         "rows": int(len(part)),
         "policies": policies,
         "gaps": gaps,
+        "group": None if groups is None else {
+            "name": group_name,
+            "count": int(groups.max()) + 1,
+        },
         "sentences": sentences,
         "decision": decision,
     }

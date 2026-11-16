@@ -9,7 +9,7 @@ from ml_eda import export_dataset, load_data
 from ml_modelcontrol import build_model
 
 from ml_inference import (
-    describe_bundle, forecast, infer, make_bundle, predict
+    backtest, describe_bundle, forecast, infer, make_bundle, predict
 )
 
 
@@ -135,3 +135,56 @@ def test_forecast_edge_cases(tmp_path: Path) -> None:
     given.loc[3, "y"] = "12円"
     with pytest.raises(ValueError, match="数にできない"):
         forecast(tmp_path / "bundle", given)
+
+
+def test_backtest_groups_by_time(tmp_path: Path) -> None:
+    """
+    時刻でずらす一式のたどり直しは, 差の幅を時刻ごとに選び直すことを
+    確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 2 つの店の 40 日の売上 (日ごとに上下する)
+    rng = np.random.default_rng(0)
+    days = pd.date_range("2025-01-01", periods=40).strftime("%Y-%m-%d")
+    level = 50 + 10 * rng.normal(size=40)
+    frame = pd.DataFrame({
+        "date": np.r_[days, days],
+        "s": ["a"] * 40 + ["b"] * 40,
+        "y": np.r_[level, level + 5],
+    })
+    source = tmp_path / "t.csv"
+    frame.to_csv(source, index=False)
+    recipe = {
+        "format_version": 1, "target": "y", "task": "forecasting",
+        "steps": [
+            {"op": "lag", "columns": ["y"], "lags": [1], "by": ["s"],
+             "time": "date"},
+            {"op": "drop_missing"},
+            {"op": "drop_columns", "columns": ["s", "date"]},
+        ],
+        "split": {"method": "random", "valid": 0.3, "seed": 0},
+    }
+    export_dataset(load_data(source), recipe, tmp_path / "ds")
+    spec = linear_spec(1, 1)
+    model = build_model(spec)
+    with torch.no_grad():
+        model.nodes["head"].weight.fill_(1.0)
+        model.nodes["head"].bias.zero_()
+    torch.save(model.state_dict(), tmp_path / "w.pt")
+    make_bundle(tmp_path / "bundle", spec, tmp_path / "ds", tmp_path / "w.pt")
+
+    # 自動は日付ごと (2 つの店の同じ日は 1 つのまとまり), None は行ごと
+    decision = {"type": "quantity", "under_cost": 3, "over_cost": 1}
+    result = backtest(tmp_path / "bundle", frame, decision)
+    assert result["group"] == {"name": "date", "count": 39}
+    assert "date ごとに選び直した" in result["sentences"][1]
+    rowwise = backtest(tmp_path / "bundle", frame, decision, group=None)
+    assert rowwise["group"] is None
