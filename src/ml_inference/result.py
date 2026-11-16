@@ -8,6 +8,7 @@ from ml_eda import Data
 
 from ml_inference.bundle import Bundle, load_bundle
 from ml_inference.conclude import conclude
+from ml_inference.decision import decide
 from ml_inference.forecast import forecast as forecast_rows
 from ml_inference.predict import predict
 
@@ -16,7 +17,8 @@ def infer(
     bundle: Union[str, Path, Bundle],
     source: Union[str, Path, pd.DataFrame, Data],
     rules: Optional[dict] = None, options: Optional[dict] = None,
-    batch_size: int = 256, device: str = "cpu", forecast: bool = False
+    batch_size: int = 256, device: str = "cpu", forecast: bool = False,
+    decision: Optional[dict] = None
 ) -> dict:
     """
     新しいデータを推論し, 結論まで出す関数
@@ -38,13 +40,17 @@ def infer(
     forecast: bool = False
         目的の列が空の先の行を順に予測し, 先の行だけの結論を出すか
         (何段も先の予測)
+    decision: Optional[dict] = None
+        意思決定の決め方 (渡すと, 行ごとの行動と見込みも出す. 省略すると
+        一式の既定値. 空の辞書で意思決定しない)
 
     Returns
     ----------
     result: dict
         bundle (一式の名前と場所), source (入力), created_at, frame
         (予測と判断の表. 何段も先の予測は先の行だけで step 付き),
-        summary, sentences, rules
+        summary, sentences, rules, (decision を渡すと) decision
+        (summary, sentences, notes, decision. 表には action などの列)
     """
     # 一式の既定の決め方に, 渡した決め方を重ねる
     if not isinstance(bundle, Bundle):
@@ -77,6 +83,12 @@ def infer(
     else:
         prediction = predict(bundle, source, options, batch_size, device)
     conclusion = conclude(prediction, bundle.task, bundle.classes, merged)
+    if decision is None:
+        decision = bundle.info.get("decision")
+    if decision:
+        decided = decide(bundle, conclusion["frame"], decision)
+        conclusion["frame"] = decided.pop("frame")
+        conclusion["decision"] = decided
     result = {
         "bundle": {"name": bundle.info.get("name"), "path": str(bundle.path)},
         "source": str(source) if isinstance(source, (str, Path)) else None,

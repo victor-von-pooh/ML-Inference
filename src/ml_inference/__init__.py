@@ -6,6 +6,7 @@ from ml_inference.bundle import (
 from ml_inference.conclude import (
     NO_PREDICTION, UNDECIDED, check_rules, conclude
 )
+from ml_inference.decision import backtest, check_decision, decide
 from ml_inference.explain import explain
 from ml_inference.forecast import forecast
 from ml_inference.predict import OK, SKIPPED, describe_bundle, predict
@@ -23,8 +24,11 @@ __all__ = [
     "OK",
     "SKIPPED",
     "UNDECIDED",
+    "backtest",
+    "check_decision",
     "check_rules",
     "conclude",
+    "decide",
     "describe_bundle",
     "explain",
     "forecast",
