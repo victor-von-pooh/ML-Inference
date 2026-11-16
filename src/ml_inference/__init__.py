@@ -5,6 +5,7 @@ from ml_inference.bundle import (
 )
 from ml_inference.conclude import check_rules, conclude
 from ml_inference.explain import explain
+from ml_inference.forecast import forecast
 from ml_inference.predict import describe_bundle, predict
 from ml_inference.result import infer, write_result
 
@@ -20,6 +21,7 @@ __all__ = [
     "conclude",
     "describe_bundle",
     "explain",
+    "forecast",
     "infer",
     "load_bundle",
     "make_bundle",

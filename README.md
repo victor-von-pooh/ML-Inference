@@ -92,6 +92,20 @@ write_result(result, "results/reviews")   # predictions.csv と result.yaml
 | `bands` | 回帰, 予測 | `[{label: 少ない, upper: 100}, {label: 多い}]` のような値の帯 |
 | `group_by` | 全て | 列の値ごとに件数, 判断の内訳, 値の合計などをまとめる |
 
+### 何段も先を予測する
+
+目的の列の過去の値の列 (lag) を作る一式では, 目的の列を空にした先の行を足して `forecast` に渡すと, 系列ごとに予測した値を次の入力に使いながら順に埋める.
+
+```python
+from ml_inference import forecast
+
+# 過去の行 (売上あり) の後ろに, 先の 7 日の行 (売上は空, 気温と販促の予定は書く)
+result = forecast("bundles/sales", "sales_with_next_week.csv")
+print(result[result["step"].notna()][["date", "store", "step", "prediction"]])
+```
+
+`step` は何段目の予測か (過去の行は空). 先の段ほど誤りが積み重なる.
+
 ### どの列が予測を動かしているか
 
 ```python

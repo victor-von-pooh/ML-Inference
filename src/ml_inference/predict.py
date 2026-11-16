@@ -15,6 +15,35 @@ OK, SKIPPED = "ok", "skipped"
 TABLE_KINDS = ("table", "timeseries")
 
 
+def lag_settings(bundle: Bundle) -> dict:
+    """
+    レシピの過去の値の手順が読む列, 系列を分ける列, 時刻の列を返す関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+
+    Returns
+    ----------
+    settings: dict
+        columns (ずらす列), by (系列を分ける列), time (時刻でずらす場合の
+        時刻の列) の集合
+    """
+    # lag の手順ごとの列を集める
+    settings: dict = {"columns": set(), "by": set(), "time": set()}
+    for spec in bundle.dataset.recipe.get("steps", []):
+        if spec["op"] != "lag":
+            continue
+        settings["columns"].update(spec.get("state", {}).get("columns", []))
+        by = spec.get("by") or []
+        settings["by"].update([by] if isinstance(by, str) else by)
+        if spec.get("time"):
+            settings["time"].add(spec["time"])
+
+    return settings
+
+
 def read_source(
     bundle: Bundle, source: Union[str, Path, pd.DataFrame, Data],
     options: Optional[dict] = None
@@ -486,6 +515,22 @@ def predict(
         columns = decode(
             bundle, run_model(bundle, tensors, batch_size, device)
         )
+        # 数でない予測 (入力の無限大など) の行は予測しなかった行に
+        check = "prediction" if bundle.task != "classification" else (
+            "confidence"
+        )
+        finite = np.isfinite(np.asarray(columns[check], dtype=float))
+        if not finite.all():
+            rows = np.flatnonzero(keep)[~finite]
+            for row in rows:
+                reasons[row] = (
+                    "予測の値が数ではありません (入力に無限大などが無いか)"
+                )
+            keep[rows] = False
+            columns = {
+                name: [v for v, ok in zip(values, finite) if ok]
+                for name, values in columns.items()
+            }
     else:
         columns = decode(bundle, empty_output(bundle))
 
