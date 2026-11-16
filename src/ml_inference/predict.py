@@ -646,6 +646,37 @@ def options_of(bundle: Bundle) -> dict:
     return reading
 
 
+def uncertainty_summary(uncertainty: Optional[dict]) -> Optional[dict]:
+    """
+    外れ方の記録から, 分位点の並びを除いた要約を返す関数
+
+    Parameters
+    ----------
+    uncertainty: Optional[dict]
+        一式の uncertainty
+
+    Returns
+    ----------
+    summary: Optional[dict]
+        split, rows, kind, measured_at, coverage, ece (記録が無ければ
+        None)
+    """
+    # 画面に出す値だけ (分位点と区間ごとの表は大きいので除く)
+    if not uncertainty:
+        return None
+    calibration = uncertainty.get("calibration") or {}
+    summary = {
+        "split": uncertainty.get("split"),
+        "rows": uncertainty.get("rows"),
+        "kind": uncertainty.get("kind"),
+        "measured_at": uncertainty.get("measured_at"),
+        "coverage": uncertainty.get("coverage"),
+        "ece": uncertainty.get("test_ece", calibration.get("ece")),
+    }
+
+    return summary
+
+
 def describe_bundle(bundle: Union[str, Path, Bundle]) -> dict:
     """
     推論の一式の説明を JSON にできる辞書で返す関数
@@ -660,7 +691,7 @@ def describe_bundle(bundle: Union[str, Path, Bundle]) -> dict:
     description: dict
         名前, 種類, タスク, 目的の列, クラス, 学習に使う列, 読み込み,
         前処理の手順, モデルの入力, 実験, 結論の既定値, 何段も先まで
-        予測できるか, 実験の記録との比べ, 注意
+        予測できるか, 実験の記録との比べ, 外れ方の記録の要約, 注意
     """
     # 画面が一式を選ぶときに要ること
     if not isinstance(bundle, Bundle):
@@ -697,6 +728,7 @@ def describe_bundle(bundle: Union[str, Path, Bundle]) -> dict:
             ]
         ),
         "check": info.get("check"),
+        "uncertainty": uncertainty_summary(info.get("uncertainty")),
         "notes": list(info.get("notes") or []),
     }
 

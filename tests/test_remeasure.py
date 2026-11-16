@@ -5,7 +5,9 @@ import pandas as pd
 import pytest
 from test_decision import classifier_bundle, regression_bundle
 
-from ml_inference import decide, load_bundle, predict, remeasure
+from ml_inference import (
+    decide, describe_bundle, load_bundle, predict, remeasure
+)
 
 
 def test_remeasure_regression(tmp_path: Path) -> None:
@@ -49,6 +51,9 @@ def test_remeasure_regression(tmp_path: Path) -> None:
     after = decide(bundle, predict(bundle, recent), decision)
     assert after["frame"]["level"].sum() > before["frame"]["level"].sum()
     assert any("300 行で測り直した" in note for note in after["notes"])
+    summary = describe_bundle(path)["uncertainty"]
+    assert summary["split"] == "recent" and summary["rows"] == 300
+    assert summary["measured_at"] and "absolute" not in summary
 
 
 def test_remeasure_count_and_errors(tmp_path: Path) -> None:
