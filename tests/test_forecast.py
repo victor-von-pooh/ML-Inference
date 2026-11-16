@@ -8,7 +8,9 @@ from conftest import linear_spec
 from ml_eda import export_dataset, load_data
 from ml_modelcontrol import build_model
 
-from ml_inference import forecast, infer, make_bundle, predict
+from ml_inference import (
+    describe_bundle, forecast, infer, make_bundle, predict
+)
 
 
 def test_forecast_steps_per_series(tmp_path: Path) -> None:
@@ -101,7 +103,7 @@ def test_forecast_edge_cases(tmp_path: Path) -> None:
     torch.save(model.state_dict(), tmp_path / "w.pt")
     make_bundle(tmp_path / "bundle", spec, tmp_path / "ds", tmp_path / "w.pt")
 
-    # 過去の途中の空の行は先の行にしない
+    # 過去の途中の空の行は先の行にしない (infer の結果にも入れない)
     given = pd.concat([frame, pd.DataFrame({"x": [1.0, 1.0], "y": np.nan})],
                       ignore_index=True)
     given.loc[10, "y"] = np.nan
@@ -109,6 +111,12 @@ def test_forecast_edge_cases(tmp_path: Path) -> None:
     assert np.isnan(result.loc[10, "step"])
     assert list(result["step"].iloc[30:]) == [1, 2]
     assert np.allclose(result["prediction"].iloc[30:], [30, 31])
+    assert len(infer(tmp_path / "bundle", given, forecast=True)["frame"]) == 2
+    assert describe_bundle(tmp_path / "bundle")["forecastable"]
+
+    # 先の行が無いと誤り
+    with pytest.raises(ValueError, match="先の行"):
+        infer(tmp_path / "bundle", frame, forecast=True)
 
     # 無限大の入力で止まり, 後ろの先の行は理由付き
     given = pd.concat(
