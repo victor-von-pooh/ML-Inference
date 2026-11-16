@@ -773,3 +773,41 @@ def test_check_against_run(tmp_path: Path, table_dataset: Path) -> None:
     info = make_bundle(tmp_path / "b", spec, table_dataset, run,
                        overwrite=True)
     assert info["check"]["matches"] is None
+
+
+def test_holistic_fixes(
+    tmp_path: Path, table_dataset: Path, table_csv: Path
+) -> None:
+    """
+    既定値と渡した決め方の重ね方, numpy の数, 重みの無い一式を確かめる
+    関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    table_dataset: Path
+        データセット
+    table_csv: Path
+        元の CSV
+
+    Returns
+    ----------
+    None
+    """
+    # 既定の確信の下限は, 渡した numpy の数の下限で置き換わり書き出せる
+    path = table_bundle(
+        tmp_path, table_dataset, conclusion={"min_confidence": 0.7}
+    )
+    result = infer(path, table_csv,
+                   rules={"min_confidence": np.float64(0.5)})
+    assert result["rules"] == {"min_confidence": 0.5}
+    assert type(result["rules"]["min_confidence"]) is float
+    write_result(result, tmp_path / "out")
+    with pytest.raises(ValueError, match="batch_size"):
+        predict(path, table_csv, batch_size=0)
+
+    # 重みが無い一式は, 読むときに分かる
+    (path / "final_model.pt").unlink()
+    with pytest.raises(FileNotFoundError, match="重み"):
+        load_bundle(path)

@@ -7,7 +7,7 @@ from ml_eda import Data
 
 from ml_inference.bundle import Bundle, load_bundle
 from ml_inference.predict import (
-    TABLE_KINDS, lag_settings, predict, read_source
+    TABLE_KINDS, lag_settings, predict, read_source, series_keys
 )
 
 # 系列ごとに選ぶときの, 系列ごとの行の数の下限
@@ -51,7 +51,7 @@ def sample_rows(
     if not by:
         chosen = frame.iloc[-max_rows:].reset_index(drop=True)
         return chosen
-    keys = frame[by].astype(str).agg("\u0000".join, axis=1)
+    keys = series_keys(frame, settings)
     count = max(max_rows // max(keys.nunique(), 1), MIN_SERIES_ROWS)
     tail = keys.groupby(keys).cumcount(ascending=False) < count
     chosen = frame[tail.to_numpy()].reset_index(drop=True)
@@ -144,7 +144,7 @@ def shuffled(
 def column_effect(
     bundle: Bundle, frame: pd.DataFrame, column: str, reference: np.ndarray,
     chosen: np.ndarray, repeats: int, series: bool,
-    rng: np.random.Generator
+    rng: np.random.Generator, batch_size: int, device: str
 ) -> dict:
     """
     1 つの列を並べ替えて推論し直し, 予測の変わり方を求める関数
@@ -167,6 +167,10 @@ def column_effect(
         系列を分ける列か
     rng: np.random.Generator
         乱数
+    batch_size: int
+        1 回に渡す件数
+    device: str
+        使うデバイス
 
     Returns
     ----------
@@ -182,10 +186,13 @@ def column_effect(
     for _ in range(repeats):
         table = shuffled(frame, column, target, series, rng)
         try:
-            changed = measure_of(bundle, predict(bundle, table), chosen)
+            changed = measure_of(
+                bundle, predict(bundle, table, None, batch_size, device),
+                chosen
+            )
         except ValueError as error:
-            return {"effect": None, "spread": None, "rows": 0,
-                    "lost": int(known.sum()), "error": str(error)}
+            return {"effect": None, "spread": None, "rows": 0.0,
+                    "lost": float(known.sum()), "error": str(error)}
         both = known & ~np.isnan(changed)
         used.append(int(both.sum()))
         lost.append(int((known & np.isnan(changed)).sum()))
@@ -209,7 +216,8 @@ def explain(
     bundle: Union[str, Path, Bundle],
     source: Union[str, Path, pd.DataFrame, Data],
     options: Optional[dict] = None, repeats: int = 3,
-    max_rows: int = 2000, seed: int = 0
+    max_rows: int = 2000, seed: int = 0, batch_size: int = 256,
+    device: str = "cpu"
 ) -> dict:
     """
     渡したデータの元の列ごとに, 予測を動かす大きさ (並べ替えの重要度) を
@@ -230,13 +238,18 @@ def explain(
         レシピは系列ごとに選ぶ)
     seed: int = 0
         乱数のシード
+    batch_size: int = 256
+        1 回に渡す件数
+    device: str = "cpu"
+        使うデバイス
 
     Returns
     ----------
     result: dict
         measure (分類は probability, 回帰と予測は value), rows (使った
         行の数), columns (列ごとの column, kind, effect, spread, rows,
-        lost, error の並び. 効きの大きい順で, 求められなかった列は先頭)
+        lost, error の並び. 並べ替えると推論できない列が先頭, 次に効きの
+        大きい順, 求めない時刻の列 (kind が time) は最後)
 
     Raises
     ----------
@@ -259,7 +272,7 @@ def explain(
     )
 
     # 並べ替える前の予測
-    base = predict(bundle, frame)
+    base = predict(bundle, frame, None, batch_size, device)
     if not (base["status"] == "ok").any():
         raise ValueError("予測できる行が無いので, 列の効きを求められません")
     chosen = base["prediction"].to_numpy()
@@ -281,13 +294,13 @@ def explain(
         if kind == "time":
             columns.append({
                 "column": name, "kind": kind, "effect": None,
-                "spread": None, "rows": 0, "lost": 0,
+                "spread": None, "rows": 0.0, "lost": 0.0,
                 "error": "過去の値の前後関係を決める時刻の列は並べ替えない",
             })
             continue
         effect = column_effect(
             bundle, frame, column, reference, chosen, repeats,
-            kind == "series", rng
+            kind == "series", rng, batch_size, device
         )
         columns.append({"column": name, "kind": kind, **effect})
 

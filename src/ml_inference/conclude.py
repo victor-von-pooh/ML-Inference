@@ -24,8 +24,34 @@ def is_number(value: Any) -> bool:
     result: bool
         int か float (bool を除く) なら True
     """
-    # bool は int の子なので除く
-    result = isinstance(value, (int, float)) and not isinstance(value, bool)
+    # bool は int の子なので除く (numpy の数も数)
+    result = isinstance(value, (int, float, np.integer, np.floating)) and (
+        not isinstance(value, (bool, np.bool_))
+    )
+
+    return result
+
+
+def plain(value: Any) -> Any:
+    """
+    numpy の値を Python の値にする関数 (辞書と並びの中も)
+
+    Parameters
+    ----------
+    value: Any
+        値
+
+    Returns
+    ----------
+    result: Any
+        Python の値
+    """
+    # 辞書と並びは中身ごと
+    if isinstance(value, dict):
+        return {k: plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [plain(v) for v in value]
+    result = value.item() if isinstance(value, np.generic) else value
 
     return result
 
@@ -383,8 +409,8 @@ def conclude(
     ValueError
         決め方に誤りがある場合
     """
-    # 決め方の確認
-    rules = dict(rules or {})
+    # 決め方の確認 (numpy の数は Python の数に. 書き出せるように)
+    rules = plain(dict(rules or {}))
     errors = check_rules(rules, task, classes, list(prediction.columns))
     if errors:
         raise ValueError("結論の決め方の誤り: " + " / ".join(errors))

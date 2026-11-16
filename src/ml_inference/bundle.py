@@ -12,7 +12,7 @@ from ml_eda import Dataset, load_dataset
 from ml_eda.pipeline import DATASET_FORMAT_VERSION
 from ml_modelcontrol import build_model, dump_spec, load_spec
 
-from ml_inference.conclude import check_rules
+from ml_inference.conclude import check_rules, plain
 
 # 推論の一式の形の版
 BUNDLE_FORMAT_VERSION = 1
@@ -367,6 +367,11 @@ def load_bundle(path: Union[str, Path]) -> Bundle:
             f"(入力: {', '.join(spec['inputs'])})"
         )
     bundle = Bundle(path=root, info=info, dataset=dataset, spec=spec)
+    if not bundle.weights_path.is_file():
+        raise FileNotFoundError(
+            f"重み {bundle.weights_path} がありません (実験のディレクトリを"
+            "動かしたか消した場合は, 一式を作り直してください)"
+        )
     kind = info["model"].get("kind")
     classify = bundle.task == "classification"
     if kind is not None and (kind == "value") == classify:
@@ -596,7 +601,7 @@ def make_bundle(
             "inputs": inputs or {},
             "dataset": "dataset",
             "run": run,
-            "conclusion": conclusion or {},
+            "conclusion": plain(conclusion or {}),
             "notes": bundle_notes(full, run),
         }
         (target / "inference.yaml").write_text(
@@ -604,6 +609,11 @@ def make_bundle(
             encoding="utf-8"
         )
         bundle = load_bundle(target)
+        # 結論の決め方は重い推論の前に確かめる
+        if conclusion:
+            errors = check_rules(conclusion, bundle.task, bundle.classes)
+            if errors:
+                raise ValueError("結論の決め方の誤り: " + " / ".join(errors))
         check_sample(bundle, full)
         # 記録との比べは注意のためなので, 失敗しても作るのは止めない
         try:
@@ -619,10 +629,6 @@ def make_bundle(
             yaml.safe_dump(info, allow_unicode=True, sort_keys=False),
             encoding="utf-8"
         )
-        if conclusion:
-            errors = check_rules(conclusion, bundle.task, bundle.classes)
-            if errors:
-                raise ValueError("結論の決め方の誤り: " + " / ".join(errors))
     except Exception:
         shutil.rmtree(target, ignore_errors=True)
         raise
