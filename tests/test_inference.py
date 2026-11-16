@@ -9,6 +9,7 @@ import torch
 import yaml
 from conftest import linear_spec, save_weights
 from ml_eda import export_dataset, load_data, load_dataset
+from ml_modelcontrol import build_model
 
 from ml_inference import (
     check_rules, conclude, describe_bundle, infer, load_bundle, make_bundle,
@@ -722,3 +723,52 @@ def test_rows_dropped_by_recipe(tmp_path: Path) -> None:
     result = predict(path, pd.DataFrame({"a": [-1.0, 0.5]}))
     assert list(result["status"]) == ["skipped", "ok"]
     assert "filter_rows" in result.loc[0, "reason"]
+
+
+def test_check_against_run(tmp_path: Path, table_dataset: Path) -> None:
+    """
+    検証用の分割の評価を実験の記録と比べ, 合わなければ注意を出すことを
+    確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    table_dataset: Path
+        データセット
+
+    Returns
+    ----------
+    None
+    """
+    # 検証用の分割の正解率を手で求める
+    dataset = load_dataset(table_dataset)
+    spec = linear_spec(len(dataset.features), 3)
+    run = tmp_path / "run"
+    run.mkdir()
+    save_weights(spec, run / "final_model.pt")
+    x, y = dataset.tensors("valid")
+    model = build_model(spec)
+    model.load_state_dict(torch.load(run / "final_model.pt"))
+    with torch.no_grad():
+        accuracy = float((model(x).argmax(dim=1) == y).float().mean())
+
+    # 記録と同じなら合う, 違えば注意
+    for recorded, expected in ((accuracy, True), (accuracy + 0.3, False)):
+        state = {"format_version": 1, "status": "completed",
+                 "monitor": "valid/acc", "best_value": recorded,
+                 "final_weights": "best"}
+        (run / "run.json").write_text(json.dumps(state), encoding="utf-8")
+        info = make_bundle(tmp_path / "b", spec, table_dataset, run,
+                           overwrite=True)
+        assert info["check"]["metric"] == "acc"
+        assert np.isclose(info["check"]["value"], accuracy)
+        assert info["check"]["matches"] is expected
+        assert any("合いません" in n for n in info["notes"]) is not expected
+
+    # 監視した指標が違えば比べない
+    state["monitor"] = "valid/loss"
+    (run / "run.json").write_text(json.dumps(state), encoding="utf-8")
+    info = make_bundle(tmp_path / "b", spec, table_dataset, run,
+                       overwrite=True)
+    assert info["check"]["matches"] is None
