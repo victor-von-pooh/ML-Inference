@@ -92,6 +92,19 @@ write_result(result, "results/reviews")   # predictions.csv と result.yaml
 | `bands` | 回帰, 予測 | `[{label: 少ない, upper: 100}, {label: 多い}]` のような値の帯 |
 | `group_by` | 全て | 列の値ごとに件数, 判断の内訳, 値の合計などをまとめる |
 
+### どの列が予測を動かしているか
+
+```python
+from ml_inference import explain
+
+result = explain("bundles/sales", "new_sales.csv")
+for item in result["columns"]:
+    print(item["column"], item["effect"])   # 効きの大きい順
+# sales (過去の値) 123262, store 117509, date 99698, temperature 40959, promo 33882
+```
+
+列を 1 つずつ行の間で並べ替えて推論し直し, 予測の変わり方の平均を効きとする (分類は予測したクラスの確率, 回帰と予測は元の単位の値). 正解の無い新しいデータでも求められる. 表と時系列の一式だけ. 系列を分ける列は系列の名前を入れ替え, 過去の値の列を作るレシピは系列ごとの最後の行を使う (詳しくは DESIGN の「列の効き」).
+
 ## 開発
 
 ```bash
