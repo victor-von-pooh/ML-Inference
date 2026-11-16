@@ -8,6 +8,7 @@ from ml_eda import Data
 
 from ml_inference.bundle import Bundle, load_bundle
 from ml_inference.conclude import conclude
+from ml_inference.forecast import forecast as forecast_rows
 from ml_inference.predict import predict
 
 
@@ -15,7 +16,7 @@ def infer(
     bundle: Union[str, Path, Bundle],
     source: Union[str, Path, pd.DataFrame, Data],
     rules: Optional[dict] = None, options: Optional[dict] = None,
-    batch_size: int = 256, device: str = "cpu"
+    batch_size: int = 256, device: str = "cpu", forecast: bool = False
 ) -> dict:
     """
     新しいデータを推論し, 結論まで出す関数
@@ -34,12 +35,16 @@ def infer(
         1 回に渡す件数
     device: str = "cpu"
         使うデバイス
+    forecast: bool = False
+        目的の列が空の先の行を順に予測し, 先の行だけの結論を出すか
+        (何段も先の予測)
 
     Returns
     ----------
     result: dict
         bundle (一式の名前と場所), source (入力), created_at, frame
-        (予測と判断の表), summary, sentences, rules
+        (予測と判断の表. 何段も先の予測は先の行だけで step 付き),
+        summary, sentences, rules
     """
     # 一式の既定の決め方に, 渡した決め方を重ねる
     if not isinstance(bundle, Bundle):
@@ -50,8 +55,15 @@ def infer(
         merged.pop("threshold", None)
     merged = {k: v for k, v in merged.items() if v is not None}
 
-    # 予測と結論
-    prediction = predict(bundle, source, options, batch_size, device)
+    # 予測 (何段も先の予測は先の行だけ) と結論
+    if forecast:
+        prediction = forecast_rows(bundle, source, options, batch_size,
+                                   device)
+        target = bundle.dataset.info.get("target")
+        ahead = prediction["step"].notna() | prediction[target].isna()
+        prediction = prediction[ahead].reset_index(drop=True)
+    else:
+        prediction = predict(bundle, source, options, batch_size, device)
     conclusion = conclude(prediction, bundle.task, bundle.classes, merged)
     result = {
         "bundle": {"name": bundle.info.get("name"), "path": str(bundle.path)},
