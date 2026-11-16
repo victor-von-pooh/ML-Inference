@@ -136,6 +136,15 @@ def test_backtest_quantity(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="まとまり"):
         backtest(path, block, decision, group=np.arange(5))
 
+    # まとまりが少なければ行ごとに戻し, 欠けた値は 1 行ずつ別のまとまり
+    few = backtest(path, block, decision, group=np.zeros(300))
+    assert few["group"] is None
+    assert "1 しか無いので, 行ごとに" in few["sentences"][1]
+    holes = np.repeat(np.arange(30), 10).astype(float)
+    holes[:10] = np.nan
+    missing = backtest(path, block, decision, group=holes)
+    assert missing["group"]["count"] == 39
+
 
 def classifier_bundle(tmp_path: Path) -> Path:
     """
