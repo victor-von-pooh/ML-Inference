@@ -811,3 +811,43 @@ def test_holistic_fixes(
     (path / "final_model.pt").unlink()
     with pytest.raises(FileNotFoundError, match="重み"):
         load_bundle(path)
+
+
+def test_train_scale_and_reading(
+    tmp_path: Path, regression_dataset: Path
+) -> None:
+    """
+    学習用の分割から目的の値の標準化を求めることと, 学習と違う形式の
+    ファイルを読めることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    regression_dataset: Path
+        回帰のデータセット
+
+    Returns
+    ----------
+    None
+    """
+    # 学習用の目的の値の平均と不偏の標準偏差
+    spec = linear_spec(1, 1)
+    weights = save_weights(spec, tmp_path / "w.pt")
+    info = make_bundle(tmp_path / "bundle", spec, regression_dataset,
+                       weights, target_scale="train")
+    _, y = load_dataset(regression_dataset).tensors("train")
+    assert np.isclose(info["model"]["target_scale"]["center"],
+                      y.float().mean().item())
+    assert np.isclose(info["model"]["target_scale"]["scale"],
+                      y.float().std().item())
+
+    # csv で学習した一式に parquet, ディレクトリは分かる誤り
+    frame = pd.DataFrame({"shop": ["東"], "x": [0.2]})
+    pytest.importorskip("pyarrow")
+    frame.to_parquet(tmp_path / "new.parquet")
+    assert predict(tmp_path / "bundle", tmp_path / "new.parquet")[
+        "status"
+    ].tolist() == ["ok"]
+    with pytest.raises(ValueError, match="ディレクトリ"):
+        predict(tmp_path / "bundle", tmp_path)
