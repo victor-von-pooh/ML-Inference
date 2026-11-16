@@ -89,11 +89,12 @@ def test_effects_with_lagged_target(tmp_path: Path) -> None:
     weights = save_weights(spec, tmp_path / "w.pt")
     make_bundle(tmp_path / "bundle", spec, tmp_path / "ds", weights)
 
-    # 目的の列は「過去の値」の名前で並ぶ. 行は選ばずに全て
+    # 目的の列は「過去の値」の名前で並ぶ. 行は最後の続いた 50 行 (最初の
+    # 行は過去の値が無い)
     result = explain(tmp_path / "bundle", frame, max_rows=50)
     names = [c["column"] for c in result["columns"]]
     assert "y (過去の値)" in names
-    assert result["rows"] == 119
+    assert result["rows"] == 49
 
 
 def test_text_bundle_is_rejected(tmp_path: Path) -> None:
