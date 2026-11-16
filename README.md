@@ -130,9 +130,10 @@ from ml_inference import backtest, infer
 decision = {"type": "quantity", "under_cost": 3, "over_cost": 1, "stock": "在庫"}
 result = infer("bundles/sales", "next_week.csv", decision=decision)
 print("\n".join(result["decision"]["sentences"] + result["decision"]["notes"]))
-# 120 行のうち 85 行に, 合計 3,240 を足すことを勧める (... 75 % の点まで置く)
-# 見込みの損は ... で, 予測の値どおりに置く場合の ... より ... 少ない
-# 外れ方は検証用の期間で測った. その 90 % の幅は, テスト用の期間の実際の値の 82 % を覆った ...
+# 足りない損 3 と余る損 1, 予測の外れ方の記録が正しいとすれば, 損が最も小さいのは sales の外れ方の 75 % の点まで置くこと
+# 120 行のうち 85 行に, 合計 3,240 を足す
+# ...
+# 外れ方は検証用の分割で測った. 75 % の点を, テスト用の分割の実際の値が下回ったのは 66 % (外れ方を小さく見積もっている. 量は少なめ)
 
 # 過去のデータで, この方針なら実際にどれだけの損だったかを比べる
 print(backtest("bundles/sales", "last_month.csv", decision)["sentences"])
@@ -142,9 +143,11 @@ print(backtest("bundles/sales", "last_month.csv", decision)["sentences"])
 | --- | --- | --- |
 | `quantity` | 補充, 仕入れ, 人員 | `under_cost`, `over_cost` (1 単位の足りない損と余る損), `stock` (今ある量), `step` (刻み) |
 | `select` | 引き止め, 営業先, 点検 | `positive`, `value` (当たりの価値), `cost` (行動の費用), `effect` (行動で防げる割合. 仮定), `budget` か `budget_cost` |
-| `triage` | 人が確かめる, 再検査 | `positive`, `miss_cost` (見逃しの損), `false_alarm_cost` (空振りの損) |
+| `triage` | 人が確かめる, 再検査 | `positive`, `miss_cost` (見逃しの損), `false_alarm_cost` (空振りの損), `capacity` (回せる件数) |
 
-値は数か, 予測の表の列の名前 (行ごとに違う価値など). 一式を作るときに測った予測の外れ方 (回帰) と確率の当たり具合 (分類) を使い, その記録を前提として文に添える. 値段を変える判断は, 価格を変えた記録が要るので扱わない (詳しくは DESIGN の「意思決定」).
+損得の値は数か, 予測の表の列の名前 (行ごとに違う価値, 外で推定した行ごとの効果など). 値の欠けた行は決めない. `current` に今のやり方の列 (足した量, 行動したか) を書くと, たどり直しで今のやり方とも比べる.
+
+文は「書いた損得と外れ方の記録が正しいとすれば」の前提を先に述べる. その前提での素朴なやり方との比べは必ず方針が良く出るので, 実際の差は `backtest` で確かめる (差に 90 % の幅を付ける). 一式を作るときに測った予測の外れ方 (回帰) と確率の当たり具合 (分類) を使い, その記録を前提として文に添える. 値段を変える判断は, 価格を変えた記録が要るので扱わない (詳しくは DESIGN の「意思決定」).
 
 ## 開発
 
