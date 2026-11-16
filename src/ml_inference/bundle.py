@@ -503,7 +503,8 @@ def make_bundle(
     path: Union[str, Path], spec: Union[str, Path, dict],
     dataset: Union[str, Path], weights: Union[str, Path],
     inputs: Optional[dict] = None, output: Optional[str] = None,
-    kind: Optional[str] = None, target_scale: Optional[dict] = None,
+    kind: Optional[str] = None,
+    target_scale: Union[dict, str, None] = None,
     conclusion: Optional[dict] = None,
     name: Optional[str] = None, copy_weights: bool = True,
     overwrite: bool = False
@@ -528,9 +529,10 @@ def make_bundle(
         出力が辞書のモデルで使う出力の名前
     kind: Optional[str] = None
         出力の扱い方 (logits, probabilities, value. 省略するとタスクから)
-    target_scale: Optional[dict] = None
+    target_scale: Union[dict, str, None] = None
         学習のスクリプトが目的の値を (y - center) / scale にして学習した
-        場合の center と scale (出力を元に戻す)
+        場合の center と scale (出力を元に戻す). "train" は, データセット
+        の学習用の分割の目的の値の平均と標準偏差 (よくある決め方)
     conclusion: Optional[dict] = None
         結論の決め方の既定値
     name: Optional[str] = None
@@ -569,8 +571,14 @@ def make_bundle(
         source = source / "final_model.pt"
     if not source.is_file():
         raise ValueError(f"重み {source} がありません")
+    if isinstance(spec, (str, Path)) and not Path(spec).expanduser().is_file():
+        raise ValueError(f"モデルの定義 {spec} はファイルではありません")
     data_dir = Path(dataset).expanduser().resolve()
+    if not data_dir.is_dir():
+        raise ValueError(f"データセット {data_dir} はディレクトリではありません")
     full = read_dataset(data_dir, frames=True)
+    if isinstance(target_scale, str):
+        target_scale = train_scale(full, target_scale)
 
     # 隣の一時ディレクトリに作り, 確かめてから入れ替える
     target = final.with_name(f".{final.name}.writing")
@@ -678,6 +686,39 @@ def split_sources(
     return sources
 
 
+def train_scale(dataset: Dataset, how: str) -> dict:
+    """
+    学習用の分割の目的の値から, 目的の値の標準化の中心と幅を求める関数
+
+    Parameters
+    ----------
+    dataset: Dataset
+        分割の表を持つデータセット
+    how: str
+        求め方 (今は train だけ. 平均と標準偏差 (不偏))
+
+    Returns
+    ----------
+    scale: dict
+        center と scale
+
+    Raises
+    ----------
+    ValueError
+        知らない求め方の場合と, 学習用の目的の値が無い場合
+    """
+    # 学習のスクリプトが使う PyTorch の std と同じ不偏の標準偏差
+    if how != "train":
+        raise ValueError(f"target_scale の {how} は知りません (train か辞書)")
+    if "train" not in dataset.frames or not dataset.target:
+        raise ValueError("学習用の分割の目的の値が無いので求められません")
+    _, y = dataset.tensors("train")
+    values = y.float()
+    scale = {"center": values.mean().item(), "scale": values.std().item()}
+
+    return scale
+
+
 def check_sample(bundle: Bundle, dataset: Dataset) -> None:
     """
     データセットの学習用の見本を推論し, 出力の形を確かめる関数
@@ -707,16 +748,24 @@ def check_sample(bundle: Bundle, dataset: Dataset) -> None:
     )
     sources = split_sources(bundle, dataset, split, 0, SAMPLE_ROWS)
 
-    # 形の誤りは分かりやすい文に (つなぎ方の誤りの文はそのまま)
+    # 形の誤りは分かりやすい文に (つなぎ方の誤りの文はそのまま. 長い誤り
+    # の文は始めだけ)
     try:
         outputs = run_model(bundle, shape_inputs(bundle, sources), 64, "cpu")
         decode(bundle, outputs)
     except ValueError:
         raise
     except Exception as error:
-        raise ValueError(
-            f"見本の推論に失敗しました ({type(error).__name__}: {error}). "
+        text = str(error)
+        text = text if len(text) <= 300 else text[:300] + " …"
+        hint = (
+            "重みが定義と合いません. 学習に使った定義と重みの組を選んで"
+            "ください" if "state_dict" in text else
             "入力のつなぎ方 (inputs) と定義の入力の形を確かめてください"
+        )
+        raise ValueError(
+            f"見本の推論に失敗しました ({type(error).__name__}: {text}). "
+            f"{hint}"
         ) from error
 
 

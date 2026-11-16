@@ -122,10 +122,27 @@ def read_source(
             item_loader=lambda i: texts.iloc[i]
         )
 
-    # 場所は学習のときの読み込みと設定で
+    # 場所は学習のときの読み込みと設定で. 読めなければ形式を判定し直す
+    # (学習は csv で, 推論は parquet など)
+    path = Path(source).expanduser()
+    if not path.exists():
+        raise ValueError(f"{path} がありません")
+    if path.is_dir() and kind in TABLE_KINDS:
+        raise ValueError(
+            f"{path} はディレクトリです. {kind} の一式にはファイルを選んで"
+            "ください"
+        )
     recorded = bundle.dataset.info.get("source") or {}
     merged = {**(recorded.get("options") or {}), **(options or {})}
-    data = load_data(source, loader=recorded.get("loader"), **merged)
+    try:
+        data = load_data(path, loader=recorded.get("loader"), **merged)
+    except Exception as first:
+        try:
+            data = load_data(path, **merged)
+        except Exception:
+            raise ValueError(
+                f"{path.name} を読めません ({first})"
+            ) from first
 
     return data
 
