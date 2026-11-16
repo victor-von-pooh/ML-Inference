@@ -193,7 +193,9 @@ def items_of(
         try:
             item = data.load_item(index)
             if isinstance(item, str) and not item.strip():
-                raise ValueError("文が空です")
+                arrays.append(None)
+                reasons.append("文が空です")
+                continue
             array = bundle.dataset.transform_item(item)
         except Exception as error:
             arrays.append(None)
