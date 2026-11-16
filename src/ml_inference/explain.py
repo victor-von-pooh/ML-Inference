@@ -6,39 +6,12 @@ import pandas as pd
 from ml_eda import Data
 
 from ml_inference.bundle import Bundle, load_bundle
-from ml_inference.predict import TABLE_KINDS, predict, read_source
+from ml_inference.predict import (
+    TABLE_KINDS, lag_settings, predict, read_source
+)
 
 # 系列ごとに選ぶときの, 系列ごとの行の数の下限
 MIN_SERIES_ROWS = 30
-
-
-def lag_settings(bundle: Bundle) -> dict:
-    """
-    レシピの過去の値の手順が読む列, 系列を分ける列, 時刻の列を返す関数
-
-    Parameters
-    ----------
-    bundle: Bundle
-        推論の一式
-
-    Returns
-    ----------
-    settings: dict
-        columns (ずらす列), by (系列を分ける列), time (時刻でずらす場合の
-        時刻の列) の集合
-    """
-    # lag の手順ごとの列を集める
-    settings: dict = {"columns": set(), "by": set(), "time": set()}
-    for spec in bundle.dataset.recipe.get("steps", []):
-        if spec["op"] != "lag":
-            continue
-        settings["columns"].update(spec.get("state", {}).get("columns", []))
-        by = spec.get("by") or []
-        settings["by"].update([by] if isinstance(by, str) else by)
-        if spec.get("time"):
-            settings["time"].add(spec["time"])
-
-    return settings
 
 
 def sample_rows(
