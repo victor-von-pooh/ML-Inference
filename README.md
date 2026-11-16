@@ -83,7 +83,7 @@ print("\n".join(result["sentences"]))
 write_result(result, "results/reviews")   # predictions.csv と result.yaml
 ```
 
-`result["frame"]` は元の列に `status`, `reason`, `prediction`, `confidence`, `p:<クラス>`, `decision` を足した `DataFrame`. 予測だけが要る場合は `predict(bundle, source)` (読み込みの設定は `options`, 件数は `batch_size`, デバイスは `device`), 一式の説明は `describe_bundle(bundle)`, 結論の決め方を変える場合は `infer(..., rules={...})` (下の表. `positive` と `min_confidence` は一緒に使えない).
+`result["frame"]` は元の列に `status`, `reason`, `prediction`, `confidence`, `p:<クラス>`, `decision` を足した `DataFrame`. 予測だけが要る場合は `predict(bundle, source)` (読み込みの設定は `options`, 件数は `batch_size`, デバイスは `device`), 一式の説明は `describe_bundle(bundle)`, 結論の決め方を変える場合は `infer(..., rules={...})` (下の表. 一式の既定値に重なる. 値を `None` にすると既定値を消す. `positive` と `min_confidence` は一緒に使えないので, 渡した方を使う).
 
 | 決め方 | タスク | 意味 |
 | --- | --- | --- |
@@ -104,7 +104,7 @@ result = forecast("bundles/sales", "sales_with_next_week.csv")
 print(result[result["step"].notna()][["date", "store", "step", "prediction"]])
 ```
 
-`step` は何段目の予測か (過去の行は空). 先の段ほど誤りが積み重なる.
+`step` は何段目の予測か (過去の行は空). 先の段ほど誤りが積み重なる. 先の行だけの結論が要る場合は `infer(..., forecast=True)`.
 
 ### どの列が予測を動かしているか
 

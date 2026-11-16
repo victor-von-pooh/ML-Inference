@@ -11,6 +11,9 @@ from ml_inference.bundle import Bundle, load_bundle
 # 予測しなかった行の印
 OK, SKIPPED = "ok", "skipped"
 
+# 予測の値が数でない行の理由
+NOT_FINITE = "予測の値が数ではありません (入力に無限大などが無いか)"
+
 # 表として前処理をかける種類
 TABLE_KINDS = ("table", "timeseries")
 
@@ -44,6 +47,31 @@ def lag_settings(bundle: Bundle) -> dict:
     return settings
 
 
+def series_keys(frame: pd.DataFrame, settings: dict) -> pd.Series:
+    """
+    行ごとの系列の名前を返す関数
+
+    Parameters
+    ----------
+    frame: pd.DataFrame
+        渡したデータ
+    settings: dict
+        lag_settings の結果
+
+    Returns
+    ----------
+    keys: pd.Series
+        系列を分ける列の値をつないだ文字 (列が無ければ 1 つの系列)
+    """
+    # 系列を分ける列の値のまま (表記のゆれはそろえて渡す)
+    by = [c for c in settings["by"] if c in frame.columns]
+    keys = frame[by].astype(str).agg("\u0000".join, axis=1) if by else (
+        pd.Series("", index=frame.index)
+    )
+
+    return keys
+
+
 def read_source(
     bundle: Bundle, source: Union[str, Path, pd.DataFrame, Data],
     options: Optional[dict] = None
@@ -58,7 +86,8 @@ def read_source(
     source: Union[str, Path, pd.DataFrame, Data]
         ファイルかディレクトリ, 表, ML-EDA で読んだデータ
     options: Optional[dict] = None
-        読み込みの設定 (学習のときの設定に上書きする)
+        読み込みの設定 (学習のときの設定に上書きする. 場所を渡した場合
+        だけ使う)
 
     Returns
     ----------
@@ -490,6 +519,8 @@ def predict(
         前処理できない場合と, 出力の形が合わない場合
     """
     # データの読み込みと, 種類に合わせた中身
+    if batch_size < 1:
+        raise ValueError("batch_size は 1 以上にしてください")
     if not isinstance(bundle, Bundle):
         bundle = load_bundle(bundle)
     data = read_source(bundle, source, options)
@@ -523,9 +554,7 @@ def predict(
         if not finite.all():
             rows = np.flatnonzero(keep)[~finite]
             for row in rows:
-                reasons[row] = (
-                    "予測の値が数ではありません (入力に無限大などが無いか)"
-                )
+                reasons[row] = NOT_FINITE
             keep[rows] = False
             columns = {
                 name: [v for v, ok in zip(values, finite) if ok]

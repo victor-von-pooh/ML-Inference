@@ -6,7 +6,9 @@ import pandas as pd
 from ml_eda import Data
 
 from ml_inference.bundle import Bundle, load_bundle
-from ml_inference.predict import lag_settings, predict, read_source
+from ml_inference.predict import (
+    NOT_FINITE, lag_settings, predict, read_source, series_keys
+)
 
 # 先の行を予測できなかった理由
 BLOCKED = "前の先の行を予測できないので, 過去の値が揃いません"
@@ -72,31 +74,6 @@ def time_order(frame: pd.DataFrame, settings: dict) -> np.ndarray:
     order = when.sort_values(kind="stable").index.to_numpy()
 
     return order
-
-
-def series_keys(frame: pd.DataFrame, settings: dict) -> pd.Series:
-    """
-    行ごとの系列の名前を返す関数
-
-    Parameters
-    ----------
-    frame: pd.DataFrame
-        渡したデータ
-    settings: dict
-        lag_settings の結果
-
-    Returns
-    ----------
-    keys: pd.Series
-        系列を分ける列の値をつないだ文字 (列が無ければ 1 つの系列)
-    """
-    # 系列を分ける列の値のまま (表記のゆれはそろえて渡す)
-    by = [c for c in settings["by"] if c in frame.columns]
-    keys = frame[by].astype(str).agg("\u0000".join, axis=1) if by else (
-        pd.Series("", index=frame.index)
-    )
-
-    return keys
 
 
 def future_rows(values: pd.Series, keys: pd.Series) -> np.ndarray:
@@ -178,17 +155,23 @@ def forecast(
     future = future_rows(frame[target], keys)
 
     # 予測と, 系列ごとに最も前の先の行を埋めることの繰り返し
-    result, step = advance(bundle, frame, target, keys, future,
-                           target in settings["columns"], batch_size, device)
+    recursive = target in settings["columns"]
+    result, step = advance(bundle, frame, target, keys, future, recursive,
+                           batch_size, device)
 
-    # 先の行の結果と, 元の並び
+    # 先の行の結果と, 元の並び (同じ名前の元の列は名前を変えて残す)
+    if "step" in result.columns:
+        result = result.rename(columns={"step": "step (入力)"})
     result["step"] = step
     left = future & np.isnan(step)
     result.loc[left, "status"] = "skipped"
     result.loc[left, "prediction"] = np.nan
     # 系列で最初に止まった先の行は自分の理由, その後ろは止まったことが理由
+    # (過去の値を使わない一式は, どの行も自分の理由)
     behind = pd.Series(left).groupby(keys).cumsum().to_numpy() > 1
-    blocked = left & (behind | (result["reason"] == "").to_numpy())
+    blocked = left & (
+        (behind & recursive) | (result["reason"] == "").to_numpy()
+    )
     result.loc[blocked, "reason"] = BLOCKED
     result["ahead"] = future
     result.index = order
@@ -262,7 +245,7 @@ def advance(
     table.loc[filled, "prediction"] = frame.loc[filled, target].to_numpy()
     odd = stuck & (table["status"] == "ok").to_numpy()
     table.loc[odd, "status"] = "skipped"
-    table.loc[odd, "reason"] = "予測の値が数ではありません (入力に無限大などが無いか)"
+    table.loc[odd, "reason"] = NOT_FINITE
     result = (table, step)
 
     return result

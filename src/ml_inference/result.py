@@ -49,8 +49,16 @@ def infer(
     # 一式の既定の決め方に, 渡した決め方を重ねる
     if not isinstance(bundle, Bundle):
         bundle = load_bundle(bundle)
-    # (陽性のクラスを消した場合は, しきい値も消す)
-    merged = {**(bundle.info.get("conclusion") or {}), **(rules or {})}
+    # (陽性のクラスを消した場合は, しきい値も消す. 一緒に使えない陽性の
+    # クラスと確信の下限は, 渡した方を使う)
+    given = dict(rules or {})
+    defaults = dict(bundle.info.get("conclusion") or {})
+    if given.get("positive") is not None:
+        defaults.pop("min_confidence", None)
+    if given.get("min_confidence") is not None:
+        defaults.pop("positive", None)
+        defaults.pop("threshold", None)
+    merged = {**defaults, **given}
     if merged.get("positive") is None:
         merged.pop("threshold", None)
     merged = {k: v for k, v in merged.items() if v is not None}
