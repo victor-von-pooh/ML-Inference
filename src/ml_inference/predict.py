@@ -568,7 +568,8 @@ def describe_bundle(bundle: Union[str, Path, Bundle]) -> dict:
     ----------
     description: dict
         名前, 種類, タスク, 目的の列, クラス, 学習に使う列, 読み込み,
-        前処理の手順, モデルの入力, 実験, 結論の既定値, 注意
+        前処理の手順, モデルの入力, 実験, 結論の既定値, 実験の記録との
+        比べ, 注意
     """
     # 画面が一式を選ぶときに要ること
     if not isinstance(bundle, Bundle):
@@ -598,6 +599,7 @@ def describe_bundle(bundle: Union[str, Path, Bundle]) -> dict:
         },
         "run": info.get("run"),
         "conclusion": info.get("conclusion") or {},
+        "check": info.get("check"),
         "notes": list(info.get("notes") or []),
     }
 
