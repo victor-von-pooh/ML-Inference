@@ -62,11 +62,78 @@ def split_outputs(
     return outputs
 
 
+def adjusted_levels(count: int) -> np.ndarray:
+    """
+    行の少ない場合に幅が狭くなりすぎないように, 分位点の水準を外へずらす
+    関数 (共形予測の補正)
+
+    Parameters
+    ----------
+    count: int
+        誤りを測った行の数
+
+    Returns
+    ----------
+    levels: np.ndarray
+        1 % から 99 % に対応する, ずらした水準 (0 から 100)
+    """
+    # 上側は (n + 1) q / n, 下側は 1 から同じだけ離す
+    q = np.asarray(LEVELS, dtype=float) / 100
+    upper = np.minimum(q * (count + 1) / count, 1.0)
+    lower = np.maximum(1 - (1 - q) * (count + 1) / count, 0.0)
+    levels = np.where(q >= 0.5, upper, lower) * 100
+
+    return levels
+
+
+def coverage_spread(
+    prediction: np.ndarray, answers: np.ndarray, kind: str
+) -> float:
+    """
+    片方の半分で求めた 90 % の幅が, もう片方の半分を予測の水準ごとに
+    どれだけ均等に覆うかを求める関数
+
+    Parameters
+    ----------
+    prediction: np.ndarray
+        予測
+    answers: np.ndarray
+        実際の値
+    kind: str
+        relative か absolute
+
+    Returns
+    ----------
+    spread: float
+        水準の 4 つの区間ごとの覆う割合と 90 % のずれの平均 (小さいほど
+        良い. 2 つの半分を入れ替えた平均)
+    """
+    # 偶数番と奇数番の行に分けて, 互いに確かめる
+    errors = np.log(answers / prediction) if kind == "relative" else (
+        answers - prediction
+    )
+    gaps = []
+    for fit, check in ((0, 1), (1, 0)):
+        low, high = np.percentile(errors[fit::2], [5, 95])
+        part = errors[check::2]
+        level = prediction[check::2]
+        edges = np.percentile(level, [25, 50, 75])
+        group = np.digitize(level, edges)
+        for number in range(4):
+            inside = part[group == number]
+            if len(inside):
+                gaps.append(abs(((inside >= low) & (inside <= high)).mean()
+                                - 0.9))
+    spread = float(np.mean(gaps)) if gaps else 0.0
+
+    return spread
+
+
 def residual_quantiles(
     prediction: np.ndarray, answers: np.ndarray
 ) -> dict:
     """
-    誤りの分位点を, 差と比の 2 つの形で求める関数
+    誤りの分位点を, 差と比の 2 つの形で求め, 使う形を選ぶ関数
 
     Parameters
     ----------
@@ -79,16 +146,25 @@ def residual_quantiles(
     ----------
     quantiles: dict
         absolute (差の分位点), relative (比の対数の分位点. 予測か実際の
-        値に正でないものがあれば None), kind (使う形)
+        値に正でないものがあれば None), kind (使う形. 両方あれば, 半分で
+        求めた幅が残りの半分を予測の水準ごとに均等に覆う方)
     """
-    # 差は常に, 比は全て正のときだけ
-    absolute = np.percentile(answers - prediction, LEVELS)
+    # 行の少ない場合の補正をした分位点
+    levels = adjusted_levels(len(answers))
+    absolute = np.percentile(answers - prediction, levels)
     positive = bool((prediction > 0).all() and (answers > 0).all())
     relative = np.percentile(
-        np.log(answers / prediction), LEVELS
+        np.log(answers / prediction), levels
     ) if positive else None
+    kind = "absolute"
+    if positive and len(answers) >= 40:
+        kind = "relative" if coverage_spread(
+            prediction, answers, "relative"
+        ) <= coverage_spread(prediction, answers, "absolute") else "absolute"
+    elif positive:
+        kind = "relative"
     quantiles = {
-        "kind": "relative" if positive else "absolute",
+        "kind": kind,
         "absolute": [float(v) for v in absolute],
         "relative": None if relative is None else [float(v) for v in relative],
     }
@@ -165,6 +241,41 @@ def calibration(confidence: np.ndarray, hit: np.ndarray) -> dict:
     return result
 
 
+def class_calibration(
+    bundle: Bundle, columns: dict, answers: np.ndarray
+) -> tuple[dict, Optional[str]]:
+    """
+    分類の確率の当たり具合を求める関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        一式
+    columns: dict
+        decode の列
+    answers: np.ndarray
+        クラスの番号
+
+    Returns
+    ----------
+    result: tuple[dict, Optional[str]]
+        calibration の結果と, 測ったクラス (2 クラスは 2 つ目のクラス,
+        3 クラス以上は None (予測したクラス))
+    """
+    # 2 クラスは当たりの確率, 他は予測したクラスの確率
+    classes = np.asarray(bundle.classes)
+    if len(classes) == 2:
+        name = str(classes[1])
+        result = (calibration(
+            columns[f"p:{name}"].astype(float), answers.astype(int) == 1
+        ), name)
+        return result
+    hit = columns["prediction"] == classes[answers.astype(int)]
+    result = (calibration(columns["confidence"].astype(float), hit), None)
+
+    return result
+
+
 def measure_uncertainty(
     bundle: Bundle, dataset: Dataset
 ) -> Optional[dict[str, Any]]:
@@ -218,20 +329,27 @@ def measure_uncertainty(
                 lower, upper = interval(got_prediction, quantiles, low, high)
                 inside = (truth >= lower) & (truth <= upper)
                 uncertainty["coverage"][name] = float(inside.mean())
+            # 片側の点ごとに, テスト用の実際の値がそれ以下だった割合 (量の
+            # 判断は 1 つの分位点を使うので)
+            uncertainty["test_below"] = [
+                float((truth <= interval(got_prediction, quantiles, level,
+                                         level)[1]).mean())
+                for level in LEVELS
+            ]
         return uncertainty
 
-    # 分類は予測したクラスの確率の当たり具合
-    classes = np.asarray(bundle.classes)
-    hit = columns["prediction"] == classes[answers.astype(int)]
-    uncertainty["calibration"] = calibration(
-        columns["confidence"].astype(float), hit
+    # 分類は確率の当たり具合. 2 クラスは 2 つ目のクラスの確率で測る
+    # (判断に使う当たりの確率. 予測したクラスの確率では, 少ない当たりの
+    # 低い確率の区間のずれが折り返して見えない), 3 クラス以上は予測した
+    # クラスの確率で測る
+    uncertainty["calibration"], uncertainty["calibration_of"] = (
+        class_calibration(bundle, columns, answers)
     )
     if test:
         count = min(len(dataset.arrays("test")[1]), UNCERTAINTY_ROWS)
         got, truth = split_outputs(bundle, dataset, "test", count)
-        uncertainty["test_ece"] = calibration(
-            got["confidence"].astype(float),
-            got["prediction"] == classes[truth.astype(int)]
-        )["ece"]
+        uncertainty["test_ece"] = class_calibration(
+            bundle, got, truth
+        )[0]["ece"]
 
     return uncertainty

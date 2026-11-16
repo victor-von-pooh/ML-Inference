@@ -16,13 +16,33 @@ DECISION_KEYS = {
     "select": ("type", "positive", "value", "cost", "effect", "budget",
                "budget_cost", "current"),
     "triage": ("type", "positive", "miss_cost", "false_alarm_cost",
-               "current"),
+               "capacity", "current"),
 }
+
+# 型ごとの, 行ごとに要る損得の値 (欠けた行は決めない)
+AMOUNTS = {
+    "quantity": ("under_cost", "over_cost", "stock"),
+    "select": ("value", "cost", "effect"),
+    "triage": ("miss_cost", "false_alarm_cost"),
+}
+
+# 意思決定が予測の表に足す列
+DECISION_COLUMNS = (
+    "action", "level", "expected_cost", "point_expected_cost",
+    "gain_if_acted", "expected_gain"
+)
+
+# 分割の日本語の名前
+SPLIT_NAMES = {"train": "学習用", "valid": "検証用", "test": "テスト用"}
+
+# たどり直しの差の幅を求める選び直しの回数と乱数のシード
+BOOTSTRAP = 500
+BOOTSTRAP_SEED = 0
 
 
 def check_amount(
     decision: dict, name: str, columns: Optional[list[str]],
-    errors: list[str], required: bool = True
+    errors: list[str], required: bool = True, upper: Optional[float] = None
 ) -> None:
     """
     損得の値が 0 以上の数か, 予測の表の列の名前かを確かめる関数
@@ -39,12 +59,14 @@ def check_amount(
         誤りの一覧 (書き足す)
     required: bool = True
         省けないか
+    upper: Optional[float] = None
+        数の上限 (割合なら 1)
 
     Returns
     ----------
     None
     """
-    # 列の名前なら列があるか, 数なら 0 以上か
+    # 列の名前なら列があるか, 数なら 0 以上 (と上限以下) か
     value = decision.get(name)
     if value is None:
         if required:
@@ -54,8 +76,11 @@ def check_amount(
         if columns is not None and value not in columns:
             errors.append(f"{name} の列 {value} が予測の表にありません")
         return
-    if not is_number(value) or value < 0:
-        errors.append(f"{name} は 0 以上の数か列の名前にしてください")
+    if not is_number(value) or value < 0 or (
+        upper is not None and value > upper
+    ):
+        limit = f"から {upper} の" if upper is not None else "以上の"
+        errors.append(f"{name} は 0 {limit}数か列の名前にしてください")
 
 
 def check_decision(
@@ -88,52 +113,31 @@ def check_decision(
         f"{kind} に知らない項目です: {key}"
         for key in decision if key not in DECISION_KEYS[kind]
     ]
-    classify = bundle.task == "classification"
 
-    # 型ごとの項目
+    # 型と一式の組み合わせ
     if kind == "quantity":
-        if classify:
+        if bundle.task == "classification":
             errors.append("quantity は回帰と予測の一式にだけ使えます")
-        check_amount(decision, "under_cost", columns, errors)
-        check_amount(decision, "over_cost", columns, errors)
-        check_amount(decision, "stock", columns, errors, False)
-        step = decision.get("step", 1)
-        if not is_number(step) or step <= 0:
-            errors.append("step は正の数にしてください")
-        if all(is_number(decision.get(k)) for k in ("under_cost",
-                                                     "over_cost")):
-            if decision["under_cost"] + decision["over_cost"] <= 0:
-                errors.append("under_cost と over_cost の和を正にしてください")
-    else:
-        if not classify or len(bundle.classes) != 2:
-            errors.append(f"{kind} は 2 クラスの分類の一式にだけ使えます")
-        elif str(decision.get("positive")) not in bundle.classes:
-            errors.append(
-                f"positive は {', '.join(bundle.classes)} のどれかにして"
-                "ください"
-            )
-    if kind == "select":
-        check_amount(decision, "value", columns, errors)
-        check_amount(decision, "cost", columns, errors)
-        effect = decision.get("effect")
-        if not is_number(effect) or not 0 <= effect <= 1:
-            errors.append(
-                "effect (行動で当たりの損を防げる割合. 仮定) を 0 から 1 の"
-                "数で書いてください"
-            )
-        for name in ("budget", "budget_cost"):
-            value = decision.get(name)
-            if value is not None and (not is_number(value) or value < 0):
-                errors.append(f"{name} は 0 以上の数にしてください")
-    if kind == "triage":
-        check_amount(decision, "miss_cost", columns, errors)
-        check_amount(decision, "false_alarm_cost", columns, errors)
-        if all(is_number(decision.get(k)) for k in ("miss_cost",
-                                                     "false_alarm_cost")):
-            if decision["miss_cost"] + decision["false_alarm_cost"] <= 0:
-                errors.append(
-                    "miss_cost と false_alarm_cost の和を正にしてください"
-                )
+    elif bundle.task != "classification" or len(bundle.classes) != 2:
+        errors.append(f"{kind} は 2 クラスの分類の一式にだけ使えます")
+    elif str(decision.get("positive")) not in bundle.classes:
+        errors.append(
+            f"positive は {', '.join(bundle.classes)} のどれかにして"
+            "ください"
+        )
+
+    # 型ごとの損得と制約
+    for name in AMOUNTS[kind]:
+        check_amount(
+            decision, name, columns, errors, required=name != "stock",
+            upper=1.0 if name == "effect" else None
+        )
+    for name in ("step", "budget", "budget_cost", "capacity"):
+        value = decision.get(name)
+        if value is not None and (not is_number(value) or value < 0 or (
+            name == "step" and value == 0
+        )):
+            errors.append(f"{name} は正の数にしてください")
     current = decision.get("current")
     if current is not None and columns is not None and current not in columns:
         errors.append(f"current の列 {current} が予測の表にありません")
@@ -155,17 +159,48 @@ def values_of(frame: pd.DataFrame, value: Any) -> np.ndarray:
     Returns
     ----------
     values: np.ndarray
-        行ごとの数 (列の数にできない値は 0)
+        行ごとの数 (列の欠けた値と数にできない値は欠損)
     """
-    # 列は数にし, 数はそろえる
+    # 列は数に (欠けた値は欠損のまま), 数はそろえる
     if value is None:
         return np.zeros(len(frame))
     if isinstance(value, str):
-        values = pd.to_numeric(frame[value], errors="coerce").fillna(0)
+        values = pd.to_numeric(frame[value], errors="coerce")
         return values.to_numpy(dtype=float)
     values = np.full(len(frame), float(value))
 
     return values
+
+
+def amounts_of(
+    frame: pd.DataFrame, decision: dict
+) -> tuple[dict[str, np.ndarray], np.ndarray]:
+    """
+    型ごとの損得の値を行ごとに取り出し, 欠けた行の印を返す関数
+
+    Parameters
+    ----------
+    frame: pd.DataFrame
+        予測の表
+    decision: dict
+        意思決定の決め方
+
+    Returns
+    ----------
+    result: tuple[dict[str, np.ndarray], np.ndarray]
+        項目ごとの行ごとの値と, 値の欠けた行の印
+    """
+    # 欠けた値の行は決めない (0 とみなすと, ただの行動や 1 % の点になる)
+    values = {
+        name: values_of(frame, decision.get(name))
+        for name in AMOUNTS[decision["type"]]
+    }
+    missing = np.zeros(len(frame), dtype=bool)
+    for array in values.values():
+        missing |= np.isnan(array)
+    result = (values, missing)
+
+    return result
 
 
 def residual_samples(bundle: Bundle) -> tuple[str, np.ndarray]:
@@ -218,7 +253,8 @@ def outcomes(
     Returns
     ----------
     values: np.ndarray
-        (行の数, 99) のありうる実際の値 (同じ重み)
+        (行の数, 99) のありうる実際の値 (同じ重み. 1 % より外と 99 % より
+        外の裾は含まないので, τ が 0.99 に近いと見込みの損は甘い)
     """
     # 比は掛け, 差は足す
     if kind == "relative":
@@ -262,11 +298,52 @@ def quantity_cost(
     return cost
 
 
+def best_amount(
+    goal: np.ndarray, stock: np.ndarray, step: float,
+    possible: np.ndarray, under: np.ndarray, over: np.ndarray
+) -> np.ndarray:
+    """
+    目指す量を刻みにそろえる関数 (切り下げと切り上げの見込みの損の小さい
+    方)
+
+    Parameters
+    ----------
+    goal: np.ndarray
+        目指す置いた後の量
+    stock: np.ndarray
+        今ある量
+    step: float
+        刻み
+    possible: np.ndarray
+        ありうる実際の値
+    under: np.ndarray
+        足りない損
+    over: np.ndarray
+        余る損
+
+    Returns
+    ----------
+    action: np.ndarray
+        足す量 (0 以上で刻みの倍数)
+    """
+    # 刻みの上下の 2 つの量を比べる
+    raw = (goal - stock) / step
+    low = np.maximum(np.floor(raw + 1e-9), 0) * step
+    high = np.maximum(np.ceil(raw - 1e-9), 0) * step
+    low_cost = quantity_cost(stock + low, possible, under, over).mean(axis=1)
+    high_cost = quantity_cost(stock + high, possible, under, over).mean(
+        axis=1
+    )
+    action = np.where(high_cost < low_cost, high, low)
+
+    return action
+
+
 def decide_quantity(
     bundle: Bundle, frame: pd.DataFrame, decision: dict, ok: np.ndarray
 ) -> tuple[dict, dict]:
     """
-    足りない損と余る損の比で, 置く量を決める関数
+    足りない損と余る損の比で, 次の 1 期間に置く量を決める関数
 
     Parameters
     ----------
@@ -277,53 +354,52 @@ def decide_quantity(
     decision: dict
         意思決定の決め方
     ok: np.ndarray
-        予測した行の印
+        決める行 (予測し, 損得の値が揃った行) の印
 
     Returns
     ----------
     result: tuple[dict, dict]
-        足す列 (action, level, expected, baseline_expected) と, まとめ
+        足す列 (action, level, expected_cost, point_expected_cost) と
+        まとめ
     """
-    # 損の比で決まる分位点まで置く (新聞売りの問題)
+    # 損の比 τ で決まる分位点まで置く (新聞売りの問題の答え). 足りない損
+    # が 0 なら足さない, 余る損が 0 なら 99 % の点
     kind, quantiles = residual_samples(bundle)
-    prediction = pd.to_numeric(
+    amounts, _ = amounts_of(frame, decision)
+    under = np.nan_to_num(amounts["under_cost"])
+    over = np.nan_to_num(amounts["over_cost"])
+    stock = np.nan_to_num(amounts["stock"])
+    prediction = np.nan_to_num(pd.to_numeric(
         frame["prediction"], errors="coerce"
-    ).to_numpy(dtype=float)
-    under = values_of(frame, decision["under_cost"])
-    over = values_of(frame, decision["over_cost"])
-    stock = values_of(frame, decision.get("stock"))
+    ).to_numpy(dtype=float))
     step = float(decision.get("step", 1))
     tau = under / np.maximum(under + over, 1e-12)
     index = np.clip(np.round(tau * 100).astype(int), 1, 99) - 1
-    shift = quantiles[index]
-    target = prediction * np.exp(shift) if kind == "relative" else (
-        prediction + shift
-    )
-    action = np.maximum(np.ceil((target - stock) / step - 1e-9) * step, 0)
+    possible = outcomes(prediction, kind, quantiles)
+    goal = possible[np.arange(len(frame)), index]
+    action = best_amount(goal, stock, step, possible, under, over)
+    action = np.where(tau <= 0, 0.0, action)
     level = stock + action
 
-    # 見込みの損 (外れ方の分位点を, ありうる実際の値として平均)
-    safe = np.where(ok, prediction, 0.0)
-    possible = outcomes(safe, kind, quantiles)
+    # 外れ方の記録が正しいとしたときの見込みの損 (分位点をありうる値に)
     expected = quantity_cost(level, possible, under, over).mean(axis=1)
-    point = np.maximum(np.ceil((safe - stock) / step - 1e-9) * step, 0)
-    baseline = quantity_cost(stock + point, possible, under, over).mean(
-        axis=1
+    point = stock + np.maximum(
+        np.round((prediction - stock) / step) * step, 0
     )
+    baseline = quantity_cost(point, possible, under, over).mean(axis=1)
     columns = {
         "action": np.where(ok, action, np.nan),
         "level": np.where(ok, level, np.nan),
-        "expected": np.where(ok, -expected, np.nan),
-        "baseline_expected": np.where(ok, -baseline, np.nan),
+        "expected_cost": np.where(ok, expected, np.nan),
+        "point_expected_cost": np.where(ok, baseline, np.nan),
     }
     summary = {
-        "rows": int(ok.sum()),
         "acting": int((action[ok] > 0).sum()),
         "amount": float(action[ok].sum()),
         "expected_cost": float(expected[ok].sum()),
         "baseline_cost": float(baseline[ok].sum()),
-        "baseline": "予測の値どおりに置く",
-        "tau": float(np.mean(tau[ok])) if ok.any() else None,
+        "tau_min": float(tau[ok].min()) if ok.any() else None,
+        "tau_max": float(tau[ok].max()) if ok.any() else None,
         "kind": kind,
     }
     result = (columns, summary)
@@ -331,11 +407,104 @@ def decide_quantity(
     return result
 
 
+def greedy(
+    order: np.ndarray, usable: np.ndarray, cost: np.ndarray,
+    budget: Optional[float], budget_cost: Optional[float],
+    count: Optional[int] = None
+) -> np.ndarray:
+    """
+    並びの順に, 件数と費用の上限まで行を選ぶ関数
+
+    Parameters
+    ----------
+    order: np.ndarray
+        選ぶ順の行の位置
+    usable: np.ndarray
+        選んでよい行の印
+    cost: np.ndarray
+        行ごとの費用
+    budget: Optional[float]
+        件数の上限
+    budget_cost: Optional[float]
+        費用の上限 (越える行は飛ばして次を見る)
+    count: Optional[int] = None
+        選ぶ件数 (比べるやり方を同じ件数にそろえる場合)
+
+    Returns
+    ----------
+    chosen: np.ndarray
+        選んだ行の印
+    """
+    # 上限に届くまで, 選べる行を順に
+    chosen = np.zeros(len(usable), dtype=bool)
+    spent, picked = 0.0, 0
+    for row in order:
+        if not usable[row]:
+            continue
+        if (budget is not None and picked >= budget) or (
+            count is not None and picked >= count
+        ):
+            break
+        if budget_cost is not None and spent + cost[row] > budget_cost:
+            continue
+        chosen[row] = True
+        spent += cost[row]
+        picked += 1
+
+    return chosen
+
+
+def choose_rows(
+    gain: np.ndarray, cost: np.ndarray, ok: np.ndarray,
+    budget: Optional[float], budget_cost: Optional[float]
+) -> np.ndarray:
+    """
+    得が正の行を, 上限の中で得の合計が大きくなるように選ぶ関数
+
+    Parameters
+    ----------
+    gain: np.ndarray
+        行動した場合の見込みの得
+    cost: np.ndarray
+        行ごとの費用
+    ok: np.ndarray
+        選んでよい行の印
+    budget: Optional[float]
+        件数の上限
+    budget_cost: Optional[float]
+        費用の上限
+
+    Returns
+    ----------
+    chosen: np.ndarray
+        選んだ行の印
+    """
+    # 得の順と, (費用の上限があれば) 費用あたりの得の順の良い方 (詰め込み
+    # の問題の近い答え)
+    usable = ok & (gain > 0)
+    by_gain = greedy(
+        np.argsort(-np.where(ok, gain, -np.inf), kind="stable"), usable,
+        cost, budget, budget_cost
+    )
+    if budget_cost is None:
+        return by_gain
+    ratio = gain / np.maximum(cost, 1e-12)
+    by_ratio = greedy(
+        np.argsort(-np.where(ok, ratio, -np.inf), kind="stable"), usable,
+        cost, budget, budget_cost
+    )
+    chosen = by_ratio if gain[by_ratio].sum() > gain[by_gain].sum() else (
+        by_gain
+    )
+
+    return chosen
+
+
 def decide_select(
     bundle: Bundle, frame: pd.DataFrame, decision: dict, ok: np.ndarray
 ) -> tuple[dict, dict]:
     """
-    見込みの得の大きい順に, 上限まで行動する行を選ぶ関数
+    見込みの得の大きい行を, 上限まで行動する行に選ぶ関数
 
     Parameters
     ----------
@@ -346,60 +515,42 @@ def decide_select(
     decision: dict
         意思決定の決め方
     ok: np.ndarray
-        予測した行の印
+        決める行の印
 
     Returns
     ----------
     result: tuple[dict, dict]
-        足す列 (action, expected) と, まとめ
+        足す列 (action, gain_if_acted, expected_gain) と, まとめ
     """
-    # 見込みの得 = 確率 × 価値 × 効果 − 費用
-    probability = pd.to_numeric(
+    # 行動した場合の見込みの得 = 確率 × 価値 × 効果 − 費用 (効果は確率に
+    # 比例するという仮定)
+    probability = np.nan_to_num(pd.to_numeric(
         frame[f"p:{decision['positive']}"], errors="coerce"
-    ).fillna(0).to_numpy(dtype=float)
-    value = values_of(frame, decision["value"])
-    cost = values_of(frame, decision["cost"])
-    gain = probability * value * float(decision["effect"]) - cost
-    gain = np.where(ok, gain, -np.inf)
-
-    # 得の大きい順に, 正のものを上限まで
-    order = np.argsort(-gain, kind="stable")
-    chosen = np.zeros(len(frame), dtype=bool)
-    spent, count = 0.0, 0
-    for row in order:
-        if gain[row] <= 0:
-            break
-        budget = decision.get("budget")
-        if budget is not None and count >= budget:
-            break
-        limit = decision.get("budget_cost")
-        if limit is not None and spent + cost[row] > limit:
-            continue
-        chosen[row] = True
-        spent += cost[row]
-        count += 1
-
-    # 比べ: 確率の高い順に同じ件数 (上限があっても同じ件数なので守る).
-    # 全てに行動は上限の無い場合だけ (上限を破る比べは公平でない)
-    top = np.zeros(len(frame), dtype=bool)
-    ranked = np.argsort(-np.where(ok, probability, -1), kind="stable")
-    top[ranked[:count]] = True
-    finite = np.where(ok, gain, 0.0)
-    limited = decision.get("budget") is not None or (
-        decision.get("budget_cost") is not None
+    ).to_numpy(dtype=float))
+    amounts, _ = amounts_of(frame, decision)
+    cost = np.nan_to_num(amounts["cost"])
+    gain = np.nan_to_num(
+        probability * amounts["value"] * amounts["effect"] - cost
     )
-    baselines = {"確率の高い順に同じ件数": float(finite[top].sum())}
-    if not limited:
-        baselines["全てに行動"] = float(finite[ok].sum())
+    budget, budget_cost = decision.get("budget"), decision.get("budget_cost")
+    chosen = choose_rows(gain, cost, ok, budget, budget_cost)
+
+    # 比べ: 確率の高い順に同じ件数 (同じ費用の上限の中で). 全てに行動は
+    # 上限の無い場合だけ (上限を破る比べは公平でない)
+    ranked = np.argsort(-np.where(ok, probability, -np.inf), kind="stable")
+    top = greedy(ranked, ok, cost, None, budget_cost, int(chosen.sum()))
+    baselines = {"確率の高い順に同じ件数": float(gain[top].sum())}
+    if budget is None and budget_cost is None:
+        baselines["全てに行動"] = float(gain[ok].sum())
     columns = {
         "action": np.where(ok, chosen, None),
-        "expected": np.where(ok, finite, np.nan),
+        "gain_if_acted": np.where(ok, gain, np.nan),
+        "expected_gain": np.where(ok, np.where(chosen, gain, 0.0), np.nan),
     }
     summary = {
-        "rows": int(ok.sum()),
-        "acting": int(count),
-        "amount": float(spent),
-        "expected_gain": float(finite[chosen].sum()),
+        "acting": int(chosen.sum()),
+        "amount": float(cost[chosen].sum()),
+        "expected_gain": float(gain[chosen].sum()),
         "baselines": baselines,
     }
     result = (columns, summary)
@@ -436,45 +587,6 @@ def triage_loss(
     return values
 
 
-def realized_gain(
-    flag: np.ndarray, hit: np.ndarray, decision: dict, part: pd.DataFrame
-) -> float:
-    """
-    行動した行の実際の当たりから, 方針の得 (選ぶ) か損 (振り分け) を
-    求める関数
-
-    Parameters
-    ----------
-    flag: np.ndarray
-        行動したかの印
-    hit: np.ndarray
-        実際に当たりだったか
-    decision: dict
-        意思決定の決め方
-    part: pd.DataFrame
-        数える行の予測の表
-
-    Returns
-    ----------
-    total: float
-        得の合計 (選ぶ. 効果は仮定のまま) か, 損の合計の負 (振り分け)
-    """
-    # 選ぶは当たりの価値 × 効果 − 費用, 振り分けは空振りと見逃しの損
-    if decision["type"] == "select":
-        value = values_of(part, decision["value"])
-        cost = values_of(part, decision["cost"])
-        gains = hit * value * float(decision["effect"]) - cost
-        total = float(gains[flag].sum())
-        return total
-    miss = values_of(part, decision["miss_cost"])
-    alarm = values_of(part, decision["false_alarm_cost"])
-    total = -float(
-        (alarm * (flag & ~hit)).sum() + (miss * (~flag & hit)).sum()
-    )
-
-    return total
-
-
 def decide_triage(
     bundle: Bundle, frame: pd.DataFrame, decision: dict, ok: np.ndarray
 ) -> tuple[dict, dict]:
@@ -490,43 +602,53 @@ def decide_triage(
     decision: dict
         意思決定の決め方
     ok: np.ndarray
-        予測した行の印
+        決める行の印
 
     Returns
     ----------
     result: tuple[dict, dict]
-        足す列 (action, expected) と, まとめ
+        足す列 (action, expected_cost) と, まとめ
     """
-    # 回すと空振りの損, 回さないと見逃しの損の見込み
-    probability = pd.to_numeric(
+    # 回す損の見込みが, 回さない損の見込みより小さい行 (しきい値以上)
+    probability = np.nan_to_num(pd.to_numeric(
         frame[f"p:{decision['positive']}"], errors="coerce"
-    ).fillna(0).to_numpy(dtype=float)
-    miss = values_of(frame, decision["miss_cost"])
-    alarm = values_of(frame, decision["false_alarm_cost"])
+    ).to_numpy(dtype=float))
+    amounts, _ = amounts_of(frame, decision)
+    miss = np.nan_to_num(amounts["miss_cost"])
+    alarm = np.nan_to_num(amounts["false_alarm_cost"])
     threshold = alarm / np.maximum(miss + alarm, 1e-12)
-    act = ok & (probability >= threshold)
+    benefit = probability * miss - (1 - probability) * alarm
 
+    # 人手の上限があれば, 回して減る損の大きい順に上限まで
+    capacity = decision.get("capacity")
+    order = np.argsort(-np.where(ok, benefit, -np.inf), kind="stable")
+    act = greedy(order, ok & (probability >= threshold), alarm, capacity,
+                 None)
+    by_half = greedy(
+        np.argsort(-np.where(ok, probability, -np.inf), kind="stable"),
+        ok & (probability >= 0.5), alarm, capacity, None
+    )
+    baselines = {"確率 0.5 で分ける": float(
+        triage_loss(by_half, probability, miss, alarm)[ok].sum()
+    )}
+    if capacity is None:
+        baselines["全てを回す"] = float(
+            triage_loss(ok, probability, miss, alarm)[ok].sum()
+        )
+    baselines["どれも回さない"] = float(triage_loss(
+        np.zeros(len(frame), dtype=bool), probability, miss, alarm
+    )[ok].sum())
     expected = triage_loss(act, probability, miss, alarm)
     columns = {
         "action": np.where(ok, act, None),
-        "expected": np.where(ok, -expected, np.nan),
+        "expected_cost": np.where(ok, expected, np.nan),
     }
     summary = {
-        "rows": int(ok.sum()),
         "acting": int(act.sum()),
-        "threshold": float(np.mean(threshold[ok])) if ok.any() else None,
+        "threshold_min": float(threshold[ok].min()) if ok.any() else None,
+        "threshold_max": float(threshold[ok].max()) if ok.any() else None,
         "expected_cost": float(expected[ok].sum()),
-        "baselines": {
-            "確率 0.5 で分ける": float(triage_loss(
-                ok & (probability >= 0.5), probability, miss, alarm
-            )[ok].sum()),
-            "全てを回す": float(
-                triage_loss(ok, probability, miss, alarm)[ok].sum()
-            ),
-            "どれも回さない": float(triage_loss(
-                np.zeros(len(frame), dtype=bool), probability, miss, alarm
-            )[ok].sum()),
-        },
+        "baselines": baselines,
     }
     result = (columns, summary)
 
@@ -553,60 +675,144 @@ def amount_text(value: float) -> str:
     return text
 
 
-def caveats(bundle: Bundle, kind: str, decision: dict) -> list[str]:
+def range_text(low: float, high: float, percent: bool = False) -> str:
     """
-    意思決定の前提 (外れ方の記録, 確率のずれ, 仮定) を述べる文を返す関数
+    行ごとに違いうる値を, 1 つの値か範囲の文字にする関数
+
+    Parameters
+    ----------
+    low: float
+        最小
+    high: float
+        最大
+    percent: bool = False
+        割合を % で書くか
+
+    Returns
+    ----------
+    text: str
+        同じなら 1 つ, 違えば「行ごとに x から y」
+    """
+    # 割合は % に, 他は有効数字 2 桁
+    if percent:
+        low_text, high_text = f"{low * 100:.0f} %", f"{high * 100:.0f} %"
+    else:
+        low_text, high_text = f"{low:.2g}", f"{high:.2g}"
+    text = low_text if abs(high - low) < 1e-9 else (
+        f"行ごとに {low_text} から {high_text}"
+    )
+
+    return text
+
+
+def caveats(
+    bundle: Bundle, prediction: pd.DataFrame, decision: dict,
+    summary: dict
+) -> list[str]:
+    """
+    意思決定の前提 (外れ方の記録, 確率のずれ, 仮定, 抜けた行) を述べる文
+    を返す関数
 
     Parameters
     ----------
     bundle: Bundle
         推論の一式
-    kind: str
-        意思決定の型
+    prediction: pd.DataFrame
+        予測の表
     decision: dict
         意思決定の決め方
+    summary: dict
+        まとめ
 
     Returns
     ----------
     notes: list[str]
         前提の文
     """
-    # 外れ方と確率の記録
+    # 値の欠けた行と, 外れ方を測った行の少なさ
+    kind = decision["type"]
     uncertainty = bundle.info.get("uncertainty") or {}
     notes = []
+    if summary["missing"]:
+        notes.append(
+            f"損得の値が欠けた {summary['missing']:,} 行は決めていない"
+        )
+    rows = uncertainty.get("rows")
+    if rows is not None and rows < 100:
+        notes.append(
+            f"外れ方と確率の当たり具合は {rows} 行だけで測ったので粗い"
+        )
+
+    # 量: 1 期間, 外れ方の記録, 打ち切られた需要, 何段も先の予測
     if kind == "quantity":
-        coverage = (uncertainty.get("coverage") or {}).get("90")
-        if coverage is not None:
+        notes.append(
+            "量は次の 1 期間の需要に対するもの (届くまでの日数, 発注の周期,"
+            " 余りの持ち越しは考えていない. 持ち越す場合の余る損は保管の"
+            "費用などで, 1 期間の答えは目安)"
+        )
+        below = uncertainty.get("test_below")
+        if below and summary["tau_min"] is not None:
+            level = int(np.clip(round(summary["tau_min"] * 100), 1, 99))
             notes.append(
-                f"外れ方は検証用の期間で測った. その 90 % の幅は, テスト用の"
-                f"期間の実際の値の {coverage * 100:.0f} % を覆った"
-                + (" (外れ方を小さく見積もっている. 足りない損が大きいなら"
-                   "多めに見る)" if coverage < 0.85 else "")
+                f"外れ方は{SPLIT_NAMES.get(uncertainty.get('split'), '')}"
+                f"の分割で測った. {level}"
+                f" % の点を, テスト用の分割の実際の値が下回ったのは "
+                f"{below[level - 1] * 100:.0f} %"
+                + (" (外れ方を小さく見積もっている. 量は少なめ)"
+                   if below[level - 1] < level / 100 - 0.05 else "")
             )
-    else:
-        calibration = uncertainty.get("calibration") or {}
-        ece = uncertainty.get("test_ece", calibration.get("ece"))
-        if ece is not None:
+        if uncertainty.get("kind") == "absolute":
             notes.append(
-                f"確率と実際に当たった割合のずれは平均 {ece * 100:.1f} "
-                "ポイント" + (" (大きいので, 確率を額面どおりに使う判断は"
-                              "粗い)" if ece > 0.05 else "")
+                "外れ方は水準に依らない差で持っている (大きな行では外れ方"
+                "を小さく, 小さな行では大きく見積もりうる)"
             )
+        notes.append(
+            "過去の値が欠品などで抑えられていたなら, 学習した需要と外れ方"
+            "は小さめで, 量も少なめ"
+        )
+        if "step" in prediction.columns and (
+            pd.to_numeric(prediction["step"], errors="coerce") > 1
+        ).any():
+            notes.append(
+                "2 段目より先の予測にも 1 つ先の外れ方を当てている (先の段"
+                "ほど外れ方は大きく, 量は少なめ)"
+            )
+        return notes
+
+    # 選ぶと振り分け: 確率のずれ, 効果の仮定, 人の判断
+    calibration = uncertainty.get("calibration") or {}
+    ece = uncertainty.get("test_ece", calibration.get("ece"))
+    if ece is not None:
+        notes.append(
+            f"確率と実際に当たった割合のずれは平均 {ece * 100:.1f} ポイント"
+            + (" (大きいので, 確率を額面どおりに使う判断は粗い)"
+               if ece > 0.05 else "")
+        )
     if kind == "select":
         notes.append(
-            f"行動で当たりの損を防げる割合 {decision['effect']} は仮定 (確か"
-            "めるには, 行動した組としない組を比べる試験が要る)"
+            f"行動で当たりの損を防げる割合 ({decision['effect']}) と, その"
+            "効果が当たりの確率に比例することは仮定 (確率の高い行ほど防げ"
+            "るとは限らない. 確かめるには, 行動した組としない組を比べる"
+            "試験が要る)"
         )
+    notes.append(
+        "人の判断を補う材料で, 自動で決めるものではない (重い判断では, "
+        "グループごとの見逃しの割合なども確かめる)"
+    )
 
     return notes
 
 
-def sentences_of(kind: str, summary: dict, decision: dict) -> list[str]:
+def sentences_of(
+    bundle: Bundle, kind: str, summary: dict, decision: dict
+) -> list[str]:
     """
     意思決定のまとめを日本語の文にする関数
 
     Parameters
     ----------
+    bundle: Bundle
+        推論の一式
     kind: str
         意思決定の型
     summary: dict
@@ -617,50 +823,56 @@ def sentences_of(kind: str, summary: dict, decision: dict) -> list[str]:
     Returns
     ----------
     sentences: list[str]
-        文
+        文 (前提のもとの最も良い行動と, 同じ前提での比べ)
     """
-    # 何をどれだけするかと, 素朴なやり方との比べ
-    sentences = []
+    # 前提のもとの比べは前提から必ずそうなるので, 実際の差はたどり直しで
+    rows = summary["rows"]
+    target = bundle.dataset.info.get("target") or "値"
+    tail = (
+        " (同じ前提から計算した比べなので必ずこの方針が良く出る. 実際の差"
+        "は過去のデータでたどり直して確かめる)"
+    )
     if kind == "quantity":
-        sentences.append(
-            f"{summary['rows']:,} 行のうち {summary['acting']:,} 行に, 合計 "
-            f"{amount_text(summary['amount'])} を足すことを勧める (足りない"
-            f"損 {decision['under_cost']}, 余る損 {decision['over_cost']} "
-            f"から, 予測の外れ方の {summary['tau'] * 100:.0f} % の点まで置く)"
-        )
-        saved = summary["baseline_cost"] - summary["expected_cost"]
-        sentences.append(
-            f"見込みの損は {amount_text(summary['expected_cost'])} で, "
-            f"{summary['baseline']}場合の "
-            f"{amount_text(summary['baseline_cost'])} より "
-            f"{amount_text(saved)} 少ない"
-        )
+        tau = range_text(summary["tau_min"], summary["tau_max"], True)
+        sentences = [
+            f"足りない損 {decision['under_cost']} と余る損 "
+            f"{decision['over_cost']}, 予測の外れ方の記録が正しいとすれば, "
+            f"損が最も小さいのは {target} の外れ方の {tau} の点まで置くこと",
+            f"{rows:,} 行のうち {summary['acting']:,} 行に, 合計 "
+            f"{amount_text(summary['amount'])} を足す",
+            f"その前提での見込みの損は {amount_text(summary['expected_cost'])}"
+            f", 予測の値どおりに置くと {amount_text(summary['baseline_cost'])}"
+            + tail,
+        ]
     elif kind == "select":
-        sentences.append(
-            f"{summary['rows']:,} 件のうち {summary['acting']:,} 件に行動"
-            f"することを勧める (費用の合計 {amount_text(summary['amount'])})"
-        )
-        sentences.append(
-            f"見込みの得は {amount_text(summary['expected_gain'])}. "
-            + ", ".join(
+        sentences = [
+            "確率と, 書いた価値, 費用, 効果 (仮定) のもとで, 見込みの得が正の"
+            f"行を{'上限まで' if summary['limited'] else '全て'}選ぶと, "
+            f"{rows:,} 件のうち {summary['acting']:,} 件 (費用の合計 "
+            f"{amount_text(summary['amount'])})",
+            f"その前提での見込みの得は {amount_text(summary['expected_gain'])}"
+            ", " + ", ".join(
                 f"{name}なら {amount_text(value)}"
                 for name, value in summary["baselines"].items()
-            )
-        )
+            ) + tail,
+        ]
     else:
-        sentences.append(
-            f"{summary['rows']:,} 件のうち {summary['acting']:,} 件を回す"
-            f"ことを勧める (確率 {summary['threshold']:.2f} 以上. 見逃しの"
-            f"損 {decision['miss_cost']}, 空振りの損 "
-            f"{decision['false_alarm_cost']} から)"
+        threshold = range_text(
+            summary["threshold_min"], summary["threshold_max"]
         )
-        sentences.append(
-            f"見込みの損は {amount_text(summary['expected_cost'])}. "
-            + ", ".join(
+        sentences = [
+            f"見逃しの損 {decision['miss_cost']} と空振りの損 "
+            f"{decision['false_alarm_cost']}, 確率が当たっているとすれば, "
+            f"損が最も小さいのは確率 {threshold} 以上を回すこと"
+            + (f" (回せるのは {decision['capacity']} 件まで)"
+               if decision.get("capacity") is not None else ""),
+            f"{rows:,} 件のうち {summary['acting']:,} 件を回す",
+            f"その前提での見込みの損は {amount_text(summary['expected_cost'])}"
+            ", " + ", ".join(
                 f"{name}なら {amount_text(value)}"
                 for name, value in summary["baselines"].items()
-            )
-        )
+            ) + tail,
+        ]
 
     return sentences
 
@@ -684,8 +896,8 @@ def decide(
     Returns
     ----------
     result: dict
-        frame (action, expected などを足した表), summary, sentences,
-        notes (前提), decision (使った決め方)
+        frame (行動の列を足した表), summary, sentences, notes (前提),
+        decision (使った決め方)
 
     Raises
     ----------
@@ -700,12 +912,19 @@ def decide(
     if errors:
         raise ValueError("意思決定の決め方の誤り: " + " / ".join(errors))
 
-    # 型ごとの行動と見込み
+    # 予測し, 損得の値が揃った行だけを決める
     kind = decision["type"]
-    ok = (prediction["status"] == "ok").to_numpy()
+    _, missing = amounts_of(prediction, decision)
+    predicted = (prediction["status"] == "ok").to_numpy()
+    ok = predicted & ~missing
     maker = {"quantity": decide_quantity, "select": decide_select,
              "triage": decide_triage}[kind]
     columns, summary = maker(bundle, prediction, decision, ok)
+    summary.update(
+        rows=int(ok.sum()), missing=int((predicted & missing).sum()),
+        limited=decision.get("budget") is not None
+        or decision.get("budget_cost") is not None
+    )
     frame = prediction.copy()
     for name in columns:
         if name in frame.columns:
@@ -715,12 +934,181 @@ def decide(
     result = {
         "frame": frame,
         "summary": summary,
-        "sentences": sentences_of(kind, summary, decision),
-        "notes": caveats(bundle, kind, decision),
+        "sentences": sentences_of(bundle, kind, summary, decision),
+        "notes": caveats(bundle, prediction, decision, summary),
         "decision": decision,
     }
 
     return result
+
+
+def realized(
+    kind: str, flag: np.ndarray, part: pd.DataFrame, decision: dict,
+    actual: np.ndarray
+) -> np.ndarray:
+    """
+    方針の行動から, 行ごとの実際の得 (正) と損 (負) を求める関数
+
+    Parameters
+    ----------
+    kind: str
+        意思決定の型
+    flag: np.ndarray
+        量の型は置いた量, 他は行動したかの印
+    part: pd.DataFrame
+        数える行の予測の表
+    decision: dict
+        意思決定の決め方
+    actual: np.ndarray
+        量の型は実際の値, 他は実際に当たりだったかの印
+
+    Returns
+    ----------
+    values: np.ndarray
+        行ごとの得 (損は負)
+    """
+    # 量は足りない損と余る損, 選ぶは当たりの価値 × 効果 − 費用 (効果は
+    # 仮定のまま), 振り分けは空振りと見逃しの損
+    amounts, _ = amounts_of(part, decision)
+    if kind == "quantity":
+        values = -quantity_cost(
+            flag, actual, amounts["under_cost"], amounts["over_cost"]
+        )
+        return values
+    if kind == "select":
+        gains = actual * amounts["value"] * amounts["effect"] - amounts[
+            "cost"
+        ]
+        values = np.where(flag, gains, 0.0)
+        return values
+    values = -(
+        amounts["false_alarm_cost"] * (flag & ~actual)
+        + amounts["miss_cost"] * (~flag & actual)
+    )
+
+    return values
+
+
+def policies_of(
+    kind: str, part: pd.DataFrame, decision: dict
+) -> dict[str, np.ndarray]:
+    """
+    たどり直す方針 (この方針と素朴なやり方) ごとの行動を返す関数
+
+    Parameters
+    ----------
+    kind: str
+        意思決定の型
+    part: pd.DataFrame
+        数える行の, 行動の列を足した予測の表
+    decision: dict
+        意思決定の決め方
+
+    Returns
+    ----------
+    flags: dict[str, np.ndarray]
+        方針の名前から, 量の型は置いた量, 他は行動したかの印
+    """
+    # 量: この方針, 予測の値どおり, (書けば) 今のやり方で足す量
+    amounts, _ = amounts_of(part, decision)
+    if kind == "quantity":
+        stock = np.nan_to_num(amounts["stock"])
+        step = float(decision.get("step", 1))
+        point = pd.to_numeric(part["prediction"]).to_numpy(float)
+        flags = {
+            "この方針": part["level"].to_numpy(float),
+            "予測の値どおりに置く": stock + np.maximum(
+                np.round((point - stock) / step) * step, 0
+            ),
+        }
+        if decision.get("current"):
+            flags["今のやり方"] = stock + values_of(part, decision["current"])
+        return flags
+
+    # 選ぶと振り分け: 同じ上限の中での確率の高い順と, 全てと何もしない
+    probability = pd.to_numeric(
+        part[f"p:{decision['positive']}"]
+    ).to_numpy(float)
+    acted = part["action"].astype(bool).to_numpy()
+    usable = np.ones(len(part), dtype=bool)
+    ranked = np.argsort(-probability, kind="stable")
+    if kind == "select":
+        cost = np.nan_to_num(amounts["cost"])
+        flags = {"この方針": acted, "確率の高い順に同じ件数": greedy(
+            ranked, usable, cost, None, decision.get("budget_cost"),
+            int(acted.sum())
+        )}
+        if decision.get("budget") is None and decision.get(
+            "budget_cost"
+        ) is None:
+            flags["全てに行動"] = usable
+    else:
+        flags = {"この方針": acted, "確率 0.5 で分ける": greedy(
+            ranked, probability >= 0.5, np.zeros(len(part)),
+            decision.get("capacity"), None
+        )}
+        if decision.get("capacity") is None:
+            flags["全てを回す"] = usable
+        flags["どれも回さない"] = np.zeros(len(part), dtype=bool)
+    if decision.get("current"):
+        flags["今のやり方"] = part[decision["current"]].astype(
+            bool
+        ).to_numpy()
+
+    return flags
+
+
+def bootstrap_gap(
+    first: np.ndarray, second: np.ndarray
+) -> tuple[float, float]:
+    """
+    2 つの方針の行ごとの得の合計の差の, 90 % の幅を求める関数
+
+    Parameters
+    ----------
+    first: np.ndarray
+        1 つ目の方針の行ごとの得
+    second: np.ndarray
+        2 つ目の方針の行ごとの得
+
+    Returns
+    ----------
+    bounds: tuple[float, float]
+        行を選び直した差の合計の 5 % と 95 % の点
+    """
+    # 行を重複を許して選び直す (乱数は固定)
+    rng = np.random.default_rng(BOOTSTRAP_SEED)
+    gap = first - second
+    picks = rng.integers(0, len(gap), size=(BOOTSTRAP, len(gap)))
+    totals = gap[picks].sum(axis=1)
+    bounds = (float(np.percentile(totals, 5)),
+              float(np.percentile(totals, 95)))
+
+    return bounds
+
+
+def label_text(values: pd.Series) -> pd.Series:
+    """
+    目的の列の値を, 一式のクラスの名前と比べられる文字にする関数
+
+    Parameters
+    ----------
+    values: pd.Series
+        目的の列
+
+    Returns
+    ----------
+    texts: pd.Series
+        文字 (1.0 のような整数の小数は 1 に)
+    """
+    # 数の列は整数なら整数の文字に (空欄があると小数で読まれるため)
+    numbers = pd.to_numeric(values, errors="coerce")
+    whole = numbers.notna() & (numbers == numbers.round())
+    texts = values.astype(str).where(
+        ~whole, numbers.round().astype("Int64").astype(str)
+    )
+
+    return texts
 
 
 def backtest(
@@ -750,108 +1138,85 @@ def backtest(
     ----------
     result: dict
         rows (数えた行), policies (方針ごとの実際の得 (正) と損 (負) の
-        合計), sentences
+        合計), gaps (この方針と他の方針の差の合計と 90 % の幅),
+        sentences, decision
 
     Raises
     ----------
     ValueError
-        目的の列が無いデータの場合
+        目的の列が無いデータの場合と, 数える行が無い場合
     """
-    # 予測して, 方針の行動を決める
+    # 全ての行で予測し (過去の値の列のため), 数える行だけで方針を決める
+    # (上限のある選び方を, 数えない行に使わないように)
     if not isinstance(bundle, Bundle):
         bundle = load_bundle(bundle)
     table = predict(bundle, source, options)
     target = bundle.dataset.info.get("target")
     if target not in table.columns:
         raise ValueError(f"たどり直すには目的の列 {target} が要ります")
-    decided = decide(bundle, table, decision)
-    frame = decided["frame"]
-    decision = decided["decision"]
-    known = np.array(
-        (frame["status"] == "ok") & frame[target].notna(), dtype=bool
+    keep = np.array(
+        (table["status"] == "ok") & table[target].notna(), dtype=bool
     )
     if count is not None:
-        known &= np.asarray(count, dtype=bool)
-    part = frame[known]
+        keep &= np.asarray(count, dtype=bool)
+    if not keep.any():
+        raise ValueError("たどり直せる行 (予測し, 目的の値が分かる行) が"
+                         "ありません")
+    decided = decide(bundle, table[keep].reset_index(drop=True), decision)
+    frame, decision = decided["frame"], decided["decision"]
+    part = frame[frame["action"].notna().to_numpy()]
+
+    # 方針ごとの行ごとの実際の得と, この方針との差の幅
     kind = decision["type"]
-    policies: dict[str, float] = {}
+    actual = pd.to_numeric(part[target], errors="coerce").to_numpy(
+        float
+    ) if kind == "quantity" else (
+        label_text(part[target]) == str(decision["positive"])
+    ).to_numpy()
+    rows = {
+        name: realized(kind, flag, part, decision, actual)
+        for name, flag in policies_of(kind, part, decision).items()
+    }
+    policies = {name: float(values.sum()) for name, values in rows.items()}
+    gaps = {
+        name: {"gap": policies["この方針"] - value,
+               "range": bootstrap_gap(rows["この方針"], rows[name])}
+        for name, value in policies.items() if name != "この方針"
+    }
 
-    # 量: 実際の値で足りない損と余る損
-    if kind == "quantity":
-        actual = pd.to_numeric(part[target], errors="coerce").to_numpy(float)
-        under = values_of(part, decision["under_cost"])
-        over = values_of(part, decision["over_cost"])
-        stock = values_of(part, decision.get("stock"))
-        step = float(decision.get("step", 1))
-        point = pd.to_numeric(part["prediction"]).to_numpy(float)
-        point = stock + np.maximum(
-            np.ceil((point - stock) / step - 1e-9) * step, 0
-        )
-        level = part["level"].to_numpy(float)
-        policies["この方針"] = -float(
-            quantity_cost(level, actual, under, over).sum()
-        )
-        policies["予測の値どおりに置く"] = -float(
-            quantity_cost(point, actual, under, over).sum()
-        )
-        if decision.get("current"):
-            current = stock + values_of(part, decision["current"])
-            policies["今のやり方"] = -float(
-                quantity_cost(current, actual, under, over).sum()
-            )
-    else:
-        # 選ぶと振り分け: 実際に当たりだったか
-        hit = (part[target].astype(str) == str(decision["positive"])
-               ).to_numpy()
-        probability = pd.to_numeric(
-            part[f"p:{decision['positive']}"]
-        ).to_numpy(float)
-        acted = part["action"].astype(bool).to_numpy()
-        count = int(acted.sum())
-        top = np.zeros(len(part), dtype=bool)
-        top[np.argsort(-probability, kind="stable")[:count]] = True
-        flags = {"この方針": acted}
-        if kind == "select":
-            flags["確率の高い順に同じ件数"] = top
-            if decision.get("budget") is None and decision.get(
-                "budget_cost"
-            ) is None:
-                flags["全てに行動"] = np.ones(len(part), dtype=bool)
-        else:
-            flags.update({
-                "確率 0.5 で分ける": probability >= 0.5,
-                "全てを回す": np.ones(len(part), dtype=bool),
-                "どれも回さない": np.zeros(len(part), dtype=bool),
-            })
-        if decision.get("current"):
-            flags["今のやり方"] = part[decision["current"]].astype(
-                bool
-            ).to_numpy()
-        policies = {
-            name: realized_gain(flag, hit, decision, part)
-            for name, flag in flags.items()
-        }
-
-    # 文 (得は正, 損は負)
-    best = max(policies, key=lambda name: policies[name])
+    # 文 (量と振り分けは損, 選ぶは得. 符号は残す)
+    word = "得" if kind == "select" else "損"
+    sign = 1 if kind == "select" else -1
     sentences = [
-        f"過去の {len(part):,} 行でたどり直すと, この方針の"
-        + ("得" if kind == "select" else "損") + " は "
-        + amount_text(abs(policies["この方針"]))
-        + ", " + ", ".join(
-            f"{name}なら {amount_text(abs(value))}"
+        f"過去の {len(part):,} 行でたどり直すと, 実際の{word}はこの方針で "
+        f"{amount_text(sign * policies['この方針'])}, " + ", ".join(
+            f"{name}なら {amount_text(sign * value)}"
             for name, value in policies.items() if name != "この方針"
         ),
-        f"最も良いのは「{best}」" + (
-            "" if best == "この方針" else " (この方針より良いやり方がある. "
-            "損得の値や仮定, 予測の外れ方を見直す)"
-        ),
     ]
+    for name, item in gaps.items():
+        # 改善 (得の増え方, 損の減り方) と, 行を選び直した 90 % の幅
+        low, high = item["range"]
+        better = "多い" if kind == "select" else "少ない"
+        worse = "少ない" if kind == "select" else "多い"
+        verdict = "この方針が良い" if low > 0 else (
+            "この方針が悪い" if high < 0 else "差は行の選び方の揺れの範囲"
+        )
+        sentences.append(
+            f"{name}と比べて, この方針は{word}が "
+            f"{amount_text(abs(item['gap']))} "
+            f"{better if item['gap'] >= 0 else worse} (改善の 90 % の幅 "
+            f"{amount_text(low)} から {amount_text(high)}. {verdict})"
+        )
     if kind == "select":
-        sentences.append("得は, 行動の効果の仮定のもとでの値")
+        sentences.append(
+            "得は行動の効果の仮定のもとでの値 (行動しなかった過去の結果"
+            "しか分からないため)"
+        )
     result = {
         "rows": int(len(part)),
         "policies": policies,
+        "gaps": gaps,
         "sentences": sentences,
         "decision": decision,
     }

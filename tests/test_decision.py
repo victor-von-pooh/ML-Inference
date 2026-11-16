@@ -190,7 +190,7 @@ def test_select_and_triage(tmp_path: Path) -> None:
     triage = {"type": "triage", "positive": "yes", "miss_cost": 9,
               "false_alarm_cost": 1}
     result = decide(path, table, triage)
-    assert result["summary"]["threshold"] == pytest.approx(0.1)
+    assert result["summary"]["threshold_min"] == pytest.approx(0.1)
     p = table["p:yes"].to_numpy()
     assert list(result["frame"]["action"]) == list(p >= 0.1)
 
@@ -236,3 +236,74 @@ def test_decision_errors(tmp_path: Path) -> None:
         {"type": "triage", "positive": "yes", "miss_cost": 3,
          "false_alarm_cost": 1}, bundle, ["x"]
     ) == []
+
+
+def test_review_fixes(tmp_path: Path) -> None:
+    """
+    レビューで直した点 (損の端, 欠けた値, 費用の上限, 小数のラベル) を
+    確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 足りない損が 0 なら足さない, 欠けた損の行は決めない
+    (tmp_path / "r").mkdir()
+    (tmp_path / "c").mkdir()
+    path = regression_bundle(tmp_path / "r")
+    frame = pd.DataFrame({"x": [5.0, 5.0], "under": [0.0, np.nan]})
+    table = predict(path, frame)
+    result = decide(path, table, {"type": "quantity", "under_cost": "under",
+                                  "over_cost": 1})
+    assert result["frame"]["action"].iloc[0] == 0
+    assert np.isnan(result["frame"]["action"].iloc[1])
+    assert result["summary"]["missing"] == 1
+    assert any("欠けた 1 行" in note for note in result["notes"])
+
+    # 費用の上限では, 費用あたりの得の順の方が良ければそれを使い, 比べる
+    # やり方も上限を守る
+    path = classifier_bundle(tmp_path / "c")
+    frame = pd.DataFrame({
+        "x": [3.0] * 11,
+        "value": [200.0] + [70.0] * 10,
+        "cost": [100.0] + [10.0] * 10,
+    })
+    table = predict(path, frame)
+    select = {"type": "select", "positive": "yes", "value": "value",
+              "cost": "cost", "effect": 1.0, "budget_cost": 100}
+    result = decide(path, table, select)
+    chosen = result["frame"]["action"].astype(bool)
+    assert not chosen.iloc[0] and chosen.iloc[1:].all()
+    spent = frame["cost"][chosen].sum()
+    assert spent <= 100
+
+    # 空欄で小数に読まれたラベルの列 (1.0) も, クラスの名前 (1) と比べる
+    rng = np.random.default_rng(3)
+    x = rng.normal(size=200)
+    source = tmp_path / "n.csv"
+    pd.DataFrame({"x": x, "label": (x > 0).astype(int)}).to_csv(
+        source, index=False
+    )
+    recipe = {
+        "format_version": 1, "target": "label", "task": "classification",
+        "steps": [],
+        "split": {"method": "random", "valid": 0.3, "seed": 0},
+    }
+    export_dataset(load_data(source), recipe, tmp_path / "nds")
+    spec = linear_spec(1, 2)
+    model = build_model(spec)
+    with torch.no_grad():
+        model.nodes["head"].weight.copy_(torch.tensor([[-3.0], [3.0]]))
+        model.nodes["head"].bias.zero_()
+    torch.save(model.state_dict(), tmp_path / "nw.pt")
+    make_bundle(tmp_path / "nb", spec, tmp_path / "nds", tmp_path / "nw.pt")
+    past = pd.DataFrame({"x": x, "label": (x > 0).astype(float)})
+    triage = {"type": "triage", "positive": "1", "miss_cost": 5,
+              "false_alarm_cost": 1}
+    policies = backtest(tmp_path / "nb", past, triage)["policies"]
+    assert policies["どれも回さない"] < 0
