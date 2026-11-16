@@ -6,9 +6,13 @@ import shutil
 from typing import Any, Optional, Union
 
 import numpy as np
+import torch
 import yaml
+from ml_eda import Dataset, load_dataset
+from ml_eda.pipeline import DATASET_FORMAT_VERSION
+from ml_modelcontrol import build_model, dump_spec, load_spec
 
-from ml_eda import Dataset
+from ml_inference.conclude import check_rules
 
 # 推論の一式の形の版
 BUNDLE_FORMAT_VERSION = 1
@@ -27,6 +31,9 @@ INPUT_SOURCES = ("features", "items")
 
 # 一式を作るときに確かめる見本の件数
 SAMPLE_ROWS = 8
+
+# 読める ML-Found の run.json の版
+RUN_FORMAT_VERSION = 1
 
 
 @dataclass
@@ -185,10 +192,8 @@ class Bundle:
         # 2 回目からは作ったものを使う
         if "model" in self.cache:
             return self.cache["model"]
-        import torch
 
-        from ml_modelcontrol import build_model
-
+        # 定義から組み立て, 重みだけを読み込む (pickle の任意のコードは不可)
         model = build_model(self.spec, seed=0)
         state = torch.load(
             self.weights_path, map_location="cpu", weights_only=True
@@ -339,8 +344,6 @@ def load_bundle(path: Union[str, Path]) -> Bundle:
         raise ValueError("inference.yaml の誤り: " + " / ".join(errors))
 
     # モデルの定義と前処理 (データセットの説明とレシピ)
-    from ml_modelcontrol import load_spec
-
     spec = load_spec(inside(root, str(info["model"]["spec"])))
     data_dir = inside(root, str(info["dataset"]))
     dataset = read_dataset(data_dir, frames=False)
@@ -354,6 +357,13 @@ def load_bundle(path: Union[str, Path]) -> Bundle:
             f"(入力: {', '.join(spec['inputs'])})"
         )
     bundle = Bundle(path=root, info=info, dataset=dataset, spec=spec)
+    kind = info["model"].get("kind")
+    classify = bundle.task == "classification"
+    if kind is not None and (kind == "value") == classify:
+        raise ValueError(
+            f"model.kind {kind} は {bundle.task} に使えません (分類は "
+            "logits か probabilities, 回帰と予測は value)"
+        )
 
     return bundle
 
@@ -383,13 +393,19 @@ def read_dataset(path: Path, frames: bool) -> Dataset:
     if not (path / "dataset.yaml").is_file():
         raise FileNotFoundError(f"{path} に dataset.yaml がありません")
     if frames:
-        from ml_eda import load_dataset
+        dataset = load_dataset(path)
+        return dataset
 
-        return load_dataset(path)
+    # 写しは説明とレシピだけ (版の確認と, レシピが外を指さないことの確認)
     info = yaml.safe_load((path / "dataset.yaml").read_text(encoding="utf-8"))
-    recipe = yaml.safe_load(
-        (path / info.get("recipe", "recipe.yaml")).read_text(encoding="utf-8")
-    )
+    version = info.get("format_version") if isinstance(info, dict) else None
+    if not isinstance(version, int) or version > DATASET_FORMAT_VERSION:
+        raise ValueError(
+            f"format_version {version} のデータセットは, 入っている ML-EDA "
+            f"(版 {DATASET_FORMAT_VERSION} まで) では読めません"
+        )
+    file = inside(path, str(info.get("recipe", "recipe.yaml")))
+    recipe = yaml.safe_load(file.read_text(encoding="utf-8"))
     dataset = Dataset(path=path, info=info, frames={}, recipe=recipe)
 
     return dataset
@@ -414,30 +430,48 @@ def run_summary(run_dir: Path) -> dict:
     file = run_dir / "run.json"
     if file.is_file():
         state = json.loads(file.read_text(encoding="utf-8"))
-        for key in ("status", "monitor", "best_value", "best_epoch",
-                    "final_weights", "finished_at"):
+        for key in ("format_version", "status", "monitor", "best_value",
+                    "best_epoch", "final_weights", "finished_at"):
             summary[key] = state.get(key)
 
     return summary
 
 
-def target_notes(dataset: Dataset) -> list[str]:
+def bundle_notes(dataset: Dataset, run: Optional[dict]) -> list[str]:
     """
-    目的の列を戻せない変換をしたレシピへの注意を返す関数
+    一式を作るときの注意 (戻せない変換, 学習を終えていない実験) を返す関数
 
     Parameters
     ----------
     dataset: Dataset
         データセット
+    run: Optional[dict]
+        実験の状態 (run_summary の結果. 重みのファイルを渡した場合は None)
 
     Returns
     ----------
     notes: list[str]
         注意の文
     """
+    # 実験の状態 (知らない版は読める項目だけを使ったことも)
+    notes = []
+    if run is not None:
+        version = run.get("format_version")
+        if isinstance(version, int) and version > RUN_FORMAT_VERSION:
+            notes.append(
+                f"実験の run.json は新しい版 ({version}) です. 読める項目だけを"
+                "記録しました"
+            )
+        if run.get("status") not in (None, "completed"):
+            notes.append(
+                f"実験の状態は {run.get('status')} です (学習を終えていない"
+                "重みの可能性があります)"
+            )
+        if run.get("final_weights") == "partial":
+            notes.append("重みは途中で止めたエポックのものです")
+
     # 外れ値の切り詰めは戻せない
     target = dataset.info.get("target")
-    notes = []
     for spec in dataset.recipe.get("steps", []):
         columns = spec.get("state", {}).get("columns") or spec.get("columns")
         columns = [columns] if isinstance(columns, str) else columns or []
@@ -504,8 +538,6 @@ def make_bundle(
     ValueError
         定義, 重み, 入力と出力のつなぎ方が合わない場合
     """
-    from ml_modelcontrol import dump_spec, load_spec
-
     # 置き換えられるのは, 前に作った一式だけ
     final = Path(path).expanduser().resolve()
     if final.exists():
@@ -533,7 +565,10 @@ def make_bundle(
     try:
         dump_spec(load_spec(spec), target / "model_spec.yaml")
         shutil.copy(data_dir / "dataset.yaml", target / "dataset")
-        recipe_name = full.info.get("recipe", "recipe.yaml")
+        recipe_name = str(full.info.get("recipe", "recipe.yaml"))
+        if Path(recipe_name).name != recipe_name:
+            raise ValueError(f"レシピの名前 {recipe_name} がファイルの名前では"
+                             "ありません")
         shutil.copy(data_dir / recipe_name, target / "dataset" / recipe_name)
         if copy_weights:
             shutil.copy(source, target / "final_model.pt")
@@ -552,7 +587,7 @@ def make_bundle(
             "dataset": "dataset",
             "run": run,
             "conclusion": conclusion or {},
-            "notes": target_notes(full),
+            "notes": bundle_notes(full, run),
         }
         (target / "inference.yaml").write_text(
             yaml.safe_dump(info, allow_unicode=True, sort_keys=False),
@@ -561,8 +596,6 @@ def make_bundle(
         bundle = load_bundle(target)
         check_sample(bundle, full)
         if conclusion:
-            from ml_inference.conclude import check_rules
-
             errors = check_rules(conclusion, bundle.task, bundle.classes)
             if errors:
                 raise ValueError("結論の決め方の誤り: " + " / ".join(errors))
@@ -596,6 +629,7 @@ def check_sample(bundle: Bundle, dataset: Dataset) -> None:
     ValueError
         モデルに見本を渡せない場合と, 出力の形がタスクに合わない場合
     """
+    # 予測の関数はこのモジュールを読むので, 使うときに読み込む
     from ml_inference.predict import decode, run_model, shape_inputs
 
     # 前処理を済ませた学習用の最初の数件 (分割の名前は train を優先)
@@ -612,6 +646,8 @@ def check_sample(bundle: Bundle, dataset: Dataset) -> None:
             sources["features"] = dataset.frames[split][
                 dataset.features
             ].to_numpy(dtype=np.float32)[:SAMPLE_ROWS]
+
+    # 形の誤りは分かりやすい文に (つなぎ方の誤りの文はそのまま)
     try:
         outputs = run_model(bundle, shape_inputs(bundle, sources), 64, "cpu")
         decode(bundle, outputs)

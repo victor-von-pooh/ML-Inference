@@ -4,8 +4,8 @@ from typing import Optional, Union
 
 import pandas as pd
 import yaml
-
 from ml_eda import Data
+
 from ml_inference.bundle import Bundle, load_bundle
 from ml_inference.conclude import conclude
 from ml_inference.predict import predict
@@ -44,7 +44,10 @@ def infer(
     # 一式の既定の決め方に, 渡した決め方を重ねる
     if not isinstance(bundle, Bundle):
         bundle = load_bundle(bundle)
+    # (陽性のクラスを消した場合は, しきい値も消す)
     merged = {**(bundle.info.get("conclusion") or {}), **(rules or {})}
+    if merged.get("positive") is None:
+        merged.pop("threshold", None)
     merged = {k: v for k, v in merged.items() if v is not None}
 
     # 予測と結論

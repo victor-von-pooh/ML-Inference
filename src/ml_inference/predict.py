@@ -3,8 +3,9 @@ from typing import Any, Optional, Union
 
 import numpy as np
 import pandas as pd
-
+import torch
 from ml_eda import Data, load_data
+
 from ml_inference.bundle import Bundle, load_bundle
 
 # 予測しなかった行の印
@@ -56,10 +57,11 @@ def read_source(
             )
         if column not in frame.columns:
             raise ValueError(f"文の列 {column} がありません")
-        texts = frame[column]
+        # 欠損の文は空の文 (ML-EDA の読み込みと同じ. 空の文は予測しない)
+        texts = frame[column].fillna("").astype(str)
         return Data(
             kind="text", frame=frame, roles={"text": column},
-            item_loader=lambda i: str(texts.iloc[i])
+            item_loader=lambda i: texts.iloc[i]
         )
 
     # 場所は学習のときの読み込みと設定で
@@ -90,9 +92,26 @@ def features_of(
     reasons: list[str]
         行ごとの予測できない理由 (予測できる行は空の文字)
     """
-    # 当てはめた値のままの前処理 (行は増減しない)
-    frame = bundle.dataset.transform(data.frame)
-    x = frame.to_numpy(dtype=np.float32, na_value=np.nan)
+    # 当てはめた値のままの前処理 (行は増減しない). 一部の行の値で全体が
+    # 失敗した場合は, 行ごとにかけて失敗した行を飛ばす (過去の値の列は
+    # 前の行が要るので行ごとにはかけない)
+    try:
+        frame = bundle.dataset.transform(data.frame)
+        failed = [""] * len(frame)
+    except ValueError as error:
+        steps = [s["op"] for s in bundle.dataset.recipe.get("steps", [])]
+        if "lag" in steps or "前処理の後に, 学習に使う列が足りません" in str(
+            error
+        ) or "にかける列がありません" in str(error):
+            raise
+        frame, failed = transform_rows(bundle, data.frame)
+    try:
+        x = frame.to_numpy(dtype=np.float32, na_value=np.nan)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            f"前処理の後に数でない列があります ({error}). レシピで数に"
+            "してください"
+        ) from error
     reasons = []
     for row in frame.itertuples(index=False):
         lost = [name for name, value in zip(frame.columns, row)
@@ -101,8 +120,49 @@ def features_of(
             "前処理の後に欠損: " + ", ".join(lost[:5])
             + (" など" if len(lost) > 5 else "") if lost else ""
         )
+    reasons = [a or b for a, b in zip(failed, reasons)]
 
     return x, reasons
+
+
+def transform_rows(
+    bundle: Bundle, frame: pd.DataFrame
+) -> tuple[pd.DataFrame, list[str]]:
+    """
+    1 行ずつ前処理をかけ, 失敗した行を欠損と理由にする関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+    frame: pd.DataFrame
+        元の表
+
+    Returns
+    ----------
+    result: pd.DataFrame
+        学習に使う列の表 (失敗した行は欠損)
+    failed: list[str]
+        行ごとの失敗の理由 (成功した行は空の文字)
+    """
+    # 行ごとの前処理 (遅いので, 全体で失敗したときだけ使う)
+    parts = []
+    failed = []
+    columns = bundle.dataset.features
+    for index in range(len(frame)):
+        try:
+            part = bundle.dataset.transform(frame.iloc[[index]])
+            failed.append("")
+        except ValueError as error:
+            part = pd.DataFrame(
+                [[np.nan] * len(columns)], columns=columns,
+                index=frame.index[[index]]
+            )
+            failed.append(f"前処理できません ({error})")
+        parts.append(part)
+    result = pd.concat(parts) if parts else pd.DataFrame(columns=columns)
+
+    return result, failed
 
 
 def items_of(
@@ -131,7 +191,10 @@ def items_of(
     shape = None
     for index in range(len(data.frame)):
         try:
-            array = bundle.dataset.transform_item(data.load_item(index))
+            item = data.load_item(index)
+            if isinstance(item, str) and not item.strip():
+                raise ValueError("文が空です")
+            array = bundle.dataset.transform_item(item)
         except Exception as error:
             arrays.append(None)
             reasons.append(f"中身を読めません ({error})")
@@ -173,8 +236,6 @@ def shape_inputs(bundle: Bundle, sources: dict) -> list:
     ValueError
         データに無い出どころを使う入力がある場合
     """
-    import torch
-
     # 文の番号の並びは整数, 他は小数. 先頭に足す番号は文の並びだけ
     tensors = []
     for name, item in bundle.input_plan().items():
@@ -227,8 +288,6 @@ def run_model(
     ValueError
         出力が辞書で, 使う出力が決まらない場合
     """
-    import torch
-
     # 出力が辞書なら, 書いた名前か 1 つだけの出力
     model = bundle.model().to(device)
     chosen = bundle.info["model"].get("output")
@@ -326,13 +385,17 @@ def decode(bundle: Bundle, outputs: np.ndarray) -> dict:
         scale = bundle.info["model"].get("target_scale")
         if scale:
             outputs = outputs * float(scale["scale"]) + float(scale["center"])
-        return {"prediction": inverse_target(bundle, outputs)}
+        columns = {"prediction": inverse_target(bundle, outputs)}
+        return columns
 
     # 分類はクラスごとの確率 (2 クラスで 1 列なら 2 つ目のクラス)
     classes = bundle.classes
     kind = bundle.output_kind
-    if outputs.ndim == 2 and outputs.shape[1] == 1 and len(classes) == 2:
-        column = outputs[:, 0].astype(np.float64)
+    single = outputs.ndim == 1 or (
+        outputs.ndim == 2 and outputs.shape[1] == 1
+    )
+    if single and len(classes) == 2:
+        column = outputs.reshape(count).astype(np.float64)
         positive = 1 / (1 + np.exp(-column)) if kind == "logits" else column
         probability = np.stack([1 - positive, positive], axis=1)
     elif outputs.ndim == 2 and outputs.shape[1] == len(classes):
@@ -419,9 +482,14 @@ def predict(
     else:
         columns = decode(bundle, empty_output(bundle))
 
-    # 元の列に予測の列を並べる (予測しなかった行は空)
+    # 元の列に予測の列を並べる (予測しなかった行は空). 予測の列と同じ
+    # 名前の元の列は「(入力)」を付けて残す
     result = data.frame.copy().reset_index(drop=True)
     result.columns = [str(c) for c in result.columns]
+    added = {"status", "reason", "decision", *columns}
+    result = result.rename(
+        columns={c: f"{c} (入力)" for c in result.columns if c in added}
+    )
     result["status"] = np.where(keep, OK, SKIPPED)
     result["reason"] = reasons
     for name, values in columns.items():

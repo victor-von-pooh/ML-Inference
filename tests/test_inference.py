@@ -1,20 +1,22 @@
+import json
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
 import pytest
 import torch
 import yaml
-
 from conftest import linear_spec, save_weights
 from ml_eda import export_dataset, load_data, load_dataset
+
 from ml_inference import (
     check_rules, conclude, describe_bundle, infer, load_bundle, make_bundle,
     predict, write_result
 )
 
 
-def table_bundle(tmp_path: Path, dataset: Path, **options) -> Path:
+def table_bundle(tmp_path: Path, dataset: Path, **options: Any) -> Path:
     """
     表の分類の一式を作る関数
 
@@ -24,7 +26,7 @@ def table_bundle(tmp_path: Path, dataset: Path, **options) -> Path:
         一時ディレクトリ
     dataset: Path
         データセット
-    **options
+    **options: Any
         make_bundle に渡す引数
 
     Returns
@@ -345,10 +347,9 @@ def test_bundle_from_run_dir_and_overwrite(
     run = tmp_path / "run"
     run.mkdir()
     save_weights(spec, run / "final_model.pt")
-    (run / "run.json").write_text(
-        '{"format_version": 1, "status": "completed", "monitor": "valid/acc",'
-        ' "best_value": 0.9, "best_epoch": 3}', encoding="utf-8"
-    )
+    state = {"format_version": 1, "status": "completed",
+             "monitor": "valid/acc", "best_value": 0.9, "best_epoch": 3}
+    (run / "run.json").write_text(json.dumps(state), encoding="utf-8")
     path = tmp_path / "bundle"
     info = make_bundle(path, spec, table_dataset, run, copy_weights=False)
     assert info["run"]["status"] == "completed"
@@ -388,6 +389,19 @@ def test_load_bundle_checks(tmp_path: Path, table_dataset: Path) -> None:
     original = yaml.safe_load(file.read_text(encoding="utf-8"))
 
     def write(**changes: object) -> None:
+        """
+        正しい一式の inference.yaml の一部を変えて書く関数
+
+        Parameters
+        ----------
+        **changes: object
+            変える項目と値
+
+        Returns
+        ----------
+        None
+        """
+        # 元の中身に変えた項目を重ねる
         file.write_text(
             yaml.safe_dump({**original, **changes}, allow_unicode=True),
             encoding="utf-8"
@@ -530,3 +544,143 @@ def test_write_result(
     # 既定の決め方は None で消せる
     result = infer(path, table_csv, rules={"min_confidence": None})
     assert result["rules"] == {}
+
+
+def test_rows_that_fail_preprocessing_are_skipped(
+    tmp_path: Path, regression_dataset: Path
+) -> None:
+    """
+    一部の行の前処理の失敗で全体を止めずに, その行を飛ばすことを確かめる
+    関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    regression_dataset: Path
+        目的の列を対数と標準化で変換したデータセット
+
+    Returns
+    ----------
+    None
+    """
+    # 数にできない値の行
+    spec = linear_spec(1, 1)
+    weights = save_weights(spec, tmp_path / "w.pt")
+    path = tmp_path / "bundle"
+    make_bundle(path, spec, regression_dataset, weights)
+    frame = pd.DataFrame({"shop": ["東", "西", "東"], "x": ["0.3", "abc", 1]})
+    result = predict(path, frame)
+    assert list(result["status"]) == ["ok", "skipped", "ok"]
+    assert "前処理できません" in result.loc[1, "reason"]
+
+
+def test_text_edge_cases(tmp_path: Path) -> None:
+    """
+    空の文を飛ばし, 予測の列と同じ名前の元の列を残すことを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 文字の語彙で長さ 4 の並び. 出力が 1 つの値の 2 クラス
+    source = tmp_path / "t.csv"
+    pd.DataFrame({
+        "text": ["良い", "悪い", "とても良い", "とても悪い"] * 3,
+        "label": ["良", "悪", "良", "悪"] * 3,
+    }).to_csv(source, index=False)
+    recipe = {
+        "format_version": 1, "target": "label", "task": "classification",
+        "steps": [],
+        "item_steps": [{"op": "vocabulary", "unit": "char", "length": 4}],
+        "split": {"method": "random", "valid": 0.25, "seed": 0},
+    }
+    dataset = tmp_path / "dataset"
+    export_dataset(load_data(source, text_column="text"), recipe, dataset)
+    vocabulary = next(
+        s["state"]["vocabulary"]
+        for s in load_dataset(dataset).recipe["item_steps"]
+    )
+    spec = {
+        "format_version": 1,
+        "inputs": {"ids": {"shape": [2, 4], "dtype": "int64"}},
+        "nodes": {
+            "bag": {
+                "unit": "nn.EmbeddingBag",
+                "params": {"num_embeddings": len(vocabulary),
+                           "embedding_dim": 3},
+                "inputs": {"input": "ids"},
+            },
+            "head": {
+                "unit": "nn.Linear",
+                "params": {"in_features": 3, "out_features": 1},
+                "inputs": "bag",
+            },
+            "flat": {"unit": "nn.Flatten", "params": {"start_dim": 0},
+                     "inputs": "head"},
+        },
+        "outputs": {"logits": "flat"},
+    }
+    weights = save_weights(spec, tmp_path / "w.pt")
+    path = tmp_path / "bundle"
+    make_bundle(path, spec, dataset, weights)
+
+    # 空の文と欠損の文は飛ばし, 元の status の列は名前を変えて残す
+    frame = pd.DataFrame({
+        "text": ["良い", "", None], "status": ["a", "b", "c"]
+    })
+    result = predict(path, frame)
+    assert list(result["status"]) == ["ok", "skipped", "skipped"]
+    assert list(result["status (入力)"]) == ["a", "b", "c"]
+    assert "文が空" in result.loc[1, "reason"]
+    p = result.loc[0, ["p:悪", "p:良"]].to_numpy(dtype=float)
+    assert np.isclose(p.sum(), 1.0)
+
+
+def test_rule_combinations(
+    tmp_path: Path, table_dataset: Path, table_csv: Path
+) -> None:
+    """
+    一緒に使えない決め方と, 陽性のクラスを消したときのしきい値を確かめる
+    関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    table_dataset: Path
+        データセット
+    table_csv: Path
+        元の CSV
+
+    Returns
+    ----------
+    None
+    """
+    # 陽性のしきい値と確信の下限は一緒に使えない
+    errors = check_rules(
+        {"positive": "a", "threshold": 0.3, "min_confidence": 0.6},
+        "classification", ["a", "b"]
+    )
+    assert any("一緒に使えません" in e for e in errors)
+
+    # 一式の既定の positive を消すと threshold も消える
+    path = table_bundle(tmp_path, table_dataset)
+    file = path / "inference.yaml"
+    info = yaml.safe_load(file.read_text(encoding="utf-8"))
+    info["conclusion"] = {"positive": "犬", "threshold": 0.5}
+    file.write_text(yaml.safe_dump(info, allow_unicode=True), "utf-8")
+    result = infer(path, table_csv, rules={"positive": None})
+    assert result["rules"] == {}
+
+    # 分類に value は使えない
+    info["conclusion"] = {}
+    info["model"]["kind"] = "value"
+    file.write_text(yaml.safe_dump(info, allow_unicode=True), "utf-8")
+    with pytest.raises(ValueError, match="使えません"):
+        load_bundle(path)

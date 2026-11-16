@@ -6,16 +6,18 @@
 - **予測**: 新しいデータに学習のときと同じ前処理をかけて推論し, クラスの名前と確率, 元の単位の値で返す. 予測できない行 (前処理の後に欠損がある, 中身を読めない) は理由を付けて飛ばす
 - **結論**: 確信の低いものを保留にする, 決めた確率で陽性を決める, 値を帯に分ける, 列の値ごとにまとめる. 全体のまとめを日本語の文でも返す
 
-画面は ML-Provide. 設計は [docs/DESIGN.md](docs/DESIGN.md).
+前処理は [ML-EDA](https://github.com/victor-von-pooh/ML-EDA), モデルの組み立ては [ML-ModelControl](https://github.com/victor-von-pooh/ML-ModelControl) を使い, [ML-Found](https://github.com/victor-von-pooh/ML-Found) で学習した重みを読む. 画面は [ML-Provide](https://github.com/victor-von-pooh/ML-Provide). 設計は [docs/DESIGN.md](docs/DESIGN.md).
 
 ## 導入
+
+Python 3.10 以上.
 
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cpu   # GPU を使う場合は PyTorch の案内に従う
 pip install "ml-inference @ git+https://github.com/victor-von-pooh/ML-Inference.git"
 ```
 
-画像, Excel, parquet, 部分語の文を読む場合は `ml-inference[all]` で ML-EDA の任意の依存も入れる.
+画像, Excel, parquet, 部分語の文を読む場合は `pip install "ml-inference[all] @ git+https://github.com/victor-von-pooh/ML-Inference.git"` で ML-EDA の任意の依存も入れる. ML-EDA と ML-ModelControl は各リポジトリの `main` から入る.
 
 ## 使い方
 
@@ -27,19 +29,25 @@ pip install "ml-inference @ git+https://github.com/victor-von-pooh/ML-Inference.
 from ml_inference import make_bundle
 
 make_bundle(
-    "bundles/reviews",                         # 作る場所
-    "models/classifier.yaml",                  # モデルの定義
-    "outputs/dataset",                         # ML-EDA で書き出したデータセット
-    "outputs/classifier/2026-11-16/10-00-00",  # 実験 (final_model.pt と run.json を使う)
-    conclusion={"min_confidence": 0.7},        # 結論の決め方の既定値 (任意)
+    path="bundles/reviews",                            # 作る場所
+    spec="models/classifier.yaml",                     # モデルの定義 (ファイルか辞書)
+    dataset="outputs/dataset",                         # ML-EDA で書き出したデータセット
+    weights="outputs/classifier/2026-11-16/10-00-00",  # 実験のディレクトリか重みのファイル
+    conclusion={"min_confidence": 0.7},                # 結論の決め方の既定値 (任意)
 )
 ```
+
+- モデルの定義は ML-ModelControl の形 (書き方は ML-ModelControl の README). 入力の幅はデータセットの学習に使う列の数 (表) か中身の配列の形 (画像, 文, 点群), 出力の幅はクラスの数 (2 クラスは 1 列でもよい) か 1 (回帰, 予測)
+- 重みは `state_dict` (ML-Found の `final_model.pt`). 実験のディレクトリを渡すと `final_model.pt` を使い, `run.json` の状態 (ベストの値など) を記録する
+- 作るときに, データセットの学習用の見本を推論して, 入力の形と出力の幅を確かめる. 合わない場合は作らずに理由を返す
 
 - 入力が 1 つのモデルは, 表なら学習に使う列, 画像と文と点群なら中身の配列をそのまま渡す. 入力が複数のモデルや, 学習のスクリプトで並びの先頭に [CLS] などの番号を足した場合は `inputs={"ids": {"source": "items", "prepend": [2001]}}` のように書く
 - 出力が複数のモデルは `output="logits"` のように使う出力を書く
 - 学習のスクリプトで目的の値を `(y - center) / scale` にして学習した場合は `target_scale={"center": ..., "scale": ...}` を書く (予測を元の単位に戻す)
 
 ### 推論して結論を出す
+
+推論するデータは, 学習のときと同じ列を持つファイル (目的の列は有っても無くてもよい), 表 (`DataFrame`), 画像や点群のディレクトリ.
 
 ```python
 from ml_inference import infer, write_result
@@ -52,7 +60,7 @@ print("\n".join(result["sentences"]))
 write_result(result, "results/reviews")   # predictions.csv と result.yaml
 ```
 
-`result["frame"]` は元の列に `status`, `reason`, `prediction`, `confidence`, `p:<クラス>`, `decision` を足した `DataFrame`. 予測だけが要る場合は `predict(bundle, source)`, 結論の決め方を変える場合は `infer(..., rules={...})` (下の表).
+`result["frame"]` は元の列に `status`, `reason`, `prediction`, `confidence`, `p:<クラス>`, `decision` を足した `DataFrame`. 予測だけが要る場合は `predict(bundle, source)` (読み込みの設定は `options`, 件数は `batch_size`, デバイスは `device`), 一式の説明は `describe_bundle(bundle)`, 結論の決め方を変える場合は `infer(..., rules={...})` (下の表. `positive` と `min_confidence` は一緒に使えない).
 
 | 決め方 | タスク | 意味 |
 | --- | --- | --- |
@@ -64,6 +72,8 @@ write_result(result, "results/reviews")   # predictions.csv と result.yaml
 ## 開発
 
 ```bash
+git clone https://github.com/victor-von-pooh/ML-Inference.git
+cd ML-Inference
 pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install -e ".[dev]"
 pytest

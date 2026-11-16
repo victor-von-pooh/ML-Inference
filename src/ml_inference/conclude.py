@@ -82,6 +82,11 @@ def check_rules(
             errors.append("threshold は 0 から 1 の数にしてください")
     elif threshold is not None:
         errors.append("threshold は positive と一緒に書いてください")
+    if positive is not None and floor is not None:
+        errors.append(
+            "positive と min_confidence は一緒に使えません (しきい値で決めた"
+            "陽性を, 確信の下限で保留にしてしまうため)"
+        )
 
     # 回帰と予測だけの値の帯 (上限の小さい順, 最後は上限無し)
     bands = rules.get("bands")
@@ -169,6 +174,8 @@ def decide(
     # 予測しなかった行
     ok = prediction["status"] == "ok"
     decision = pd.Series(NO_PREDICTION, index=prediction.index, dtype=object)
+
+    # 分類は陽性のしきい値か確率の最大のクラス. 確信の低いものは保留
     if task == "classification":
         chosen = prediction["prediction"].astype(object)
         positive = rules.get("positive")
@@ -180,13 +187,9 @@ def decide(
             chosen = pd.Series(
                 np.where(hit, str(positive), other), index=prediction.index
             )
-            confidence = np.where(
-                hit, prediction[f"p:{positive}"], prediction[f"p:{other}"]
-            ).astype(float)
-        else:
-            confidence = prediction["confidence"].astype(float).to_numpy()
         floor = rules.get("min_confidence")
         if floor is not None:
+            confidence = prediction["confidence"].astype(float)
             chosen = chosen.where(confidence >= float(floor), UNDECIDED)
         decision[ok] = chosen[ok]
         return decision
