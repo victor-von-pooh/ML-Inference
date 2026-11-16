@@ -15,12 +15,12 @@ from ml_modelcontrol import build_model, dump_spec, load_spec
 from ml_inference.conclude import check_rules, plain
 
 # 推論の一式の形の版
-BUNDLE_FORMAT_VERSION = 1
+BUNDLE_FORMAT_VERSION = 2
 
 # inference.yaml の一番上の項目
 TOP_KEYS = (
     "format_version", "name", "created_at", "model", "inputs", "dataset",
-    "run", "conclusion", "check", "notes"
+    "run", "conclusion", "check", "uncertainty", "notes"
 )
 
 # 出力の扱い方
@@ -633,6 +633,15 @@ def make_bundle(
             )
         if info["check"] and info["check"]["matches"] is False:
             info["notes"].append(check_note(info["check"]))
+
+        # 意思決定のための外れ方 (失敗しても作るのは止めない)
+        from ml_inference.uncertainty import measure_uncertainty
+
+        try:
+            info["uncertainty"] = measure_uncertainty(bundle, full)
+        except Exception as error:
+            info["uncertainty"] = None
+            info["notes"].append(f"予測の外れ方を測れませんでした ({error})")
         (target / "inference.yaml").write_text(
             yaml.safe_dump(info, allow_unicode=True, sort_keys=False),
             encoding="utf-8"
