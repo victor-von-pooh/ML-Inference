@@ -12,6 +12,9 @@ from ml_inference.decision import decide
 from ml_inference.forecast import forecast as forecast_rows
 from ml_inference.predict import predict
 
+# 結果のファイル (result.yaml) の形の版
+RESULT_FORMAT_VERSION = 1
+
 
 def infer(
     bundle: Union[str, Path, Bundle],
@@ -122,8 +125,9 @@ def write_result(result: dict, path: Union[str, Path]) -> Path:
         root / "predictions.csv", index=False, encoding="utf-8-sig"
     )
 
-    # 表以外の説明
-    meta = {k: v for k, v in result.items() if k != "frame"}
+    # 表以外の説明 (形の版を先頭に)
+    meta = {"format_version": RESULT_FORMAT_VERSION}
+    meta.update({k: v for k, v in result.items() if k != "frame"})
     (root / "result.yaml").write_text(
         yaml.safe_dump(meta, allow_unicode=True, sort_keys=False),
         encoding="utf-8"

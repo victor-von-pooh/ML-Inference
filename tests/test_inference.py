@@ -541,6 +541,7 @@ def test_write_result(
     meta = yaml.safe_load((out / "result.yaml").read_text(encoding="utf-8"))
     assert meta["summary"]["rows"] == 60
     assert meta["sentences"] == result["sentences"]
+    assert meta["format_version"] == 1
 
     # 既定の決め方は None で消せる
     result = infer(path, table_csv, rules={"min_confidence": None})
