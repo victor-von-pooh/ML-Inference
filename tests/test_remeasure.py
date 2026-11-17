@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -13,6 +14,7 @@ from ml_inference import (
     decide, describe_bundle, forecast, load_bundle, make_bundle, predict,
     remeasure, restore_uncertainty
 )
+from ml_inference.remeasure import history_length
 
 
 def test_remeasure_regression(tmp_path: Path) -> None:
@@ -253,3 +255,24 @@ def test_remeasure_steps(tmp_path: Path) -> None:
     reg = regression_bundle(tmp_path / "r")
     with pytest.raises(ValueError, match="過去の値を使う"):
         remeasure(reg, frame.assign(x=1.0), horizon=3, write=False)
+
+
+def test_history_length_with_gap() -> None:
+    """
+    移動平均を gap つ前から始める手順では, 渡す過去の時刻を長くすることを
+    確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 一式の代わりに, レシピだけを持つもの
+    recipe = {"steps": [{"op": "lag", "lags": [2, 7], "windows": [7]}]}
+    bundle = SimpleNamespace(dataset=SimpleNamespace(recipe=recipe))
+    assert history_length(bundle) == 2 * 14 + 2
+    recipe["steps"][0]["gap"] = 2
+    assert history_length(bundle) == 2 * 15 + 2
