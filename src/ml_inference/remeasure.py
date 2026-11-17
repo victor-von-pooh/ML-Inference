@@ -182,17 +182,19 @@ def history_length(bundle: Bundle) -> int:
     Returns
     ----------
     count: int
-        過去の値の手順の最も長いずらしと窓の和の 2 倍と 2 (日の抜けなど
-        への余裕)
+        過去の値の手順の最も長いずらしと窓 (と移動平均の始まりの gap) の
+        和の 2 倍と 2 (日の抜けなどへの余裕)
     """
-    # lag の手順の lags と windows の最大
+    # lag の手順の lags と windows の最大 (移動平均を gap つ前から始める
+    # 手順は, その分だけ長く)
     longest = 1
     for spec in bundle.dataset.recipe.get("steps", []):
         if spec["op"] != "lag":
             continue
         lags = [int(v) for v in spec.get("lags") or [1]]
         windows = [int(v) for v in spec.get("windows") or [0]]
-        longest = max(longest, max(lags) + max(windows))
+        gap = int(spec.get("gap", 1))
+        longest = max(longest, max(lags) + max(windows) + gap - 1)
     count = 2 * longest + 2
 
     return count
