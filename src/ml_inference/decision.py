@@ -87,7 +87,8 @@ def check_amount(
 
 
 def check_decision(
-    decision: Any, bundle: Bundle, columns: Optional[list[str]] = None
+    decision: Any, bundle: Bundle, columns: Optional[list[str]] = None,
+    with_current: bool = True
 ) -> list[str]:
     """
     意思決定の決め方の誤りを一覧で返す関数
@@ -100,6 +101,9 @@ def check_decision(
         推論の一式
     columns: Optional[list[str]] = None
         予測の表の列 (渡すと, 列の名前で書いた値があるかも確かめる)
+    with_current: bool = True
+        今のやり方の列 (current) があるかも確かめるか (使うのはたどり
+        直しだけなので, 決めるだけなら確かめない)
 
     Returns
     ----------
@@ -146,7 +150,11 @@ def check_decision(
         ):
             errors.append(f"{name} は件数なので整数にしてください")
     current = decision.get("current")
-    if current is not None and columns is not None and current not in columns:
+    if current is not None and not isinstance(current, str):
+        errors.append("current は今のやり方の列の名前にしてください")
+    elif with_current and current is not None and columns is not None and (
+        current not in columns
+    ):
         errors.append(f"current の列 {current} が予測の表にありません")
 
     return errors
@@ -1005,7 +1013,9 @@ def decide(
     if not isinstance(bundle, Bundle):
         bundle = load_bundle(bundle)
     decision = plain(dict(decision))
-    errors = check_decision(decision, bundle, list(prediction.columns))
+    errors = check_decision(
+        decision, bundle, list(prediction.columns), with_current=False
+    )
     if errors:
         raise ValueError("意思決定の決め方の誤り: " + " / ".join(errors))
 
@@ -1086,6 +1096,63 @@ def realized(
     return values
 
 
+# 行動した印と, 行動しなかった印として読む言葉 (小文字にして比べる)
+YES_WORDS = ("yes", "y", "true", "1", "はい", "済")
+NO_WORDS = ("no", "n", "false", "0", "いいえ", "未")
+
+
+def acted_flags(column: pd.Series) -> np.ndarray:
+    """
+    今のやり方で行動したかの列を, 行ごとの真偽値にする関数
+
+    文字の列をそのまま真偽値にすると no も行動したことになるので, 決まった
+    言葉で読む
+
+    Parameters
+    ----------
+    column: pd.Series
+        列 (真偽値, 数, yes や no などの文字)
+
+    Returns
+    ----------
+    flags: np.ndarray
+        行動したか
+
+    Raises
+    ----------
+    ValueError
+        読めない値か欠けた値がある場合
+    """
+    # 真偽値はそのまま, 数は 0 より大きいか, 文字は決まった言葉か数
+    # (全角は半角にそろえる)
+    name = column.name
+    if column.isna().any():
+        raise ValueError(
+            f"今のやり方の列 {name} に欠けた値があります"
+            " (行動したかを全ての行に書いてください)"
+        )
+    if pd.api.types.is_bool_dtype(column):
+        flags = column.to_numpy(bool)
+        return flags
+    if pd.api.types.is_numeric_dtype(column):
+        flags = (pd.to_numeric(column) > 0).to_numpy(bool)
+        return flags
+    text = column.astype(str).str.normalize("NFKC").str.strip().str.lower()
+    number = pd.to_numeric(text, errors="coerce")
+    yes = text.isin(YES_WORDS) | (number > 0)
+    known = yes | text.isin(NO_WORDS) | number.notna()
+    unknown = sorted(set(text[~known]))
+    if unknown:
+        raise ValueError(
+            f"今のやり方の列 {name} に, 行動したかとして読めない値が"
+            f"あります: {', '.join(unknown[:5])} (yes と no, はい と"
+            " いいえ, 1 と 0 などで書いてください)"
+        )
+    flags = yes.to_numpy(bool)
+
+    return flags
+
+
 def policies_of(
     kind: str, part: pd.DataFrame, decision: dict
 ) -> dict[str, np.ndarray]:
@@ -1119,7 +1186,14 @@ def policies_of(
             ),
         }
         if decision.get("current"):
-            flags["今のやり方"] = stock + values_of(part, decision["current"])
+            added = values_of(part, decision["current"])
+            if np.isnan(added).any():
+                raise ValueError(
+                    f"今のやり方の列 {decision['current']} に欠けた値か"
+                    "数でない値があります (足した量を全ての行に書いて"
+                    "ください)"
+                )
+            flags["今のやり方"] = stock + added
         return flags
 
     # 選ぶと振り分け: 同じ上限の中での確率の高い順と, 全てと何もしない
@@ -1148,9 +1222,7 @@ def policies_of(
             flags["全てを回す"] = usable
         flags["どれも回さない"] = np.zeros(len(part), dtype=bool)
     if decision.get("current"):
-        flags["今のやり方"] = part[decision["current"]].astype(
-            bool
-        ).to_numpy()
+        flags["今のやり方"] = acted_flags(part[decision["current"]])
 
     return flags
 
@@ -1370,6 +1442,10 @@ def backtest(
         keep &= np.asarray(count, dtype=bool)
     if not keep.any():
         raise ValueError("たどり直せる行 (予測し, 目的の値が分かる行) が"
+                         "ありません")
+    current = decision.get("current")
+    if current is not None and current not in table.columns:
+        raise ValueError(f"今のやり方の列 {current} が過去のデータに"
                          "ありません")
     decided = decide(bundle, table[keep].reset_index(drop=True), decision)
     frame, decision = decided["frame"], decided["decision"]

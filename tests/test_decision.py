@@ -115,6 +115,9 @@ def test_backtest_quantity(tmp_path: Path) -> None:
     assert "今のやり方" in policies
     half = backtest(path, frame, decision, count=np.arange(300) < 150)
     assert half["rows"] == 150
+    holes = frame.assign(now=frame["now"].where(np.arange(300) % 7 > 0))
+    with pytest.raises(ValueError, match="欠けた値"):
+        backtest(path, holes, decision)
 
     # 時刻でずらさない一式の自動は行ごと. まとまりで選び直すと幅が広がる
     # (10 行ずつ同じ値の並び: 似た行のまとまり)
@@ -234,6 +237,56 @@ def test_select_and_triage(tmp_path: Path) -> None:
     )})
     policies = backtest(path, past, triage)["policies"]
     assert policies["この方針"] >= policies["確率 0.5 で分ける"]
+
+
+def test_current_flags(tmp_path: Path) -> None:
+    """
+    今のやり方で回したかの列を, 文字や数でも行動したかとして読むことを
+    確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 全て no なら, どれも回さないのと同じ損 (文字のまま真偽値にしない)
+    path = classifier_bundle(tmp_path)
+    rng = np.random.default_rng(3)
+    x = rng.normal(size=200)
+    past = pd.DataFrame({"x": x, "label": np.where(x > 0, "yes", "no")})
+    triage = {"type": "triage", "positive": "yes", "miss_cost": 9,
+              "false_alarm_cost": 1, "current": "now"}
+    nothing = backtest(path, past.assign(now="no"), triage)["policies"]
+    assert nothing["今のやり方"] == nothing["どれも回さない"]
+    everything = backtest(path, past.assign(now="はい"), triage)["policies"]
+    assert everything["今のやり方"] == everything["全てを回す"]
+    numbers = backtest(path, past.assign(now=(x > 0).astype(int)),
+                       triage)["policies"]
+    words = backtest(path, past.assign(now=np.where(x > 0, "Yes", "No")),
+                     triage)["policies"]
+    assert numbers["今のやり方"] == words["今のやり方"] == 0
+    texts = backtest(path, past.assign(now=np.where(x > 0, "1.0", "０")),
+                     triage)["policies"]
+    wide = backtest(path, past.assign(now=np.where(x > 0, "ＹＥＳ", "no")),
+                    triage)["policies"]
+    assert texts["今のやり方"] == wide["今のやり方"] == 0
+
+    # 決めるだけなら列が無くてもよい. たどり直しでは要る
+    assert "action" in decide(path, predict(path, past), triage)["frame"]
+    with pytest.raises(ValueError, match="過去のデータにありません"):
+        backtest(path, past, triage)
+    assert check_decision(dict(triage, current=["now"]), load_bundle(path))
+
+    # 読めない値と欠けた値は誤り
+    with pytest.raises(ValueError, match="読めない値"):
+        backtest(path, past.assign(now="たぶん"), triage)
+    with pytest.raises(ValueError, match="欠けた値"):
+        backtest(path, past.assign(now=np.where(x > 0, "yes", None)),
+                 triage)
 
 
 def test_decision_errors(tmp_path: Path) -> None:
