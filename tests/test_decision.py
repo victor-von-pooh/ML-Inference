@@ -278,7 +278,8 @@ def test_uplift_effect(tmp_path: Path) -> None:
 
     # 確率に掛ける割合 (今の形) とは違う得になる
     share = decide(path, table, dict(select, effect=0.3,
-                                     effect_kind="share"))
+                                     effect_kind="share",
+                                     effect_goal=None))
     probability = table["p:yes"].to_numpy()
     assert share["frame"]["gain_if_acted"].tolist() == pytest.approx(
         list(probability * 1000 * 0.3 - 50)
@@ -292,8 +293,9 @@ def test_uplift_effect(tmp_path: Path) -> None:
                 if key != "effect_goal"}
     assert check_decision(goalless, bundle)
     assert check_decision(dict(select, effect_goal="up"), bundle)
-    nulled = dict(select, effect=0.3, effect_kind=None)
+    nulled = dict(select, effect=0.3, effect_kind=None, effect_goal=None)
     assert not check_decision(nulled, bundle)
+    assert check_decision(dict(nulled, effect_goal="reduce"), bundle)
     assert not check_decision(dict(select, effect=-0.2), bundle)
     past = frame.assign(label=["yes", "no", "no", "yes"])
     with pytest.raises(ValueError, match="無作為"):

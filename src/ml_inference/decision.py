@@ -234,6 +234,11 @@ def check_decision(
         errors.append(
             f"effect_kind は {', '.join(EFFECT_KINDS)} のどれかにしてください"
         )
+    if not uplift and decision.get("effect_goal") is not None:
+        errors.append(
+            "effect_goal は effect_kind が uplift のときだけ書いてください"
+            " (防げる割合では使わない)"
+        )
     for name in AMOUNTS[kind]:
         if name == "effect" and uplift:
             check_uplift(decision, columns, errors)

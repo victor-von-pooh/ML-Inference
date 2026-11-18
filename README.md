@@ -142,7 +142,7 @@ print(backtest("bundles/sales", "last_month.csv", decision)["sentences"])
 | 型 | 使いどころ | 書くこと |
 | --- | --- | --- |
 | `quantity` | 補充, 仕入れ, 人員 | `under_cost`, `over_cost` (1 単位の足りない損と余る損), `stock` (今ある量), `step` (刻み) |
-| `select` | 引き止め, 営業先, 点検 | `positive`, `value` (当たりの価値), `cost` (行動の費用), `effect` (行動で防げる割合. 仮定), `budget` か `budget_cost` |
+| `select` | 引き止め, 営業先, 点検 | `positive`, `value` (当たりの価値), `cost` (行動の費用), `effect` (行動で防げる割合. 仮定), `effect_kind` (`uplift` なら `effect` は 行動したとき − しないときの当たりの確率), `effect_goal` (`uplift` の向き. `reduce` か `raise`), `budget` か `budget_cost` |
 | `triage` | 人が確かめる, 再検査 | `positive`, `miss_cost` (見逃しの損), `false_alarm_cost` (空振りの損), `capacity` (回せる件数) |
 
 損得の値は数か, 予測の表の列の名前 (行ごとに違う価値, 外で推定した行ごとの効果など). 値の欠けた行は決めない. `current` に今のやり方の列 (足した量, 行動したか) を書くと, たどり直しで今のやり方とも比べる.
