@@ -267,6 +267,11 @@ def test_current_flags(tmp_path: Path) -> None:
                      triage)["policies"]
     assert numbers["今のやり方"] == words["今のやり方"] == 0
 
+    # 決めるだけなら列が無くてもよい. たどり直しでは要る
+    assert "action" in decide(path, predict(path, past), triage)["frame"]
+    with pytest.raises(ValueError, match="current の列"):
+        backtest(path, past, triage)
+
     # 読めない値と欠けた値は誤り
     with pytest.raises(ValueError, match="読めない値"):
         backtest(path, past.assign(now="たぶん"), triage)

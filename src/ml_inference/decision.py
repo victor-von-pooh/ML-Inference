@@ -87,7 +87,8 @@ def check_amount(
 
 
 def check_decision(
-    decision: Any, bundle: Bundle, columns: Optional[list[str]] = None
+    decision: Any, bundle: Bundle, columns: Optional[list[str]] = None,
+    with_current: bool = True
 ) -> list[str]:
     """
     意思決定の決め方の誤りを一覧で返す関数
@@ -100,6 +101,9 @@ def check_decision(
         推論の一式
     columns: Optional[list[str]] = None
         予測の表の列 (渡すと, 列の名前で書いた値があるかも確かめる)
+    with_current: bool = True
+        今のやり方の列 (current) があるかも確かめるか (使うのはたどり
+        直しだけなので, 決めるだけなら確かめない)
 
     Returns
     ----------
@@ -146,7 +150,9 @@ def check_decision(
         ):
             errors.append(f"{name} は件数なので整数にしてください")
     current = decision.get("current")
-    if current is not None and columns is not None and current not in columns:
+    if with_current and current is not None and columns is not None and (
+        current not in columns
+    ):
         errors.append(f"current の列 {current} が予測の表にありません")
 
     return errors
@@ -1005,7 +1011,9 @@ def decide(
     if not isinstance(bundle, Bundle):
         bundle = load_bundle(bundle)
     decision = plain(dict(decision))
-    errors = check_decision(decision, bundle, list(prediction.columns))
+    errors = check_decision(
+        decision, bundle, list(prediction.columns), with_current=False
+    )
     if errors:
         raise ValueError("意思決定の決め方の誤り: " + " / ".join(errors))
 
@@ -1423,6 +1431,9 @@ def backtest(
     if not keep.any():
         raise ValueError("たどり直せる行 (予測し, 目的の値が分かる行) が"
                          "ありません")
+    current = decision.get("current")
+    if current is not None and current not in table.columns:
+        raise ValueError(f"current の列 {current} が予測の表にありません")
     decided = decide(bundle, table[keep].reset_index(drop=True), decision)
     frame, decision = decided["frame"], decided["decision"]
     acted = frame["action"].notna().to_numpy()
