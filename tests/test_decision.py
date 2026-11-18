@@ -236,6 +236,45 @@ def test_select_and_triage(tmp_path: Path) -> None:
     assert policies["この方針"] >= policies["確率 0.5 で分ける"]
 
 
+def test_current_flags(tmp_path: Path) -> None:
+    """
+    今のやり方で回したかの列を, 文字や数でも行動したかとして読むことを
+    確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 全て no なら, どれも回さないのと同じ損 (文字のまま真偽値にしない)
+    path = classifier_bundle(tmp_path)
+    rng = np.random.default_rng(3)
+    x = rng.normal(size=200)
+    past = pd.DataFrame({"x": x, "label": np.where(x > 0, "yes", "no")})
+    triage = {"type": "triage", "positive": "yes", "miss_cost": 9,
+              "false_alarm_cost": 1, "current": "now"}
+    nothing = backtest(path, past.assign(now="no"), triage)["policies"]
+    assert nothing["今のやり方"] == nothing["どれも回さない"]
+    everything = backtest(path, past.assign(now="はい"), triage)["policies"]
+    assert everything["今のやり方"] == everything["全てを回す"]
+    numbers = backtest(path, past.assign(now=(x > 0).astype(int)),
+                       triage)["policies"]
+    words = backtest(path, past.assign(now=np.where(x > 0, "Yes", "No")),
+                     triage)["policies"]
+    assert numbers["今のやり方"] == words["今のやり方"] == 0
+
+    # 読めない値と欠けた値は誤り
+    with pytest.raises(ValueError, match="読めない値"):
+        backtest(path, past.assign(now="たぶん"), triage)
+    with pytest.raises(ValueError, match="欠けた値"):
+        backtest(path, past.assign(now=np.where(x > 0, "yes", None)),
+                 triage)
+
+
 def test_decision_errors(tmp_path: Path) -> None:
     """
     意思決定の決め方の誤りを確かめる関数

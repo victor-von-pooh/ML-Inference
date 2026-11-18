@@ -1086,6 +1086,60 @@ def realized(
     return values
 
 
+# 行動した印と, 行動しなかった印として読む言葉 (小文字にして比べる)
+YES_WORDS = ("yes", "y", "true", "1", "はい", "済")
+NO_WORDS = ("no", "n", "false", "0", "いいえ", "未")
+
+
+def acted_flags(column: pd.Series) -> np.ndarray:
+    """
+    今のやり方で行動したかの列を, 行ごとの真偽値にする関数
+
+    文字の列をそのまま真偽値にすると no も行動したことになるので, 決まった
+    言葉で読む
+
+    Parameters
+    ----------
+    column: pd.Series
+        列 (真偽値, 数, yes や no などの文字)
+
+    Returns
+    ----------
+    flags: np.ndarray
+        行動したか
+
+    Raises
+    ----------
+    ValueError
+        読めない値か欠けた値がある場合
+    """
+    # 真偽値はそのまま, 数は 0 より大きいか, 文字は決まった言葉
+    name = column.name
+    if column.isna().any():
+        raise ValueError(
+            f"今のやり方の列 {name} に欠けた値があります"
+            " (行動したかを全ての行に書いてください)"
+        )
+    if pd.api.types.is_bool_dtype(column):
+        flags = column.to_numpy(bool)
+        return flags
+    if pd.api.types.is_numeric_dtype(column):
+        flags = (pd.to_numeric(column) > 0).to_numpy(bool)
+        return flags
+    text = column.astype(str).str.strip().str.lower()
+    yes = text.isin(YES_WORDS)
+    unknown = sorted(set(text[~yes & ~text.isin(NO_WORDS)]))
+    if unknown:
+        raise ValueError(
+            f"今のやり方の列 {name} に, 行動したかとして読めない値が"
+            f"あります: {', '.join(unknown[:5])} (yes と no, はい と"
+            " いいえ, 1 と 0 などで書いてください)"
+        )
+    flags = yes.to_numpy(bool)
+
+    return flags
+
+
 def policies_of(
     kind: str, part: pd.DataFrame, decision: dict
 ) -> dict[str, np.ndarray]:
@@ -1148,9 +1202,7 @@ def policies_of(
             flags["全てを回す"] = usable
         flags["どれも回さない"] = np.zeros(len(part), dtype=bool)
     if decision.get("current"):
-        flags["今のやり方"] = part[decision["current"]].astype(
-            bool
-        ).to_numpy()
+        flags["今のやり方"] = acted_flags(part[decision["current"]])
 
     return flags
 
