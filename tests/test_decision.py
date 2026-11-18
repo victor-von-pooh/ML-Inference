@@ -253,18 +253,28 @@ def test_uplift_effect(tmp_path: Path) -> None:
     ----------
     None
     """
-    # 確率の差の列: 0.3, 0.05, -0.1, 0.2 (価値 1000, 費用 50)
+    # 確率の差の列: 0.3, 0.05, -0.1, 0.2 (価値 1000, 費用 50). 当たりを
+    # 増やしたい (成約など)
     path = classifier_bundle(tmp_path)
     frame = pd.DataFrame({"x": [2.0, 1.0, 0.5, -3.0],
                           "lift": [0.3, 0.05, -0.1, 0.2]})
     table = predict(path, frame)
     select = {"type": "select", "positive": "yes", "value": 1000,
-              "cost": 50, "effect": "lift", "effect_kind": "uplift"}
+              "cost": 50, "effect": "lift", "effect_kind": "uplift",
+              "effect_goal": "raise"}
     result = decide(path, table, select)
     gains = result["frame"]["gain_if_acted"].tolist()
     assert gains == pytest.approx([250, 0, -150, 150])
     assert list(result["frame"]["action"]) == [True, False, False, True]
     assert any("無作為" in note for note in result["notes"])
+    assert not any("仮定" in text for text in result["sentences"])
+    assert any("無作為" in text for text in result["sentences"])
+
+    # 当たりを減らしたい (解約など): 差が負の行ほど得 (符号を反転)
+    reduce = decide(path, table, dict(select, effect_goal="reduce"))
+    gains = reduce["frame"]["gain_if_acted"].tolist()
+    assert gains == pytest.approx([-350, -100, 50, -250])
+    assert list(reduce["frame"]["action"]) == [False, False, True, False]
 
     # 確率に掛ける割合 (今の形) とは違う得になる
     share = decide(path, table, dict(select, effect=0.3,
@@ -278,6 +288,12 @@ def test_uplift_effect(tmp_path: Path) -> None:
     bundle = load_bundle(path)
     assert check_decision(dict(select, effect=1.5), bundle)
     assert check_decision(dict(select, effect_kind="other"), bundle)
+    goalless = {key: value for key, value in select.items()
+                if key != "effect_goal"}
+    assert check_decision(goalless, bundle)
+    assert check_decision(dict(select, effect_goal="up"), bundle)
+    nulled = dict(select, effect=0.3, effect_kind=None)
+    assert not check_decision(nulled, bundle)
     assert not check_decision(dict(select, effect=-0.2), bundle)
     past = frame.assign(label=["yes", "no", "no", "yes"])
     with pytest.raises(ValueError, match="無作為"):

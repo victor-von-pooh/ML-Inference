@@ -14,7 +14,8 @@ DECISION_KEYS = {
     "quantity": ("type", "under_cost", "over_cost", "stock", "step",
                  "current"),
     "select": ("type", "positive", "value", "cost", "effect",
-               "effect_kind", "budget", "budget_cost", "current"),
+               "effect_kind", "effect_goal", "budget", "budget_cost",
+               "current"),
     "triage": ("type", "positive", "miss_cost", "false_alarm_cost",
                "capacity", "current"),
 }
@@ -27,9 +28,13 @@ AMOUNTS = {
 }
 
 # 対象を選ぶ型の効果の渡し方. share は行動で当たりの損を防げる割合 (確率
-# に掛ける. 仮定), uplift は行動したときとしないときの当たりの確率の差
-# (効果のモデルの見積もり. 負なら行動すると悪くなる)
+# に掛ける. 仮定), uplift は行動したときの当たりの確率 − しないときの当たり
+# の確率 (効果のモデルの見積もり)
 EFFECT_KINDS = ("share", "uplift")
+
+# uplift の向き. reduce は当たりを減らしたい (解約など. 差が負なら良い),
+# raise は当たりを増やしたい (成約など. 差が正なら良い)
+EFFECT_GOALS = ("reduce", "raise")
 
 # 意思決定が予測の表に足す列
 DECISION_COLUMNS = (
@@ -91,6 +96,47 @@ def check_amount(
         errors.append(f"{name} は 0 {limit}数か列の名前にしてください")
 
 
+def is_uplift(decision: dict) -> bool:
+    """
+    対象を選ぶ型の効果を, 確率の差 (uplift) で渡したかを返す関数
+
+    Parameters
+    ----------
+    decision: dict
+        意思決定の決め方
+
+    Returns
+    ----------
+    uplift: bool
+        確率の差で渡したか (effect_kind の無い場合と null は share)
+    """
+    uplift = (
+        decision.get("type") == "select"
+        and (decision.get("effect_kind") or "share") == "uplift"
+    )
+
+    return uplift
+
+
+def uplift_sign(decision: dict) -> float:
+    """
+    確率の差を得の向きに直す符号を返す関数
+
+    Parameters
+    ----------
+    decision: dict
+        意思決定の決め方
+
+    Returns
+    ----------
+    sign: float
+        当たりを減らしたいなら -1, 増やしたいなら 1
+    """
+    sign = -1.0 if decision.get("effect_goal") == "reduce" else 1.0
+
+    return sign
+
+
 def check_uplift(
     decision: dict, columns: Optional[list[str]], errors: list[str]
 ) -> None:
@@ -111,6 +157,13 @@ def check_uplift(
     ----------
     None
     """
+    # 向き (差の符号の読み方) は必ず書く
+    if decision.get("effect_goal") not in EFFECT_GOALS:
+        errors.append(
+            "effect_goal (当たりを減らしたいか増やしたいか) は "
+            f"{', '.join(EFFECT_GOALS)} のどれかにしてください"
+        )
+
     # 行ごとに違う見積もりはふつう列 (効果のモデルの出力)
     value = decision.get("effect")
     if value is None:
@@ -173,9 +226,11 @@ def check_decision(
             "ください"
         )
 
-    # 型ごとの損得と制約 (uplift の効果は -1 から 1)
-    uplift = decision.get("effect_kind") == "uplift"
-    if decision.get("effect_kind", "share") not in EFFECT_KINDS:
+    # 型ごとの損得と制約 (uplift の効果は -1 から 1 と向き)
+    uplift = is_uplift(decision)
+    if kind == "select" and (
+        decision.get("effect_kind") or "share"
+    ) not in EFFECT_KINDS:
         errors.append(
             f"effect_kind は {', '.join(EFFECT_KINDS)} のどれかにしてください"
         )
@@ -253,14 +308,15 @@ def amounts_of(
     result: tuple[dict[str, np.ndarray], np.ndarray]
         項目ごとの行ごとの値と, 値の欠けた行の印
     """
-    # 欠けた値と範囲の外の値 (負, 1 を超える効果) の行は決めない (0 と
-    # みなすと, ただの行動や 1 % の点になる)
+    # 欠けた値と範囲の外の値 (負, 1 を超える効果. uplift の効果は絶対値が
+    # 1 を超えるもの) の行は決めない (0 とみなすと, ただの行動や 1 % の点に
+    # なる)
     values = {
         name: values_of(frame, decision.get(name))
         for name in AMOUNTS[decision["type"]]
     }
     missing = np.zeros(len(frame), dtype=bool)
-    uplift = decision.get("effect_kind") == "uplift"
+    uplift = is_uplift(decision)
     for name, array in values.items():
         if name == "effect" and uplift:
             missing |= np.isnan(array) | (np.abs(array) > 1)
@@ -661,15 +717,18 @@ def decide_select(
         足す列 (action, gain_if_acted, expected_gain) と, まとめ
     """
     # 行動した場合の見込みの得. share は 確率 × 価値 × 効果 − 費用 (効果は
-    # 確率に比例するという仮定), uplift は 価値 × 確率の差 − 費用 (確率を
-    # 二重に掛けない)
+    # 確率に比例するという仮定), uplift は 価値 × 向きを揃えた確率の差 −
+    # 費用 (確率を二重に掛けない. 減らしたい当たりは差の符号を反転)
     probability = np.nan_to_num(pd.to_numeric(
         frame[f"p:{decision['positive']}"], errors="coerce"
     ).to_numpy(dtype=float))
     amounts, _ = amounts_of(frame, decision)
     cost = np.nan_to_num(amounts["cost"])
-    share = 1.0 if decision.get("effect_kind") == "uplift" else probability
-    gain = np.nan_to_num(share * amounts["value"] * amounts["effect"] - cost)
+    if is_uplift(decision):
+        effect = uplift_sign(decision) * amounts["effect"]
+    else:
+        effect = probability * amounts["effect"]
+    gain = np.nan_to_num(amounts["value"] * effect - cost)
     budget, budget_cost = decision.get("budget"), decision.get("budget_cost")
     chosen = choose_rows(gain, cost, ok, budget, budget_cost)
 
@@ -935,18 +994,25 @@ def caveats(
     if ece is not None:
         notes.append(
             f"確率と実際に当たった割合のずれは平均 {ece * 100:.1f} ポイント"
-            + (" (大きいので, 確率を額面どおりに使う判断は粗い)"
+            + ((" (大きい. uplift の得は確率を使わず, 比べの順にだけ"
+                "使う)" if is_uplift(decision)
+                else " (大きいので, 確率を額面どおりに使う判断は粗い)")
                if ece > 0.05 else "")
             + (f". 渡した実績の {uncertainty.get('rows', 0):,} 行で測り"
                "直した値"
                if uncertainty.get("split") == "recent" else "")
         )
-    if kind == "select" and decision.get("effect_kind") == "uplift":
+    if is_uplift(decision):
+        goal = (
+            "当たりを減らしたいので, 差が負の行ほど得"
+            if decision.get("effect_goal") == "reduce"
+            else "当たりを増やしたいので, 差が正の行ほど得"
+        )
         notes.append(
-            f"効果 ({decision['effect']}) は, 行動したときとしないときの"
-            "当たりの確率の差の見積もり. 見積もりは, 行動を無作為に割り"
-            "当てた記録でしか確かめられない (行動した人を選んだ記録だけ"
-            "では偏る). 差が負の行 (行動すると悪くなる) は選ばない"
+            f"効果 ({decision['effect']}) は, 行動したときの当たりの確率 −"
+            f" しないときの当たりの確率の見積もり ({goal}). 見積もりは, 行動"
+            "を無作為に割り当てた記録でしか確かめられない (行動した人を選ん"
+            "だ記録だけでは偏る). 行動すると悪くなる行は選ばない"
         )
     elif kind == "select":
         notes.append(
@@ -996,6 +1062,11 @@ def sentences_of(
         " (同じ前提から計算した比べなので, この方針は必ず同じか良く出る. "
         "実際の差は過去のデータでたどり直して確かめる)"
     )
+    if is_uplift(decision):
+        tail = (
+            " (同じ見積もりから計算した比べなので, この方針は必ず同じか良く"
+            "出る. 実際の差は, 行動を無作為に割り当てた試験で確かめる)"
+        )
     if kind == "quantity":
         tau = range_text(summary["tau_min"], summary["tau_max"], True)
         sentences = [
@@ -1009,8 +1080,13 @@ def sentences_of(
             + tail,
         ]
     elif kind == "select":
+        basis = (
+            "確率の差の見積もり (効果のモデル) と, 書いた価値, 費用のもとで"
+            if is_uplift(decision)
+            else "確率と, 書いた価値, 費用, 効果 (仮定) のもとで"
+        )
         sentences = [
-            "確率と, 書いた価値, 費用, 効果 (仮定) のもとで, 見込みの得が正の"
+            f"{basis}, 見込みの得が正の"
             f"行を{'上限まで' if summary['limited'] else '全て'}選ぶと, "
             f"{rows:,} 件のうち {summary['acting']:,} 件 (費用の合計 "
             f"{amount_text(summary['amount'])})",
@@ -1489,9 +1565,7 @@ def backtest(
     """
     # 効果を確率の差で渡した選ぶ型は, 過去の結果から実際の得を数えられない
     # (行動しなかった場合の結果が分からない)
-    if decision.get("type") == "select" and decision.get(
-        "effect_kind"
-    ) == "uplift":
+    if is_uplift(decision):
         raise ValueError(
             "効果を確率の差 (uplift) で渡した対象を選ぶ型は, たどり直せ"
             "ません. 効果のモデルは, 行動を無作為に割り当てた記録で確かめ"
