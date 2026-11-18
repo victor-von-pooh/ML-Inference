@@ -150,7 +150,9 @@ def check_decision(
         ):
             errors.append(f"{name} は件数なので整数にしてください")
     current = decision.get("current")
-    if with_current and current is not None and columns is not None and (
+    if current is not None and not isinstance(current, str):
+        errors.append("current は今のやり方の列の名前にしてください")
+    elif with_current and current is not None and columns is not None and (
         current not in columns
     ):
         errors.append(f"current の列 {current} が予測の表にありません")
@@ -1121,7 +1123,8 @@ def acted_flags(column: pd.Series) -> np.ndarray:
     ValueError
         読めない値か欠けた値がある場合
     """
-    # 真偽値はそのまま, 数は 0 より大きいか, 文字は決まった言葉
+    # 真偽値はそのまま, 数は 0 より大きいか, 文字は決まった言葉か数
+    # (全角は半角にそろえる)
     name = column.name
     if column.isna().any():
         raise ValueError(
@@ -1134,9 +1137,11 @@ def acted_flags(column: pd.Series) -> np.ndarray:
     if pd.api.types.is_numeric_dtype(column):
         flags = (pd.to_numeric(column) > 0).to_numpy(bool)
         return flags
-    text = column.astype(str).str.strip().str.lower()
-    yes = text.isin(YES_WORDS)
-    unknown = sorted(set(text[~yes & ~text.isin(NO_WORDS)]))
+    text = column.astype(str).str.normalize("NFKC").str.strip().str.lower()
+    number = pd.to_numeric(text, errors="coerce")
+    yes = text.isin(YES_WORDS) | (number > 0)
+    known = yes | text.isin(NO_WORDS) | number.notna()
+    unknown = sorted(set(text[~known]))
     if unknown:
         raise ValueError(
             f"今のやり方の列 {name} に, 行動したかとして読めない値が"
@@ -1181,7 +1186,14 @@ def policies_of(
             ),
         }
         if decision.get("current"):
-            flags["今のやり方"] = stock + values_of(part, decision["current"])
+            added = values_of(part, decision["current"])
+            if np.isnan(added).any():
+                raise ValueError(
+                    f"今のやり方の列 {decision['current']} に欠けた値か"
+                    "数でない値があります (足した量を全ての行に書いて"
+                    "ください)"
+                )
+            flags["今のやり方"] = stock + added
         return flags
 
     # 選ぶと振り分け: 同じ上限の中での確率の高い順と, 全てと何もしない
@@ -1433,7 +1445,8 @@ def backtest(
                          "ありません")
     current = decision.get("current")
     if current is not None and current not in table.columns:
-        raise ValueError(f"current の列 {current} が予測の表にありません")
+        raise ValueError(f"今のやり方の列 {current} が過去のデータに"
+                         "ありません")
     decided = decide(bundle, table[keep].reset_index(drop=True), decision)
     frame, decision = decided["frame"], decided["decision"]
     acted = frame["action"].notna().to_numpy()

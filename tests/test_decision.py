@@ -115,6 +115,9 @@ def test_backtest_quantity(tmp_path: Path) -> None:
     assert "今のやり方" in policies
     half = backtest(path, frame, decision, count=np.arange(300) < 150)
     assert half["rows"] == 150
+    holes = frame.assign(now=frame["now"].where(np.arange(300) % 7 > 0))
+    with pytest.raises(ValueError, match="欠けた値"):
+        backtest(path, holes, decision)
 
     # 時刻でずらさない一式の自動は行ごと. まとまりで選び直すと幅が広がる
     # (10 行ずつ同じ値の並び: 似た行のまとまり)
@@ -266,11 +269,17 @@ def test_current_flags(tmp_path: Path) -> None:
     words = backtest(path, past.assign(now=np.where(x > 0, "Yes", "No")),
                      triage)["policies"]
     assert numbers["今のやり方"] == words["今のやり方"] == 0
+    texts = backtest(path, past.assign(now=np.where(x > 0, "1.0", "０")),
+                     triage)["policies"]
+    wide = backtest(path, past.assign(now=np.where(x > 0, "ＹＥＳ", "no")),
+                    triage)["policies"]
+    assert texts["今のやり方"] == wide["今のやり方"] == 0
 
     # 決めるだけなら列が無くてもよい. たどり直しでは要る
     assert "action" in decide(path, predict(path, past), triage)["frame"]
-    with pytest.raises(ValueError, match="current の列"):
+    with pytest.raises(ValueError, match="過去のデータにありません"):
         backtest(path, past, triage)
+    assert check_decision(dict(triage, current=["now"]), load_bundle(path))
 
     # 読めない値と欠けた値は誤り
     with pytest.raises(ValueError, match="読めない値"):
