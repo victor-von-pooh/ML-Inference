@@ -18,6 +18,7 @@ from ml_inference.remeasure import remeasure, restore_uncertainty
 from ml_inference.result import (
     RESULT_FORMAT_VERSION, artifact_path, infer, read_result, write_result
 )
+from ml_inference.units import UnregisteredUnitError, register_units
 
 try:
     __version__ = metadata.version("ml-inference")
@@ -35,6 +36,7 @@ __all__ = [
     "ROLES",
     "SKIPPED",
     "UNDECIDED",
+    "UnregisteredUnitError",
     "artifact_path",
     "backtest",
     "check_decision",
@@ -52,6 +54,7 @@ __all__ = [
     "predict",
     "read_result",
     "register_procedure",
+    "register_units",
     "remeasure",
     "restore_uncertainty",
     "run_procedure",
