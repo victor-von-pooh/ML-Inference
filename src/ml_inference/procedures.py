@@ -224,7 +224,7 @@ def euler(
     x: torch.Tensor
         時刻 t_end の中身
     """
-    # 等しい刻みで速度を足す
+    # 等しい刻みでの速度の足し合わせ
     if steps < 1:
         raise ValueError("euler の回数は 1 以上にしてください")
     x = state
@@ -290,7 +290,7 @@ def extend_tokens(
     done: torch.Tensor
         終わったか
     """
-    # 終わった件は終わりの番号で埋める
+    # 終わった件は終わりの番号で埋め
     if eos is not None:
         chosen = torch.where(done, torch.full_like(chosen, int(eos)), chosen)
         done = done | (chosen == int(eos))
@@ -435,7 +435,7 @@ def register_procedure(
     ValueError
         名前が空, 組み込みの名前, 既にある名前, 知らない始まりの場合
     """
-    # 組み込みの手順は置き換えない
+    # 組み込みの手順の置き換えの禁止
     if not name:
         raise ValueError("手順の名前が空です")
     if start not in STARTS:
@@ -468,7 +468,7 @@ def get_procedure(name: str) -> Procedure:
     KeyError
         登録簿に無い名前の場合
     """
-    # 無い名前は登録簿の名前を添える
+    # 無い名前は登録簿の名前を添えた誤り
     if name not in PROCEDURES:
         raise KeyError(
             f"手順 {name} は登録簿にありません (今の手順: "

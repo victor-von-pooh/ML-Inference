@@ -94,7 +94,7 @@ notes: []                      # 作るときの注意 (戻せない変換, 学�
 ```
 
 - 一式の中のパス (`model.spec`, `dataset`) は一式からの相対パスで, 一式の外を指せない. 重み (`model.weights`) だけは, 大きな重みを写さずに使えるように, 絶対パスも書ける
-- `make_bundle` が一式を作り, `load_bundle` が読む (版と形, パスの確認. モデルは使うときに組み立てる). `describe_bundle` は画面のための説明 (場所, 名前, 作った時刻, 種類, タスク, 目的の列, クラス, 学習に使う列, 文の列, 読み込み, 前処理の手順と中身の手順, モデルの入力, 実験, 結論の既定値, 何段も先まで予測できるか (`forecastable`), 実験の記録との比べ, 外れ方の記録の要約 (`uncertainty`. 分割, 行の数, 形, 測った時刻, テスト用で覆った割合, 確率のずれ. 分位点の並びは除く), 注意, 版 (`format_version`), 受け持ち (`role`), 出力の形 (`output`), 列の出力か (`column_output`. 結論と意思決定を使えるか), 正解の種類と出どころ (`target`), 繰り返しの手順 (`procedure`), 学習済みの重みの置き方 (`pretrained`) と読んだときの警告 (`pretrained_warnings`. 組み立てる前は空)) を辞書で返す
+- `make_bundle` が一式を作り, `load_bundle` が読む (版と形, パスの確認. モデルは使うときに組み立てる). `describe_bundle` は画面のための説明 (場所, 名前, 作った時刻, 種類, タスク, 目的の列, クラス, 学習に使う列, 文の列, 読み込み, 前処理の手順と中身の手順, モデルの入力, 実験, 結論の既定値, 何段も先まで予測できるか (`forecastable`), 実験の記録との比べ, 外れ方の記録の要約 (`uncertainty`. 分割, 行の数, 形, 測った時刻, テスト用で覆った割合, 確率のずれ. 分位点の並びは除く), 注意, 版 (`format_version`), 受け持ち (`role`), 出力の形 (`output`), 列の出力か (`column_output`. 結論と意思決定を使えるか), 正解の種類と出どころ (`target_info`. `target` は前と同じく目的の列の名前), 繰り返しの手順 (`procedure`), 学習済みの重みの置き方 (`pretrained`) と読んだときの警告 (`pretrained_warnings`. 組み立てる前は空)) を辞書で返す
 - 実験のディレクトリから作る場合は `run.json` の状態 (版, 状態, 監視した指標, ベストの値とエポック, 最終の重みの種類) を `run` に写す. 知らない新しい版の `run.json` は読める項目だけを使い, 学習を終えていない実験 (`completed` 以外) や途中の重み (`final_weights: partial`) とともに `notes` で知らせる (ML-Found の読む側の決まり). `run.json` の無い実験は場所だけを記録する
 - 写したデータセットの説明 (`dataset.yaml`) も ML-EDA の版を確かめ, レシピのファイルは一式の外を指せない
 - `model.kind` は出力の形に合うものだけ (分類 (`class`) と領域 (`mask`) と文 (`text`) は `logits` か `probabilities` (文は `logits` だけ), 他は `value`)
@@ -126,7 +126,7 @@ notes: []                      # 作るときの注意 (戻せない変換, 学�
 - 領域は, クラスの次元があれば最も大きいクラスの番号, 1 チャンネルなら `logits` は 0 より大きいか, `probabilities` は 0.5 以上かで 1 と 0 にする. `output.classes` (番号ごとの名前) は説明に写すだけ
 - 列の出力 (`class`, `value`, `distribution`) だけが, 結論の決め方, 意思決定, たどり直し, 外れ方の測り直し, 列の効き, 何段も先の予測を使える. 他の形の一式でこれらを呼ぶと誤り. 結論は件数 (全体, 推論した, しなかった) と文だけを返す. 一式を作るときの記録との比べ (`check`) と外れ方 (`uncertainty`) も列の出力だけ (他の形は `null`)
 - 出力の形ごとの読み方は関数の表 (`DECODERS`) にして, 形を足すときは表に足す
-- 予測できなかった行 (前処理の後の欠損, 数でない出力) の扱いは形に依らず同じ. 配列の出力は, 1 つでも数でない値があれば予測しなかった行にする
+- 予測できなかった行 (前処理の後の欠損, 数でない出力) の扱いは形に依らず同じ. 配列の出力は, 1 つでも数でない値があれば予測しなかった行にする (領域のように整数に変える形も, 変える前のモデルの出力で確かめる. `sample` は数でない logits があると引けずに誤りになる)
 - 作るときに `role` と `form` を省くと, タスクから決める (分類は `predict` と `class`, 回帰と予測は `predict` と `value`. タスクが `none` のデータセットは `form` が要る). `class` は分類のデータセット, `value` と `distribution` は回帰か予測のデータセットだけに使える
 - ベクトルの出力の一式 (埋め込みのモデル): `make_bundle(..., form="vector")`. 正解の無いデータセット (タスクが `none`) でも作れる. 見本の推論で (件数, 次元) の形を確かめる
 - `target`: 正解の種類 (`kind`) と出どころ (`origin`). 列の予測では `kind: column`. 出どころは ML-EDA の版 2 の `target.origin` と同じ形 (`type`: `process`, `annotation`, `measurement`, `synthetic`, `unknown`. `name` と `settings`) で, `make_bundle(target=...)` で渡した場合だけ書く (版 1 のデータセットは出どころを持たないため). `type: process` の一式は, 結論の文に「正解は … の出力なので, その処理との一致までしか分からない」を添える (ML_tester の決めたこと 4)
@@ -152,8 +152,8 @@ procedure:
 
 - 入口: `PROCEDURES` (名前から手順), `get_procedure(name)`, `register_procedure(name, function, start, time, description, overwrite=False)` (自作の手順. 組み込みの名前は上書きできない), `make_generator(seed)`, `start_noise(shape, generator)`, `run_procedure(name, model, state, steps, generator, **options)`. 手順の関数は `function(model, state, steps, generator, **options)` で, `model` は呼べるものなら何でもよい (`nn.Module` に限らない). 乱数は渡した `torch.Generator` (cpu) からだけ引くので, 同じ入力と同じ種なら同じ出力になる. 勾配は計算しない
 - ML-Found からの使い方の例: `g = make_generator(0); x = start_noise((8, 16), g); samples = run_procedure("ddim", denoiser, x, 50, g)`
-- 一式で使うとき: モデルの入力の出どころに `state` (繰り返しで変わる中身) と `time` (手順の渡す時刻. `ddim` と `euler` だけ) を足す. 他の入力 (`features`, `items`) は条件として毎回同じものを渡す. 雑音から始まる手順は `output.shape` (1 件の形) が要り, 予測する行の数だけ種から雑音を引く. 文の手順は `items` の番号の並び (`state` の入力の `prepend` を足したもの) から始める. 同じ一式, 同じ入力, 同じ `batch_size` なら同じ出力 (乱数は 1 つの生成器から順に引くので, `batch_size` を変えると `sample` と `eta` が 0 でない `ddim` は変わる)
-- 一式を読むときに, 手順の名前が登録簿にあるか, 回数が 1 以上の整数か, 種が整数か, 設定の名前が手順の引数にあるかを確かめる. 知らない名前の一式は「登録簿に無い」誤りで止める (自作の手順は, 一式を読む前に `register_procedure` で登録する. 一式に書かれたコードは読まない. ML_tester の決めたこと 14)
+- 一式で使うとき: モデルの入力の出どころに `state` (繰り返しで変わる中身) と `time` (手順の渡す時刻. `ddim` と `euler` だけ) を足す. 他の入力 (`features`, `items`) は条件として毎回同じものを渡す. 雑音から始まる手順は `output.shape` (1 件の形) が要り, 予測する行の数だけ種から雑音を引く. 文の手順は `items` の番号の並び (`state` の入力の `prepend` を足したもの) から始める. 同じ一式, 同じ入力, 同じ `batch_size` なら同じ出力 (雑音と乱数は 1 つの生成器から予測する行の順に引くので, `batch_size` を変えたり, 予測できない行 (飛ばす行) が変わったりすると, 他の行の出力も変わる. 雑音から始まる手順の始まりの雑音は `batch_size` に依らない). `eos` で件数ずつ止まる長さが違う文の手順は, 最も長いものに `eos` で埋めて並べる
+- 一式を読むときに, 手順の名前が登録簿にあるか, 回数が 1 以上の整数か, 種が整数か, 設定の名前が手順の引数にあるか, 組み込みの設定の値の型と範囲, 手順の始まりと出力の形の組 (雑音からは `class`, `value`, `distribution`, `text` 以外, 番号の並びからは `text` だけ. 番号の並びから始まる手順は文のデータセットだけ) を確かめる. 知らない名前の一式は「登録簿に無い」誤りで止める (自作の手順は, 一式を読む前に `register_procedure` で登録する. 一式に書かれたコードは読まない. ML_tester の決めたこと 14)
 - ビームの探索などは, 要る実例が出てから足す
 
 ### 学習済みの重みの置き方 (版 3. `model.pretrained`)
@@ -162,7 +162,7 @@ procedure:
 
 - 重みのライセンスの情報は `make_bundle(pretrained=...)` で, ノードの名前ごとの `pretrained_info` の形の辞書で渡せる (画面が既に読んだ情報を使う. テストもこれでネットワークを使わない). 省くと, 定義の一番上のノードごとに `ml_modelcontrol.pretrained_info` を呼ぶ (ネットワークを使う. 入っている ML-ModelControl にこの関数が無ければ読まずに注意を残す. 読めなかったノードは `unknown`). 部分モデルの中のノードは今は見ない
 - 写せるか: `redistributable` が真のものだけ写す. 偽と, 情報の無いもの (読めなかった, 不明) は写さない側に倒す
-- 写さないノードは, 学習で変わっていない (定義から組み立てた直後の重みと, 渡した重みのノードの部分が全て等しい) 場合だけ, 一式の重みのファイルからそのノードの重みを除き, 使うときに出どころ (部品の名前と引数, 版) から読む (`place: source`). その部品に `revision` の引数があれば, 一式の定義のその値を読んだ版 (`pinned_revision`) に替えて固定する
+- 写さない重みのノードは, 置き方に依らず, その部品に `revision` の引数があれば一式の定義のその値を読んだ版 (`pinned_revision`) に替えて固定する (比べる重みも固定した版で組み立てる). そのうえで, 学習で変わっていない (定義から組み立てた直後の重みと, 渡した重みのノードの部分が全て等しい) 場合だけ, 一式の重みのファイルからそのノードの重みを除き, 使うときに出どころ (部品の名前と引数, 版) から読む (`place: source`)
 - 学習で変わったノード (微調整した) は出どころから読み直せないので, 写さないライセンスでも一式の重みに残し (`place: bundle`), 「元の重みのライセンスを確かめてから一式を渡す」注意を `notes` に残す
 - 重みを写さない一式 (`copy_weights=False`) は, ファイルを作らないので除かずに記録だけ残す
 - 記録 (ノードごと): `node`, `unit`, `model`, `hub_id`, `revision`, `pinned_revision`, `license`, `status`, `redistributable`, `source` (どこから読んだか), `place` (`bundle` か `source`), `sha256` (ノードの重みの hash. キーの名前, 型, 形, 中身から), `keys` (キーの数)
@@ -332,7 +332,7 @@ procedure:
 ```
 
 - 表に収まらない中身 (領域, 点群, 画像, ベクトル) は `artifacts/` に 1 行 1 つの `.npy` で書き, 表の `artifact` の列に結果のディレクトリからの相対パス (`artifacts/000000.npy`) を入れる. 予測しなかった行は空. 表から `output` の列は除く
-- `result.yaml` の `artifacts` に `directory` (`artifacts`), `column` (`artifact`), `format` (`npy`), `form` (出力の形), `count` (書いた数) を書く
+- `result.yaml` の `artifacts` に `directory` (`artifacts`), `column` (`artifact`), `format` (`npy`), `form` (出力の形), `count` (書いた数) を書く. 書き出すのは配列の出力の形 (`mask`, `point_cloud`, `vector`, `image`) の結果だけで, 入力に `output` や `artifact` の列があっても, 予測の表では「(入力)」付きの名前になるので混ざらない
 - 版: 表に収まらない中身が無い結果は前と同じ版 1 で書く (今の読む側を壊さない. ML-EDA と同じ決まり). ある場合だけ版 2
 - `read_result(path)` は結果を読み, 表 (`frame`) と説明を返す. 知らない新しい版は「読めません」で止める. `artifact_path(root, relative)` は表の相対パスを結果のディレクトリの中に解決する (外を指せば誤り)
 - 書き出す先が既にある場合, 前の `artifacts/` は消してから書く (別の結果の配列が混ざらないように)

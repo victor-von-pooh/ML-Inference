@@ -1,4 +1,5 @@
 from pathlib import Path
+import shutil
 from types import SimpleNamespace
 from typing import Any
 
@@ -8,6 +9,7 @@ import pytest
 import torch
 import yaml
 from conftest import linear_spec, save_weights
+import ml_modelcontrol
 from ml_eda import export_dataset, load_data, load_dataset
 from ml_modelcontrol import build_model, load_example, register_unit
 from torch import nn
@@ -16,7 +18,11 @@ from ml_inference import (
     artifact_path, decide, describe_bundle, infer, load_bundle, make_bundle,
     predict, read_result, write_result
 )
-from ml_inference.predict import DECODERS
+from ml_inference.predict import DECODERS, finite_raw, join_parts
+from ml_inference.procedures import (
+    get_procedure, make_generator, register_procedure, run_procedure,
+    start_noise
+)
 
 # 出どころの重みを作る乱数の種 (入れ替わった出どころを試すため変える)
 SOURCE = {"seed": 1}
@@ -162,8 +168,6 @@ def old_copy(path: Path, target: Path, version: int) -> Path:
     target: Path
         古い版の一式
     """
-    import shutil
-
     # 足した項目を除いて版を戻す
     shutil.copytree(path, target)
     info = read_info(path)
@@ -229,7 +233,8 @@ def test_column_bundle_differs_only_by_added_fields(
         assert result["sentences"] == new["sentences"]
         description = describe_bundle(old)
         assert description["format_version"] == version
-        assert description["target"] == {"kind": "column"}
+        assert description["target_info"] == {"kind": "column"}
+        assert description["target"] == "label"
         assert description["column_output"] is True
 
 
@@ -779,8 +784,6 @@ def test_pretrained_info_is_read_lazily(
     ----------
     None
     """
-    import ml_modelcontrol
-
     # 重みを読まない部品だけの定義は記録が空
     path = table_bundle(tmp_path, table_dataset)
     assert read_info(path)["model"]["pretrained"] == []
@@ -827,3 +830,212 @@ class FakeInfo:
         if unit != "test.SourceLinear":
             return None
         raise OSError("ネットワークを使わない")
+
+
+def test_input_columns_named_like_outputs(
+    tmp_path: Path, table_dataset: Path, table_csv: Path
+) -> None:
+    """
+    入力の output と artifact の列が結果の版と配列の書き出しを変えない
+    ことを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    table_dataset: Path
+        データセット
+    table_csv: Path
+        元の CSV
+
+    Returns
+    ----------
+    None
+    """
+    # 列の出力の一式は版 1 のまま, 入力の列は (入力) 付きの名前
+    frame = pd.read_csv(table_csv)
+    frame["output"] = 1.0
+    frame["artifact"] = "x"
+    path = table_bundle(tmp_path, table_dataset)
+    root = write_result(infer(path, frame), tmp_path / "column")
+    back = read_result(root)
+    assert back["format_version"] == 1 and "form" not in back
+    assert "output (入力)" in back["frame"].columns
+    assert not (root / "artifacts").exists()
+
+    # 配列の出力の一式でも, 入力の artifact の列と並べて書ける
+    vector = table_bundle(tmp_path, table_dataset, 4, name="vec",
+                          form="vector")
+    root = write_result(infer(vector, frame), tmp_path / "vector")
+    table = read_result(root)["frame"]
+    assert table.loc[0, "artifact"] == "artifacts/000000.npy"
+    assert (table["artifact (入力)"] == "x").all()
+
+
+def test_procedures_registry() -> None:
+    """
+    手順の登録簿の関数の計算, 決まった出力, 終わりの番号を確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # Euler 法: 一定の速度なら始まりに速度を足したもの
+    start = torch.zeros(2, 3)
+    out = run_procedure("euler", ConstantModel(2.0), start, 4,
+                        make_generator(0))
+    assert torch.allclose(out, torch.full((2, 3), 2.0))
+
+    # DDIM: 雑音の予測が 0 なら, 最初の時刻の比で大きくしたもの
+    noise = start_noise((2, 3), make_generator(0))
+    out = run_procedure("ddim", ConstantModel(0.0), noise, 10,
+                        make_generator(0))
+    alphas = torch.cumprod(1 - torch.linspace(1e-4, 0.02, 1000,
+                                              dtype=torch.float64), 0)
+    assert torch.allclose(out, noise / float(alphas[999]) ** 0.5, atol=1e-4)
+
+    # 同じ種なら同じ出力, eta > 0 は種で変わる
+    first = run_procedure("ddim", ConstantModel(0.1), noise, 5,
+                          make_generator(3), eta=1.0)
+    again = run_procedure("ddim", ConstantModel(0.1), noise, 5,
+                          make_generator(3), eta=1.0)
+    other = run_procedure("ddim", ConstantModel(0.1), noise, 5,
+                          make_generator(4), eta=1.0)
+    assert torch.equal(first, again) and not torch.equal(first, other)
+
+    # 文の生成: 次の番号は 1 つ前の番号 + 1, 終わりの番号で止める
+    ids = torch.tensor([[0], [2]])
+    out = run_procedure("greedy", NextToken(5), ids, 6, make_generator(0),
+                        eos=3)
+    assert out.tolist() == [[0, 1, 2, 3], [2, 3, 3, 3]]
+    drawn = run_procedure("sample", NextToken(5), ids, 4, make_generator(1),
+                          temperature=0.5)
+    again = run_procedure("sample", NextToken(5), ids, 4, make_generator(1),
+                          temperature=0.5)
+    assert torch.equal(drawn, again) and drawn.shape == (2, 5)
+    with pytest.raises(ValueError, match="temperature"):
+        run_procedure("sample", NextToken(5), ids, 2, make_generator(0),
+                      temperature=0.0)
+
+    # 組み込みの名前は登録し直せない. 自作の手順は名前で呼べる
+    with pytest.raises(ValueError, match="既に"):
+        register_procedure("ddim", euler_twice, "noise", True)
+    register_procedure("twice", euler_twice, "noise", True,
+                       overwrite=True)
+    out = run_procedure("twice", ConstantModel(1.0), start, 2,
+                        make_generator(0))
+    assert torch.allclose(out, torch.full((2, 3), 2.0))
+    with pytest.raises(KeyError, match="登録簿"):
+        get_procedure("beam")
+
+
+def test_text_generation_pads_batches(tmp_path: Path) -> None:
+    """
+    終わりの番号で件数ずつ長さが違っても, 並べて返すことを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 長さの違う件数ずつの出力を, 終わりの番号で埋めて並べる
+    parts = [np.array([[1, 2, 3]]), np.array([[4, 5]])]
+    joined = join_parts(parts, 9)
+    assert joined.tolist() == [[1, 2, 3], [4, 5, 9]]
+    assert finite_raw(np.array([[1.0, np.nan], [0.0, 1.0]])).tolist() == [
+        False, True
+    ]
+    assert finite_raw(np.array([[1, 2]])).tolist() == [True]
+
+
+class ConstantModel:
+    def __init__(self, value: float):
+        # 返す値を保存
+        self.value = value
+
+    def __call__(
+        self, x: torch.Tensor, t: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        どの入力にも同じ値を返す関数
+
+        Parameters
+        ----------
+        x: torch.Tensor
+            中身
+        t: torch.Tensor
+            時刻
+
+        Returns
+        ----------
+        out: torch.Tensor
+            中身と同じ形の一定の値
+        """
+        # 一定の値
+        out = torch.full_like(x, self.value)
+
+        return out
+
+
+class NextToken:
+    def __init__(self, size: int):
+        # 語彙の数を保存
+        self.size = size
+
+    def __call__(self, ids: torch.Tensor) -> torch.Tensor:
+        """
+        最後の番号 + 1 が最も大きい logits を返す関数
+
+        Parameters
+        ----------
+        ids: torch.Tensor
+            (件数, 長さ) の番号の並び
+
+        Returns
+        ----------
+        logits: torch.Tensor
+            (件数, 長さ, 語彙) の logits
+        """
+        # 最後の位置だけ次の番号を大きく
+        logits = torch.zeros(len(ids), ids.shape[1], self.size)
+        chosen = (ids[:, -1] + 1) % self.size
+        logits[torch.arange(len(ids)), -1, chosen] = 5.0
+
+        return logits
+
+
+def euler_twice(
+    model: Any, state: torch.Tensor, steps: int,
+    generator: torch.Generator
+) -> torch.Tensor:
+    """
+    自作の手順の例として, Euler 法を 2 倍の刻みで進める関数
+
+    Parameters
+    ----------
+    model: Any
+        model(x, t) で速度を返すもの
+    state: torch.Tensor
+        始まりの中身
+    steps: int
+        繰り返しの回数
+    generator: torch.Generator
+        乱数の生成器
+
+    Returns
+    ----------
+    x: torch.Tensor
+        時刻 2 の中身
+    """
+    # 組み込みの Euler 法の終わりの時刻を 2 に
+    x = run_procedure("euler", model, state, steps, generator, t_end=2.0)
+
+    return x

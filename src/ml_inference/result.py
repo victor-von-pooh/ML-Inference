@@ -12,7 +12,7 @@ from ml_inference.bundle import Bundle, inside, load_bundle
 from ml_inference.conclude import conclude, conclude_outputs, origin_sentence
 from ml_inference.decision import decide
 from ml_inference.forecast import forecast as forecast_rows
-from ml_inference.predict import predict, target_of
+from ml_inference.predict import ARRAY_FORMS, predict, target_of
 
 # 結果のファイル (result.yaml) の形の版 (表に収まらない中身が無ければ 1)
 RESULT_FORMAT_VERSION = 2
@@ -142,14 +142,15 @@ def write_result(result: dict, path: Union[str, Path]) -> Path:
     root: Path
         書き出したディレクトリ
     """
-    # 表に収まらない中身は artifacts/ に (前の結果の中身は消す)
+    # 表に収まらない中身の artifacts/ への書き出し (前の結果の中身は削除)
     root = Path(path).expanduser()
     root.mkdir(parents=True, exist_ok=True)
     if (root / ARTIFACTS_DIR).is_dir():
         shutil.rmtree(root / ARTIFACTS_DIR)
-    frame, artifacts = write_artifacts(result["frame"], root)
-    if artifacts is not None:
-        artifacts["form"] = result.get("form")
+    frame, artifacts = result["frame"], None
+    if result.get("form") in ARRAY_FORMS:
+        frame, artifacts = write_artifacts(frame, root)
+        artifacts["form"] = result["form"]
 
     # 表は表計算のアプリで開ける BOM 付きの UTF-8
     frame.to_csv(root / "predictions.csv", index=False, encoding="utf-8-sig")
@@ -158,7 +159,9 @@ def write_result(result: dict, path: Union[str, Path]) -> Path:
     meta: dict[str, Any] = {
         "format_version": RESULT_FORMAT_VERSION if artifacts else 1
     }
-    meta.update({k: v for k, v in result.items() if k != "frame"})
+    meta.update({
+        k: v for k, v in result.items() if k not in ("frame", "form")
+    })
     if artifacts:
         meta["artifacts"] = artifacts
     (root / "result.yaml").write_text(
@@ -171,7 +174,7 @@ def write_result(result: dict, path: Union[str, Path]) -> Path:
 
 def write_artifacts(
     frame: pd.DataFrame, root: Path
-) -> tuple[pd.DataFrame, Optional[dict]]:
+) -> tuple[pd.DataFrame, dict]:
     """
     表の output の列の配列を artifacts/ に書き, 相対パスの列にする関数
 
@@ -186,12 +189,13 @@ def write_artifacts(
     ----------
     frame: pd.DataFrame
         output の列を artifact (相対パス. 無い行は空) に替えた表
-    artifacts: Optional[dict]
-        directory, column, format, count (output の列が無ければ None)
+    artifacts: dict
+        directory, column, format, count
     """
-    # 配列の列が無ければそのまま
+    # 配列の列が無ければ, 中身の無い記録
     if "output" not in frame.columns:
-        return frame, None
+        frame = frame.copy()
+        frame["output"] = None
     folder = root / ARTIFACTS_DIR
     folder.mkdir(parents=True, exist_ok=True)
     paths = []
@@ -236,7 +240,7 @@ def artifact_path(root: Union[str, Path], relative: str) -> Path:
     ValueError
         結果のディレクトリの外を指す場合
     """
-    # 一式と同じく外を指せない
+    # 一式と同じく外を指すパスの禁止
     path = inside(Path(root).expanduser(), str(relative))
 
     return path
@@ -264,7 +268,7 @@ def read_result(path: Union[str, Path]) -> dict:
     ValueError
         新しい版の場合
     """
-    # 知らない新しい版は読まない
+    # 知らない新しい版の読み込みの停止
     root = Path(path).expanduser()
     file = root / "result.yaml"
     if not file.is_file():

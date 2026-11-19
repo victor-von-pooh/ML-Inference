@@ -52,7 +52,7 @@ FORMS = tuple(FORM_KINDS)
 # 結論と意思決定を使える列の出力の形
 COLUMN_FORMS = ("class", "value", "distribution")
 
-# 出力の形ごとに要るデータセットのタスク (無い形はタスクを問わない)
+# 出力の形ごとに要るデータセットのタスク (無い形はタスクを問わない形)
 FORM_TASKS = {
     "class": ("classification",),
     "value": ("regression", "forecasting"),
@@ -384,8 +384,10 @@ class Bundle:
 
 def load_sourced(model: Any, state: dict, sourced: list) -> list[str]:
     """
-    出どころから読むノードを除いた重みを読み込み, 出どころの重みを
-    記録の hash と比べる関数
+    出どころから読むノードの重みを hash で確かめる関数
+
+    出どころから読むノードを除いた一式の重みを読み込み, 出どころの重みを
+    記録の hash と比べる
 
     Parameters
     ----------
@@ -420,7 +422,7 @@ def load_sourced(model: Any, state: dict, sourced: list) -> list[str]:
         )
     model.load_state_dict(state, strict=False)
 
-    # 出どころの重みが一式を作ったときと同じか (違えば警告. 止めない)
+    # 出どころの重みと一式を作ったときの重みの比べ (違えば警告. 推論は続行)
     messages = []
     for record in sourced:
         node = str(record["node"])
@@ -658,7 +660,7 @@ def is_level(value: Any) -> bool:
     result: bool
         0 より大きく 1 より小さい数なら True
     """
-    # 真偽値は数にしない
+    # 真偽値を除いた数
     result = isinstance(value, (int, float)) and not isinstance(
         value, bool
     ) and 0 < value < 1
@@ -688,20 +690,22 @@ def check_procedure(procedure: Any, info: dict) -> list[str]:
         item.get("source") for item in inputs.values()
         if isinstance(item, dict)
     ]
+    errors: list[str] = []
     if procedure is None:
         if "state" in sources or "time" in sources:
-            return ["入力の state と time は procedure が要ります"]
-        return []
+            errors.append("入力の state と time は procedure が要ります")
+        return errors
     if not isinstance(procedure, dict):
-        return ["procedure は name, steps, seed の辞書にしてください"]
+        errors.append("procedure は name, steps, seed の辞書にしてください")
+        return errors
 
     # 名前は登録簿に, 回数と種は整数, 設定は手順の引数
-    errors = []
     name = procedure.get("name")
     try:
         found = get_procedure(str(name))
     except KeyError as error:
-        return [str(error.args[0])]
+        errors.append(str(error.args[0]))
+        return errors
     steps = procedure.get("steps")
     if not isinstance(steps, int) or isinstance(steps, bool) or steps < 1:
         errors.append("procedure.steps は 1 以上の整数にしてください")
@@ -741,6 +745,66 @@ def check_procedure(procedure: Any, info: dict) -> list[str]:
             "要ります"
         )
 
+    # 手順の始まりと出力の形の組 (雑音からは配列, 番号の並びからは文)
+    form = output.get("form")
+    if form is not None and found.start == "noise" and form in (
+        "class", "value", "distribution", "text"
+    ):
+        errors.append(f"雑音から始まる手順 {name} は出力の形 {form} に"
+                      "使えません")
+    if form is not None and found.start == "given" and form != "text":
+        errors.append(f"番号の並びから始まる手順 {name} は出力の形 text に"
+                      "だけ使えます")
+    if isinstance(options, dict):
+        errors.extend(check_options(str(name), options, steps))
+
+    return errors
+
+
+def check_options(name: str, options: dict, steps: Any) -> list[str]:
+    """
+    組み込みの手順の設定の値を確かめる関数
+
+    Parameters
+    ----------
+    name: str
+        手順の名前
+    options: dict
+        手順の設定
+    steps: Any
+        繰り返しの回数
+
+    Returns
+    ----------
+    errors: list[str]
+        誤りの一覧 (無ければ空)
+    """
+    # 数の設定の型と範囲
+    errors = []
+    numbers = {
+        "train_steps": 1, "beta_start": 0, "beta_end": 0, "eta": 0,
+        "t_start": None, "t_end": None, "temperature": 0,
+    }
+    for key, low in numbers.items():
+        if key not in options:
+            continue
+        value = options[key]
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            errors.append(f"procedure.options.{key} は数にしてください")
+        elif low is not None and (
+            value < low or (key == "temperature" and value == 0)
+        ):
+            errors.append(f"procedure.options.{key} が範囲の外です")
+    eos = options.get("eos")
+    if eos is not None and (not isinstance(eos, int) or isinstance(eos,
+                                                                   bool)):
+        errors.append("procedure.options.eos は整数にしてください")
+    limit = options.get("train_steps", 1000)
+    if name == "ddim" and isinstance(steps, int) and isinstance(
+        limit, (int, float)
+    ) and steps > limit:
+        errors.append("ddim の steps は train_steps 以下にしてください")
+
     return errors
 
 
@@ -759,9 +823,11 @@ def check_pretrained(records: Any) -> list[str]:
         誤りの一覧 (無ければ空)
     """
     # ノードの名前, 置き方, 出どころから読むものは hash
+    errors: list[str] = []
     if not isinstance(records, list):
-        return ["model.pretrained はノードごとの記録の並びにしてください"]
-    errors = []
+        errors.append("model.pretrained はノードごとの記録の並びにして"
+                      "ください")
+        return errors
     for record in records:
         if not isinstance(record, dict) or not record.get("node") or (
             record.get("place") not in PLACES
@@ -847,6 +913,14 @@ def load_bundle(path: Union[str, Path]) -> Bundle:
         raise ValueError(
             f"出力の形 {form} は {bundle.task or 'タスクの無い'} の"
             f"データセットに使えません ({', '.join(FORM_TASKS[form])} だけ)"
+        )
+    procedure = info.get("procedure")
+    if procedure and get_procedure(str(procedure["name"])).start == (
+        "given"
+    ) and bundle.kind != "text":
+        raise ValueError(
+            f"手順 {procedure['name']} は文の番号の並びから始めるので, 文の"
+            f"データセットの一式だけに使えます (今は {bundle.kind})"
         )
     names = set(spec["nodes"])
     for record in info["model"].get("pretrained") or []:
@@ -1082,7 +1156,7 @@ def make_bundle(
         str(full.info.get("task", "")), role, form, output_options, target
     )
 
-    # 学習済みの重みを読むノードの置き方 (無ければ前と同じく丸ごと写す)
+    # 学習済みの重みを読むノードの置き方 (無ければ前と同じく丸ごとの写し)
     infos, weight_notes = lookup_pretrained(spec_dict, pretrained)
     records: list = []
     kept = None
@@ -1096,22 +1170,22 @@ def make_bundle(
         weight_notes.extend(notes)
 
     # 隣の一時ディレクトリに作り, 確かめてから入れ替える
-    target = final.with_name(f".{final.name}.writing")
-    if target.exists():
-        shutil.rmtree(target)
-    (target / "dataset").mkdir(parents=True)
+    writing = final.with_name(f".{final.name}.writing")
+    if writing.exists():
+        shutil.rmtree(writing)
+    (writing / "dataset").mkdir(parents=True)
     try:
-        dump_spec(spec_dict, target / "model_spec.yaml")
-        shutil.copy(data_dir / "dataset.yaml", target / "dataset")
+        dump_spec(spec_dict, writing / "model_spec.yaml")
+        shutil.copy(data_dir / "dataset.yaml", writing / "dataset")
         recipe_name = str(full.info.get("recipe", "recipe.yaml"))
         if Path(recipe_name).name != recipe_name:
             raise ValueError(f"レシピの名前 {recipe_name} がファイルの名前では"
                              "ありません")
-        shutil.copy(data_dir / recipe_name, target / "dataset" / recipe_name)
+        shutil.copy(data_dir / recipe_name, writing / "dataset" / recipe_name)
         if copy_weights and kept is not None:
-            torch.save(kept, target / "final_model.pt")
+            torch.save(kept, writing / "final_model.pt")
         elif copy_weights:
-            shutil.copy(source, target / "final_model.pt")
+            shutil.copy(source, writing / "final_model.pt")
         info = {
             "format_version": BUNDLE_FORMAT_VERSION,
             "name": name or final.name,
@@ -1133,11 +1207,11 @@ def make_bundle(
             "decision": plain(decision) if decision else None,
             "notes": bundle_notes(full, run) + weight_notes,
         }
-        (target / "inference.yaml").write_text(
+        (writing / "inference.yaml").write_text(
             yaml.safe_dump(info, allow_unicode=True, sort_keys=False),
             encoding="utf-8"
         )
-        bundle = load_bundle(target)
+        bundle = load_bundle(writing)
         # 結論と意思決定の決め方は重い推論の前に確かめる (列の出力だけ)
         if conclusion or decision:
             bundle.require_column("結論の決め方と意思決定")
@@ -1159,16 +1233,16 @@ def make_bundle(
         else:
             info["check"] = None
             info["uncertainty"] = None
-        (target / "inference.yaml").write_text(
+        (writing / "inference.yaml").write_text(
             yaml.safe_dump(info, allow_unicode=True, sort_keys=False),
             encoding="utf-8"
         )
     except Exception:
-        shutil.rmtree(target, ignore_errors=True)
+        shutil.rmtree(writing, ignore_errors=True)
         raise
     if final.exists():
         shutil.rmtree(final)
-    target.rename(final)
+    writing.rename(final)
 
     return info
 
@@ -1177,8 +1251,9 @@ def measure_column(
     bundle: Bundle, dataset: Dataset, run: Optional[dict], info: dict
 ) -> None:
     """
-    列の出力の一式で, 実験の記録との比べと予測の外れ方を測って説明に
-    書く関数
+    列の出力の一式の, 記録との比べと外れ方を測る関数
+
+    実験の記録との比べと予測の外れ方を測って説明に書く
 
     Parameters
     ----------
@@ -1246,7 +1321,7 @@ def output_fields(
     ValueError
         タスクから出力の形を決められない場合と, 欄に誤りがある場合
     """
-    # 出力の形は省略するとタスクから (正解の無いデータセットは要る)
+    # 省略した出力の形はタスクから (正解の無いデータセットでは必須)
     if form is None:
         if task not in ("classification", "regression", "forecasting"):
             raise ValueError(
@@ -1258,7 +1333,7 @@ def output_fields(
     if "form" in (options or {}):
         raise ValueError("output_options に form は書けません (form で選ぶ)")
 
-    # 正解は省略すると, 列の出力は列, 他は分からない
+    # 省略した正解は, 列の出力なら列, 他は不明
     if target is None and form in COLUMN_FORMS:
         target = {"kind": "column"}
     fields = {

@@ -113,7 +113,7 @@ make_bundle(
 )
 ```
 
-繰り返しの手順 (`ddim`, `euler`, `greedy`, `sample`) は `ml_inference.procedures` の登録簿にあり, PyTorch だけを使うので学習の途中の見本 (ML-Found) からも呼べる (`g = make_generator(0); run_procedure("ddim", model, start_noise(shape, g), 50, g)`). 学習済みの重みは, ML-ModelControl の `pretrained_info` が再配布できるとしたものだけを一式に写し, 他は出どころの名前と版 (`pinned_revision`) から読んで hash を確かめる (違えば警告). 詳しくは DESIGN の「受け持ちと出力の形」「繰り返しの手順」「学習済みの重みの置き方」「書き出し」.
+繰り返しの手順 (`ddim`, `euler`, `greedy`, `sample`) は `ml_inference.procedures` の登録簿にあり, PyTorch だけを使うので学習の途中の見本 (ML-Found) からも呼べる (`g = make_generator(0); run_procedure("ddim", model, start_noise(shape, g), 50, g)`). 学習済みの重みは, ML-ModelControl の `pretrained_info` が再配布できるとしたものだけを一式に写し, 他は出どころの名前と版 (`pinned_revision`) から読んで hash を確かめる (違えば警告. 学習で変えた重みは出どころから読み直せないので一式に残し, 注意を書く). 詳しくは DESIGN の「受け持ちと出力の形」「繰り返しの手順」「学習済みの重みの置き方」「書き出し」.
 
 ### 何段も先を予測する
 

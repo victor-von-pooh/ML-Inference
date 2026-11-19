@@ -6,6 +6,9 @@ import pandas as pd
 # 判断の名前
 UNDECIDED, NO_PREDICTION = "保留", "予測なし"
 
+# 予測した行の status (predict の OK と同じ値)
+OK_STATUS = "ok"
+
 # 結論の決め方の項目
 RULE_KEYS = ("min_confidence", "positive", "threshold", "bands", "group_by")
 
@@ -431,8 +434,9 @@ def conclude(
 
 def conclude_outputs(prediction: pd.DataFrame) -> dict:
     """
-    列の出力でない一式 (領域, 点群, ベクトルなど) の予測から, 件数だけの
-    結論を出す関数
+    列の出力でない一式の予測から件数だけの結論を出す関数
+
+    領域, 点群, ベクトルなどの出力の一式で使う
 
     Parameters
     ----------
@@ -448,7 +452,7 @@ def conclude_outputs(prediction: pd.DataFrame) -> dict:
     """
     # 判断は無く, 推論したかだけ
     frame = prediction.copy()
-    ok = frame["status"] == "ok"
+    ok = frame["status"] == OK_STATUS
     frame["decision"] = np.where(ok, "", NO_PREDICTION)
     summary = {
         "rows": int(len(frame)),
@@ -482,7 +486,7 @@ def origin_sentence(target: Optional[dict]) -> Optional[str]:
     sentence: Optional[str]
         文 (今の処理の出力でなければ None)
     """
-    # 正解を作った処理との一致までしか分からない
+    # 正解を作った処理との一致という限り
     origin = (target or {}).get("origin") or {}
     if origin.get("type") != "process":
         return None

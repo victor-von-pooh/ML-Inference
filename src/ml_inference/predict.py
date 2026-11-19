@@ -23,7 +23,7 @@ TABLE_KINDS = ("table", "timeseries")
 # 1 件の出力を配列のまま持つ出力の形 (書き出しは artifacts/)
 ARRAY_FORMS = ("mask", "point_cloud", "vector", "image")
 
-# 繰り返しの手順の中身と時刻の入力 (データからは作らない)
+# 繰り返しの手順の中身と時刻の入力 (データからは作らない入力)
 STEP_SOURCES = ("state", "time")
 
 
@@ -544,11 +544,69 @@ def run_steps(
             name, step_model, state, int(config["steps"]), generator,
             **(config.get("options") or {})
         )
-        parts.append(out.detach().cpu().numpy())
+        out = out.detach().cpu()
+        parts.append((out.float() if out.is_floating_point() else out).numpy())
     model.to("cpu")
-    outputs = np.concatenate(parts) if parts else np.zeros((0,))
+    outputs = join_parts(parts, (config.get("options") or {}).get("eos"))
 
     return outputs
+
+
+def join_parts(parts: list, eos: Any) -> np.ndarray:
+    """
+    件数ずつの手順の出力を, 長さをそろえて並べる関数
+
+    Parameters
+    ----------
+    parts: list
+        件数ずつの出力
+    eos: Any
+        終わりの番号 (文の手順で早く止まった件の埋め. None なら 0)
+
+    Returns
+    ----------
+    outputs: np.ndarray
+        並べた出力
+    """
+    # 文の手順は件数ずつ止まる長さが違うので, 最も長いものに埋め
+    if not parts:
+        outputs = np.zeros((0,))
+        return outputs
+    if all(p.ndim == 2 for p in parts):
+        width = max(p.shape[1] for p in parts)
+        fill = 0 if eos is None else int(eos)
+        parts = [
+            np.pad(p, ((0, 0), (0, width - p.shape[1])),
+                   constant_values=fill)
+            for p in parts
+        ]
+    outputs = np.concatenate(parts)
+
+    return outputs
+
+
+def finite_raw(raw: np.ndarray) -> np.ndarray:
+    """
+    モデルの出力の行ごとに, 全ての値が数かを返す関数
+
+    Parameters
+    ----------
+    raw: np.ndarray
+        モデル (か繰り返しの手順) の出力
+
+    Returns
+    ----------
+    finite: np.ndarray
+        行ごとの真偽値
+    """
+    # 整数の出力 (番号の並び) は常に数
+    values = np.asarray(raw)
+    if not np.issubdtype(values.dtype, np.floating) or values.ndim == 0:
+        finite = np.ones(len(values) if values.ndim else 0, dtype=bool)
+        return finite
+    finite = np.isfinite(values.reshape(len(values), -1)).all(axis=1)
+
+    return finite
 
 
 def run_model(
@@ -742,7 +800,7 @@ def decode_distribution(bundle: Bundle, outputs: np.ndarray) -> dict:
     ValueError
         出力の形が分位点の数と合わない場合
     """
-    # 元の単位に戻し, 行ごとに小さい順に並べ直す (分位点の交差を直す)
+    # 元の単位への戻しと, 行ごとの小さい順の並べ直し (分位点の交差の直し)
     levels = [float(q) for q in bundle.output_info["quantiles"]]
     if outputs.ndim != 2 or outputs.shape[1] != len(levels):
         raise ValueError(
@@ -817,7 +875,7 @@ def decode_array(bundle: Bundle, outputs: np.ndarray) -> dict:
     ValueError
         出力の次元が出力の形と合わない場合
     """
-    # 形ごとの 1 件の次元の数 (画像は問わない)
+    # 形ごとの 1 件の次元の数 (画像は不問)
     dims = {"vector": 1, "point_cloud": 2}.get(bundle.form)
     if outputs.ndim < 2 or (dims is not None and outputs.ndim != dims + 1):
         expected = {"vector": "(件数, 次元)",
@@ -984,7 +1042,7 @@ def predict(
     if "state" in plan and bundle.procedure and get_procedure(
         str(bundle.procedure["name"])
     ).start == "given":
-        # 文の手順は渡した番号の並びから始める
+        # 文の手順の始まりは渡した番号の並び
         plan.add("items")
     if "features" in plan:
         sources["features"], found = features_of(bundle, data)
@@ -1002,11 +1060,11 @@ def predict(
             bundle, {k: np.asarray(v)[keep] for k, v in sources.items()},
             int(keep.sum())
         )
-        columns = decode(
-            bundle, run_model(bundle, tensors, batch_size, device)
-        )
-        # 数でない予測 (入力の無限大など) の行は予測しなかった行に
-        finite = finite_rows(bundle, columns)
+        raw = run_model(bundle, tensors, batch_size, device)
+        columns = decode(bundle, raw)
+        # 数でない予測 (入力の無限大など) の行は予測しなかった行に (整数に
+        # 変える形があるので, 読む前のモデルの出力でも確かめ)
+        finite = finite_rows(bundle, columns) & finite_raw(raw)
         if not finite.all():
             rows = np.flatnonzero(keep)[~finite]
             for row in rows:
@@ -1023,7 +1081,8 @@ def predict(
     # 名前の元の列は「(入力)」を付けて残す
     result = data.frame.copy().reset_index(drop=True)
     result.columns = [str(c) for c in result.columns]
-    added = {"status", "reason", "decision", *columns}
+    added = {"status", "reason", "decision", "output", "artifact",
+             *columns}
     result = result.rename(
         columns={c: f"{c} (入力)" for c in result.columns if c in added}
     )
@@ -1085,7 +1144,7 @@ def empty_output(bundle: Bundle) -> np.ndarray:
     outputs: np.ndarray
         0 件の出力
     """
-    # 分類はクラスの数, 分布は分位点の数の列. 配列の形は次元だけ合わせる
+    # 分類はクラスの数, 分布は分位点の数の列. 配列の形は次元の数だけ
     form = bundle.form
     if form == "class":
         shape: tuple = (0, len(bundle.classes))
@@ -1221,7 +1280,7 @@ def describe_bundle(bundle: Union[str, Path, Bundle]) -> dict:
         "role": bundle.role,
         "output": bundle.output_info,
         "column_output": bundle.column_output,
-        "target": target_of(bundle),
+        "target_info": target_of(bundle),
         "procedure": bundle.procedure,
         "pretrained": list(info["model"].get("pretrained") or []),
         "pretrained_warnings": list(

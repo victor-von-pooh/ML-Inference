@@ -3,8 +3,9 @@ import hashlib
 from typing import Any, Optional
 
 import torch
+from ml_modelcontrol import get_unit
 
-# 学習済みの重みの置き方 (一式の重みに含める, 出どころから読む)
+# 学習済みの重みの置き方 (一式の重み, 出どころ)
 PLACES = ("bundle", "source")
 
 # 記録に写す pretrained_info の項目
@@ -30,7 +31,7 @@ def node_keys(state: dict, node: str) -> list[str]:
     keys: list[str]
         nodes.<ノード>. で始まるキー (並べた順)
     """
-    # ML-ModelControl のモデルはノードを nodes の下に持つ
+    # ML-ModelControl のモデルのノードの置き場 (nodes の下)
     prefix = f"nodes.{node}."
     keys = sorted(k for k in state if k.startswith(prefix))
 
@@ -72,8 +73,7 @@ def lookup_pretrained(
     spec: dict, given: Optional[dict]
 ) -> tuple[dict, list[str]]:
     """
-    学習済みの重みを読むノードと, その重みのライセンスの情報を集める
-    関数
+    学習済みの重みのライセンスの情報を集める関数
 
     Parameters
     ----------
@@ -99,6 +99,14 @@ def lookup_pretrained(
     nodes = spec.get("nodes") or {}
     if given is not None:
         unknown = [str(n) for n in given if n not in nodes]
+        broken = [
+            str(n) for n, info in given.items()
+            if info is not None and not isinstance(info, dict)
+        ]
+        if broken:
+            raise ValueError(
+                f"pretrained の {', '.join(broken)} の情報が辞書ではありません"
+            )
         if unknown:
             raise ValueError(
                 f"pretrained の {', '.join(unknown)} はモデルの定義のノードに"
@@ -108,9 +116,10 @@ def lookup_pretrained(
             str(node): dict(info) for node, info in given.items()
             if info is not None
         }
-        return infos, []
+        notes: list[str] = []
+        return infos, notes
 
-    # 入っている ML-ModelControl で読む (古いものには関数が無い)
+    # 入っている ML-ModelControl での読み込み (古いものには関数が無い)
     try:
         from ml_modelcontrol import pretrained_info
     except ImportError:
@@ -119,7 +128,8 @@ def lookup_pretrained(
             "読めない (pretrained_info が無い) ので, 重みは全て一式に"
             "写しました"
         ]
-        return {}, notes
+        infos = {}
+        return infos, notes
     infos = {}
     for node, item in nodes.items():
         unit = item.get("unit") if isinstance(item, dict) else None
@@ -140,8 +150,7 @@ def lookup_pretrained(
 
 def pin_spec(spec: dict, infos: dict) -> dict:
     """
-    出どころから読むかもしれないノードの版を, 読んだ版に固定した定義を
-    返す関数
+    写せない重みの版を固定した定義を返す関数
 
     Parameters
     ----------
@@ -156,8 +165,6 @@ def pin_spec(spec: dict, infos: dict) -> dict:
         revision の引数を持つ部品で, 写せない重みの版を pinned_revision に
         替えた定義 (元の定義は変えない)
     """
-    from ml_modelcontrol import get_unit
-
     # 写せない重みで, 版の識別子が分かり, 部品が revision を受け取るもの
     pinned = copy.deepcopy(spec)
     for node, info in infos.items():
@@ -181,8 +188,7 @@ def place_weights(
     infos: dict, state: dict, fresh: dict, copy_weights: bool
 ) -> tuple[list[dict], dict, list[str]]:
     """
-    学習済みの重みを読むノードごとに, 一式に写すか出どころから読むかを
-    決める関数
+    学習済みの重みを写すか出どころから読むかを決める関数
 
     Parameters
     ----------
@@ -204,7 +210,7 @@ def place_weights(
     notes: list[str]
         注意の文
     """
-    # 写せないもので, 学習で変わっていないノードだけを除く
+    # 写せないもので, 学習で変わっていないノードだけの除外
     records = []
     kept = dict(state)
     notes = []
