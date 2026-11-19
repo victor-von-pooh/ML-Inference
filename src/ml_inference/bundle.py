@@ -1170,11 +1170,11 @@ def make_bundle(
     data_dir = Path(dataset).expanduser().resolve()
     if not data_dir.is_dir():
         raise ValueError(f"データセット {data_dir} はディレクトリではありません")
+    spec_dict = load_spec(spec)
+    check_units(spec_dict)
     full = read_dataset(data_dir, frames=True)
     if isinstance(target_scale, str):
         target_scale = train_scale(full, target_scale)
-    spec_dict = load_spec(spec)
-    check_units(spec_dict)
     kinds = output_fields(
         str(full.info.get("task", "")), role, form, output_options, target
     )

@@ -160,8 +160,8 @@ procedure:
 
 研究の自作の部品 (ML-ModelControl の `register_unit` で登録する `nn.Module`) を使うモデルの一式は, 起動の設定で明示したモジュールから部品を登録してから読む (ML_tester の決めたこと 14). 一式やモデルの定義に書かれた名前からは何も読み込まない.
 
-- 登録: `register_units(module_names)` は ML-ModelControl の `register_units_from` をそのまま呼び, モジュールの名前ごとの登録した部品の名前 (`{"my_lab.units": ["my.Block"]}`) を返す. アプリ (ML-Provide など) は起動のときに, 起動の設定に書いたモジュールの名前だけを渡す. モジュールの書き方 (`UNITS` か `register_units(register)`) は ML-ModelControl の README の「自作の部品」. 読めないモジュールは ML-ModelControl の誤り (`ValueError`) で止まる. 名前の文字 1 つを渡した取り違えは `TypeError`
-- 確かめ: `load_bundle` と `make_bundle` は, モデルの定義の本体と部分モデル (`subgraphs`) の全てのノードの部品の名前が登録簿にあるかを, 組み立てる前に確かめる (`sub.` で始まる名前は定義の部分モデルなので登録簿を見ない). 無ければ `UnregisteredUnitError` (`ValueError` の子. `units` に登録されていない部品の名前の並び) で止める. 文は部品の名前とノードを挙げ, 「自作の部品なら, 部品を宣言したモジュールの名前を起動の設定に足して起動し直すか, 一式を読む前に `register_units(["モジュールの名前"])` を呼ぶ」と案内する. アプリは, この例外のときに自分の起動の設定の書き方 (引数や環境変数の名前) を添える
+- 登録: `register_units(module_names)` は ML-ModelControl の `register_units_from` をそのまま呼び, モジュールの名前ごとの登録した部品の名前 (`{"my_lab.units": ["my.Block"]}`) を返す. アプリ (ML-Provide など) は起動のときに, 起動の設定に書いたモジュールの名前だけを渡す. モジュールの書き方 (`UNITS` か `register_units(register)`) は ML-ModelControl の README の「自作の部品」. 読めないモジュールは ML-ModelControl の誤り (`ValueError`) で止まる. 名前の文字 1 つを渡した取り違えは `TypeError`. 入っている ML-ModelControl に `register_units_from` が無ければ, 新しくするよう言う `ImportError`
+- 確かめ: `load_bundle` と `make_bundle` は, モデルの定義の本体と部分モデル (`subgraphs`) の全てのノードの部品の名前 (`unit`) と外部の重みを読む部品の名前 (`weights.unit`) が登録簿にあるかを, 組み立てる前に確かめる (`sub.` で始まる名前は定義の部分モデルなので登録簿を見ない). 無ければ `UnregisteredUnitError` (`ValueError` の子. `units` に登録されていない部品の名前の並び) で止める. 文は部品の名前とノードを挙げ, 「自作の部品なら, 部品を宣言したモジュールの名前を起動の設定に足して起動し直すか, 一式を読む前に `register_units(["モジュールの名前"])` を呼ぶ」と案内する. アプリは, この例外のときに自分の起動の設定の書き方 (引数や環境変数の名前) を添える
 - 読み込まないこと: 確かめは登録簿を引くだけで, `importlib` などで定義に書かれた名前を読み込まない. 一式の中の Python のファイルも読まない
 
 ### 学習済みの重みの置き方 (版 3. `model.pretrained`)

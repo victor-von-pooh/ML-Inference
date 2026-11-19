@@ -23,14 +23,30 @@ UNIT_HINT = (
 
 class UnregisteredUnitError(ValueError):
     def __init__(self, units: list[str], nodes: list[str]) -> None:
-        # 親クラスのコンストラクタを呼び出す
-        super(UnregisteredUnitError, self).__init__(
-            unit_message(units, nodes)
-        )
+        # 親クラスのコンストラクタを呼び出す (別のプロセスへ渡せるように
+        # 引数をそのまま保存)
+        super(UnregisteredUnitError, self).__init__(units, nodes)
 
         # 登録されていない部品の名前と, 使うノードを保存
         self.units = list(units)
         self.nodes = list(nodes)
+
+    def __str__(self) -> str:
+        """
+        誤りの文を返す関数
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        ----------
+        message: str
+            部品の名前, ノード, 足し方の案内
+        """
+        message = unit_message(self.units, self.nodes)
+
+        return message
 
 
 def register_units(module_names: list[str]) -> dict[str, list[str]]:
@@ -87,7 +103,7 @@ def spec_units(spec: dict) -> list[tuple[str, str]]:
     ----------
     pairs: list[tuple[str, str]]
         (ノードの名前, 部品の名前). 部分モデルのノードは「部分モデル/
-        ノード」
+        ノード」, 外部の重みを読む部品 (weights.unit) は「ノード.weights」
     """
     # 本体と, 名前を付けた部分モデル
     graphs: list[tuple[str, Any]] = [("", spec)]
@@ -102,8 +118,17 @@ def spec_units(spec: dict) -> list[tuple[str, str]]:
         if not isinstance(nodes, dict):
             continue
         for name, node in nodes.items():
-            if isinstance(node, dict) and "unit" in node:
+            if not isinstance(node, dict):
+                continue
+            if "unit" in node:
                 pairs.append((f"{prefix}{name}", str(node["unit"])))
+            weights = node.get("weights")
+            if isinstance(weights, dict) and isinstance(
+                weights.get("unit"), str
+            ):
+                pairs.append(
+                    (f"{prefix}{name}.weights", weights["unit"])
+                )
 
     return pairs
 

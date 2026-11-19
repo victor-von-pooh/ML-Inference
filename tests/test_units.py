@@ -1,4 +1,5 @@
 from pathlib import Path
+import pickle
 import sys
 import uuid
 
@@ -274,6 +275,29 @@ def test_subgraph_units_are_checked() -> None:
         check_units(spec)
     assert caught.value.units == [missing]
     assert caught.value.nodes == ["block/in"]
+
+
+def test_weights_unit_is_checked() -> None:
+    # 外部の重みを読む部品の名前も確かめる
+    missing = unique("source") + ".Block"
+    spec = {
+        "inputs": {"x": {}},
+        "nodes": {"a": {"unit": "nn.Linear",
+                        "params": {"in_features": 2, "out_features": 2},
+                        "inputs": "x", "weights": {"unit": missing}}},
+        "outputs": {"out": "a"},
+    }
+    with pytest.raises(UnregisteredUnitError) as caught:
+        check_units(spec)
+    assert caught.value.nodes == ["a.weights"]
+
+
+def test_error_survives_pickle() -> None:
+    # 別のプロセスへ渡しても名前と文が残る
+    error = UnregisteredUnitError(["lab.Block"], ["a"])
+    copied = pickle.loads(pickle.dumps(error))
+    assert copied.units == ["lab.Block"]
+    assert str(copied) == str(error)
 
 
 def test_register_units_errors() -> None:
