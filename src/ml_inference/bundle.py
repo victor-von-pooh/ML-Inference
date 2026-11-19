@@ -15,6 +15,7 @@ from ml_modelcontrol import build_model, dump_spec, load_spec
 
 from ml_inference.conclude import check_rules, plain
 from ml_inference.procedures import get_procedure, option_names
+from ml_inference.units import check_units
 from ml_inference.weights import (
     PLACES, place_weights, lookup_pretrained, node_keys, pin_spec,
     state_hash
@@ -881,7 +882,8 @@ def load_bundle(path: Union[str, Path]) -> Bundle:
     FileNotFoundError
         inference.yaml が無い場合
     ValueError
-        新しい版の場合と, 中身に誤りがある場合
+        新しい版の場合と, 中身に誤りがある場合 (登録されていない部品は
+        子の UnregisteredUnitError)
     """
     # 説明と版
     root = Path(path).expanduser().resolve()
@@ -899,8 +901,10 @@ def load_bundle(path: Union[str, Path]) -> Bundle:
     if errors:
         raise ValueError("inference.yaml の誤り: " + " / ".join(errors))
 
-    # モデルの定義と前処理 (データセットの説明とレシピ)
+    # モデルの定義 (部品は登録簿から引くだけ. 名前から何も読み込まない)
+    # と前処理 (データセットの説明とレシピ)
     spec = load_spec(inside(root, str(info["model"]["spec"])))
+    check_units(spec)
     data_dir = inside(root, str(info["dataset"]))
     dataset = read_dataset(data_dir, frames=False)
     unknown = [
@@ -1166,10 +1170,11 @@ def make_bundle(
     data_dir = Path(dataset).expanduser().resolve()
     if not data_dir.is_dir():
         raise ValueError(f"データセット {data_dir} はディレクトリではありません")
+    spec_dict = load_spec(spec)
+    check_units(spec_dict)
     full = read_dataset(data_dir, frames=True)
     if isinstance(target_scale, str):
         target_scale = train_scale(full, target_scale)
-    spec_dict = load_spec(spec)
     kinds = output_fields(
         str(full.info.get("task", "")), role, form, output_options, target
     )

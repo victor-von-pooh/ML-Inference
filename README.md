@@ -115,6 +115,8 @@ make_bundle(
 
 繰り返しの手順 (`ddim`, `euler`, `greedy`, `sample`) は `ml_inference.procedures` の登録簿にあり, PyTorch だけを使うので学習の途中の見本 (ML-Found) からも呼べる (`g = make_generator(0); run_procedure("ddim", model, start_noise(shape, g), 50, g)`). 学習済みの重みは, ML-ModelControl の `pretrained_info` が再配布できるとしたものだけを一式に写し, 他は出どころの名前と版 (`pinned_revision`) から読んで hash を確かめる (違えば警告. 学習で変えた重みは出どころから読み直せないので一式に残し, 注意を書く). 詳しくは DESIGN の「受け持ちと出力の形」「繰り返しの手順」「学習済みの重みの置き方」「書き出し」.
 
+研究の自作の部品 (ML-ModelControl の `register_unit` で登録する部品) を使う一式は, 部品を宣言したモジュールを一式を読む前に `ml_inference.register_units(["my_lab.units"])` で登録する (アプリは起動の設定に書いたモジュールだけを渡す. ML-Provide なら `--units` か `ML_PROVIDE_UNITS`). 一式やモデルの定義に書かれた名前からは何も読み込まず, 登録されていない部品を使う一式は, 部品の名前と起動の設定への足し方を添えた `UnregisteredUnitError` で止まる. 詳しくは DESIGN の「自作の部品」.
+
 ### 何段も先を予測する
 
 目的の列の過去の値の列 (lag) を作る一式では, 目的の列を空にした先の行を足して `forecast` に渡すと, 系列ごとに予測した値を次の入力に使いながら順に埋める.
