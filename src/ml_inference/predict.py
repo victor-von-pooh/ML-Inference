@@ -7,6 +7,9 @@ import torch
 from ml_eda import Data, load_data
 
 from ml_inference.bundle import Bundle, load_bundle
+from ml_inference.procedures import (
+    get_procedure, make_generator, run_procedure, start_noise
+)
 
 # 予測しなかった行の印
 OK, SKIPPED = "ok", "skipped"
@@ -16,6 +19,12 @@ NOT_FINITE = "予測の値が数ではありません (入力に無限大など�
 
 # 表として前処理をかける種類
 TABLE_KINDS = ("table", "timeseries")
+
+# 1 件の出力を配列のまま持つ出力の形 (書き出しは artifacts/)
+ARRAY_FORMS = ("mask", "point_cloud", "vector", "image")
+
+# 繰り返しの手順の中身と時刻の入力 (データからは作らない入力)
+STEP_SOURCES = ("state", "time")
 
 
 def lag_settings(bundle: Bundle) -> dict:
@@ -297,7 +306,9 @@ def items_of(
     return items, reasons
 
 
-def shape_inputs(bundle: Bundle, sources: dict) -> list:
+def shape_inputs(
+    bundle: Bundle, sources: dict, count: Optional[int] = None
+) -> list:
     """
     中身の出どころごとの配列を, モデルの入力の順のテンソルにする関数
 
@@ -307,20 +318,33 @@ def shape_inputs(bundle: Bundle, sources: dict) -> list:
         推論の一式
     sources: dict
         features と items の配列 (あるものだけ)
+    count: Optional[int] = None
+        件数 (省略すると配列の件数. 繰り返しの手順の中身の入力の形に使う)
 
     Returns
     ----------
     tensors: list
-        モデルの入力の順のテンソル
+        モデルの入力の順のテンソル (繰り返しの手順の中身は始まりの中身,
+        時刻は件数の 0)
 
     Raises
     ----------
     ValueError
         データに無い出どころを使う入力がある場合
     """
+    # 件数 (手順の雑音の形と時刻の置き場に)
+    if count is None:
+        count = len(next(iter(sources.values()))) if sources else 0
+    procedure = bundle.procedure
+
     # 文の番号の並びは整数, 他は小数. 先頭に足す番号は文の並びだけ
     tensors = []
     for name, item in bundle.input_plan().items():
+        if item["source"] in STEP_SOURCES:
+            tensors.append(step_placeholder(
+                bundle, item, sources, count, procedure
+            ))
+            continue
         if item["source"] not in sources:
             raise ValueError(
                 f"入力 {name} の {item['source']} が {bundle.kind} のデータに"
@@ -341,6 +365,248 @@ def shape_inputs(bundle: Bundle, sources: dict) -> list:
         tensors.append(tensor)
 
     return tensors
+
+
+def step_placeholder(
+    bundle: Bundle, item: dict, sources: dict, count: int,
+    procedure: Optional[dict]
+) -> torch.Tensor:
+    """
+    繰り返しの手順の中身と時刻の入力の, 始まりのテンソルを作る関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+    item: dict
+        入力の出どころ (source と prepend)
+    sources: dict
+        features と items の配列 (あるものだけ)
+    count: int
+        件数
+    procedure: Optional[dict]
+        繰り返しの手順の設定
+
+    Returns
+    ----------
+    tensor: torch.Tensor
+        時刻は (件数,) の 0. 中身は, 雑音から始まる手順なら 1 件の形の 0
+        (雑音は推論のときに引く), 渡した中身から始まる手順なら items の
+        番号の並び (prepend を足したもの)
+
+    Raises
+    ----------
+    ValueError
+        渡した中身から始まる手順で items が無い場合
+    """
+    # 時刻は手順が渡すので置き場だけ
+    if item["source"] == "time" or procedure is None:
+        tensor = torch.zeros(count)
+        return tensor
+    if get_procedure(str(procedure["name"])).start == "noise":
+        shape = [int(v) for v in bundle.output_info["shape"]]
+        tensor = torch.zeros((count, *shape))
+        return tensor
+
+    # 文の手順は渡した番号の並びから
+    if "items" not in sources:
+        raise ValueError(
+            f"手順 {procedure['name']} は始まりの番号の並び (items) が要ります"
+        )
+    tensor = torch.from_numpy(np.array(sources["items"], dtype=np.int64))
+    if item["prepend"]:
+        head = torch.tensor(item["prepend"], dtype=torch.long)
+        tensor = torch.cat([head.expand(len(tensor), -1), tensor], dim=1)
+
+    return tensor
+
+
+def pick_output(out: Any, chosen: Optional[str]) -> torch.Tensor:
+    """
+    モデルの出力が辞書なら, 使う出力を選ぶ関数
+
+    Parameters
+    ----------
+    out: Any
+        モデルの出力
+    chosen: Optional[str]
+        使う出力の名前 (1 つだけなら None で可)
+
+    Returns
+    ----------
+    tensor: torch.Tensor
+        使う出力
+
+    Raises
+    ----------
+    ValueError
+        使う出力が決まらない場合
+    """
+    # 書いた名前か 1 つだけの出力
+    if not isinstance(out, dict):
+        return out
+    if chosen is None and len(out) != 1:
+        raise ValueError(
+            f"モデルの出力が {', '.join(out)} の {len(out)} つ "
+            "あります. 使う出力を model.output に書いてください"
+        )
+    if chosen is not None and chosen not in out:
+        raise ValueError(
+            f"出力 {chosen} がありません (出力: {', '.join(out)})"
+        )
+    tensor = out[chosen] if chosen is not None else next(iter(out.values()))
+
+    return tensor
+
+
+class StepModel:
+    def __init__(
+        self, model: Any, tensors: list, sources: list[str],
+        chosen: Optional[str]
+    ):
+        # モデル, 条件の入力, 入力ごとの出どころ, 使う出力を保存
+        self.model = model
+        self.tensors = tensors
+        self.sources = sources
+        self.chosen = chosen
+
+    def __call__(
+        self, state: torch.Tensor, t: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """
+        手順の中身と時刻を入力の順に置いてモデルを呼ぶ関数
+
+        Parameters
+        ----------
+        state: torch.Tensor
+            手順の中身
+        t: Optional[torch.Tensor] = None
+            時刻 (時刻を渡さない手順は None)
+
+        Returns
+        ----------
+        output: torch.Tensor
+            使う出力
+        """
+        # 中身と時刻の入力を差し替え, 他は条件のまま
+        inputs = []
+        for source, tensor in zip(self.sources, self.tensors):
+            if source == "state":
+                inputs.append(state)
+            elif source == "time":
+                inputs.append(t)
+            else:
+                inputs.append(tensor)
+        output = pick_output(self.model(*inputs), self.chosen)
+
+        return output
+
+
+def run_steps(
+    bundle: Bundle, tensors: list, batch_size: int, device: str
+) -> np.ndarray:
+    """
+    繰り返しの手順で, 決まった件数ずつ出力を作る関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+    tensors: list
+        モデルの入力の順のテンソル (shape_inputs の結果)
+    batch_size: int
+        1 回に渡す件数
+    device: str
+        使うデバイス
+
+    Returns
+    ----------
+    outputs: np.ndarray
+        手順の出した中身を並べた配列
+    """
+    # 1 つの生成器から, 件数の順に雑音と乱数を引く (同じ入力と種なら同じ)
+    config = bundle.procedure or {}
+    name = str(config["name"])
+    procedure = get_procedure(name)
+    generator = make_generator(int(config["seed"]))
+    sources = [item["source"] for item in bundle.input_plan().values()]
+    index = sources.index("state")
+    model = bundle.model().to(device)
+    chosen = bundle.info["model"].get("output")
+    parts = []
+    for start in range(0, len(tensors[index]), batch_size):
+        batch = [t[start:start + batch_size].to(device) for t in tensors]
+        state = batch[index]
+        if procedure.start == "noise":
+            state = start_noise(tuple(state.shape), generator).to(device)
+        step_model = StepModel(model, batch, sources, chosen)
+        out = run_procedure(
+            name, step_model, state, int(config["steps"]), generator,
+            **(config.get("options") or {})
+        )
+        out = out.detach().cpu()
+        parts.append((out.float() if out.is_floating_point() else out).numpy())
+    model.to("cpu")
+    outputs = join_parts(parts, (config.get("options") or {}).get("eos"))
+
+    return outputs
+
+
+def join_parts(parts: list, eos: Any) -> np.ndarray:
+    """
+    件数ずつの手順の出力を, 長さをそろえて並べる関数
+
+    Parameters
+    ----------
+    parts: list
+        件数ずつの出力
+    eos: Any
+        終わりの番号 (文の手順で早く止まった件の埋め. None なら 0)
+
+    Returns
+    ----------
+    outputs: np.ndarray
+        並べた出力
+    """
+    # 文の手順は件数ずつ止まる長さが違うので, 最も長いものに埋め
+    if not parts:
+        outputs = np.zeros((0,))
+        return outputs
+    if all(p.ndim == 2 for p in parts):
+        width = max(p.shape[1] for p in parts)
+        fill = 0 if eos is None else int(eos)
+        parts = [
+            np.pad(p, ((0, 0), (0, width - p.shape[1])),
+                   constant_values=fill)
+            for p in parts
+        ]
+    outputs = np.concatenate(parts)
+
+    return outputs
+
+
+def finite_raw(raw: np.ndarray) -> np.ndarray:
+    """
+    モデルの出力の行ごとに, 全ての値が数かを返す関数
+
+    Parameters
+    ----------
+    raw: np.ndarray
+        モデル (か繰り返しの手順) の出力
+
+    Returns
+    ----------
+    finite: np.ndarray
+        行ごとの真偽値
+    """
+    # 整数の出力 (番号の並び) は常に数
+    values = np.asarray(raw)
+    if not np.issubdtype(values.dtype, np.floating) or values.ndim == 0:
+        finite = np.ones(len(values) if values.ndim else 0, dtype=bool)
+        return finite
+    finite = np.isfinite(values.reshape(len(values), -1)).all(axis=1)
+
+    return finite
 
 
 def run_model(
@@ -370,6 +636,11 @@ def run_model(
     ValueError
         出力が辞書で, 使う出力が決まらない場合
     """
+    # 繰り返しの手順の一式は手順で
+    if bundle.procedure:
+        outputs = run_steps(bundle, tensors, batch_size, device)
+        return outputs
+
     # 出力が辞書なら, 書いた名前か 1 つだけの出力
     model = bundle.model().to(device)
     chosen = bundle.info["model"].get("output")
@@ -377,20 +648,7 @@ def run_model(
     with torch.no_grad():
         for start in range(0, len(tensors[0]), batch_size):
             batch = [t[start:start + batch_size].to(device) for t in tensors]
-            out = model(*batch)
-            if isinstance(out, dict):
-                if chosen is None and len(out) != 1:
-                    raise ValueError(
-                        f"モデルの出力が {', '.join(out)} の {len(out)} つ "
-                        "あります. 使う出力を model.output に書いてください"
-                    )
-                if chosen is not None and chosen not in out:
-                    raise ValueError(
-                        f"出力 {chosen} がありません (出力: {', '.join(out)})"
-                    )
-                out = out[chosen] if chosen is not None else next(
-                    iter(out.values())
-                )
+            out = pick_output(model(*batch), chosen)
             parts.append(out.detach().float().cpu().numpy())
     model.to("cpu")
     outputs = np.concatenate(parts) if parts else np.zeros((0,))
@@ -435,7 +693,7 @@ def inverse_target(bundle: Bundle, values: np.ndarray) -> np.ndarray:
 
 def decode(bundle: Bundle, outputs: np.ndarray) -> dict:
     """
-    モデルの出力を, タスクに合わせて元の形の列にする関数
+    モデルの出力を, 出力の形に合わせて元の形の列にする関数
 
     Parameters
     ----------
@@ -447,30 +705,280 @@ def decode(bundle: Bundle, outputs: np.ndarray) -> dict:
     Returns
     ----------
     columns: dict
-        prediction (と分類の confidence, p:<クラス>) の列
+        出力の形ごとの列 (分類は prediction, confidence, p:<クラス>, 値は
+        prediction, 分布は prediction と q:<水準>, 配列の形は output, 文は
+        prediction)
 
     Raises
     ----------
     ValueError
-        出力の形がタスクに合わない場合
+        出力の形が合わない場合
+    """
+    # 出力の形ごとの読み方
+    columns = DECODERS[bundle.form](bundle, np.asarray(outputs))
+
+    return columns
+
+
+def scale_back(bundle: Bundle, outputs: np.ndarray) -> np.ndarray:
+    """
+    目的の値の標準化とレシピの変換を戻して, 元の単位にする関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+    outputs: np.ndarray
+        モデルの出力の値 (どの形でも)
+
+    Returns
+    ----------
+    values: np.ndarray
+        元の単位の値
+    """
+    # 前処理の外の標準化を戻してから, レシピの変換を逆の順に
+    scale = bundle.info["model"].get("target_scale")
+    if scale:
+        outputs = outputs * float(scale["scale"]) + float(scale["center"])
+    values = inverse_target(bundle, outputs)
+
+    return values
+
+
+def decode_value(bundle: Bundle, outputs: np.ndarray) -> dict:
+    """
+    値の出力を元の単位の列にする関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+    outputs: np.ndarray
+        (件数,) か (件数, 1) の出力
+
+    Returns
+    ----------
+    columns: dict
+        prediction の列
+
+    Raises
+    ----------
+    ValueError
+        出力の形が合わない場合
     """
     # 回帰と予測は 1 つの値
-    count = len(outputs)
-    if bundle.task != "classification":
-        if outputs.ndim == 2 and outputs.shape[1] == 1:
-            outputs = outputs[:, 0]
-        if outputs.ndim != 1:
-            raise ValueError(
-                f"{bundle.task} の出力は (件数,) か (件数, 1) にしてください "
-                f"(今は {tuple(outputs.shape)})"
-            )
-        scale = bundle.info["model"].get("target_scale")
-        if scale:
-            outputs = outputs * float(scale["scale"]) + float(scale["center"])
-        columns = {"prediction": inverse_target(bundle, outputs)}
-        return columns
+    if outputs.ndim == 2 and outputs.shape[1] == 1:
+        outputs = outputs[:, 0]
+    if outputs.ndim != 1:
+        raise ValueError(
+            f"{bundle.task} の出力は (件数,) か (件数, 1) にしてください "
+            f"(今は {tuple(outputs.shape)})"
+        )
+    columns = {"prediction": scale_back(bundle, outputs)}
 
+    return columns
+
+
+def decode_distribution(bundle: Bundle, outputs: np.ndarray) -> dict:
+    """
+    分位点の出力を, 元の単位の分位点の列と真ん中の予測にする関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+    outputs: np.ndarray
+        (件数, 分位点の数) の出力
+
+    Returns
+    ----------
+    columns: dict
+        prediction (0.5 の点. 無ければ真ん中の点) と q:<水準> の列
+
+    Raises
+    ----------
+    ValueError
+        出力の形が分位点の数と合わない場合
+    """
+    # 元の単位への戻しと, 行ごとの小さい順の並べ直し (分位点の交差の直し)
+    levels = [float(q) for q in bundle.output_info["quantiles"]]
+    if outputs.ndim != 2 or outputs.shape[1] != len(levels):
+        raise ValueError(
+            f"分布の出力は (件数, {len(levels)}) にしてください "
+            f"(今は {tuple(outputs.shape)})"
+        )
+    values = np.sort(scale_back(bundle, outputs), axis=1)
+    columns: dict = {"prediction": median_of(levels, values)}
+    for index, level in enumerate(levels):
+        columns[f"q:{level:g}"] = values[:, index]
+
+    return columns
+
+
+def median_of(levels: list[float], values: np.ndarray) -> np.ndarray:
+    """
+    分位点の並びから 0.5 の点を求める関数
+
+    Parameters
+    ----------
+    levels: list[float]
+        分位点の水準 (小さい順)
+    values: np.ndarray
+        (件数, 分位点の数) の値 (行ごとに小さい順)
+
+    Returns
+    ----------
+    median: np.ndarray
+        0.5 の点 (無ければ前後の水準の間を線形に補う. 0.5 が水準の外なら
+        最も近い端の点)
+    """
+    # 0.5 があればその点, 無ければ水準の間の線形の補い
+    if 0.5 in levels:
+        median = values[:, levels.index(0.5)]
+        return median
+    median = np.array(
+        [np.interp(0.5, levels, row) for row in values], dtype=float
+    )
+
+    return median
+
+
+def decode_mask(bundle: Bundle, outputs: np.ndarray) -> dict:
+    """
+    領域の出力を, 1 件ごとの画素のクラスの番号の配列にする関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+    outputs: np.ndarray
+        (件数, クラスの数, 高さ, 幅) か (件数, [1,] 高さ, 幅) の出力
+
+    Returns
+    ----------
+    columns: dict
+        output (1 件ごとの (高さ, 幅) の整数の配列) の列
+
+    Raises
+    ----------
+    ValueError
+        出力の次元が合わない場合
+    """
+    # クラスの次元があれば最も大きいクラス, 1 チャンネルは 2 値
+    if outputs.ndim == 4 and outputs.shape[1] > 1:
+        masks = outputs.argmax(axis=1)
+    elif outputs.ndim in (3, 4):
+        single = outputs[:, 0] if outputs.ndim == 4 else outputs
+        cut = 0.0 if bundle.output_kind == "logits" else 0.5
+        masks = (single > cut) if cut == 0.0 else (single >= cut)
+    else:
+        raise ValueError(
+            "領域の出力は (件数, クラスの数, 高さ, 幅) か (件数, 高さ, 幅) "
+            f"にしてください (今は {tuple(outputs.shape)})"
+        )
+    columns = {"output": [m.astype(np.int64) for m in masks]}
+
+    return columns
+
+
+def decode_array(bundle: Bundle, outputs: np.ndarray) -> dict:
+    """
+    点群, ベクトル, 画像の出力を, 1 件ごとの配列にする関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+    outputs: np.ndarray
+        (件数, ...) の出力
+
+    Returns
+    ----------
+    columns: dict
+        output (1 件ごとの配列) の列
+
+    Raises
+    ----------
+    ValueError
+        出力の次元が出力の形と合わない場合
+    """
+    # 形ごとの 1 件の次元の数 (画像は不問)
+    dims = {"vector": 1, "point_cloud": 2}.get(bundle.form)
+    if outputs.ndim < 2 or (dims is not None and outputs.ndim != dims + 1):
+        expected = {"vector": "(件数, 次元)",
+                    "point_cloud": "(件数, 点の数, 次元)"}.get(
+            bundle.form, "(件数, ...)"
+        )
+        raise ValueError(
+            f"{bundle.form} の出力は {expected} にしてください "
+            f"(今は {tuple(outputs.shape)})"
+        )
+    columns = {"output": [np.asarray(o, dtype=np.float32) for o in outputs]}
+
+    return columns
+
+
+def decode_text(bundle: Bundle, outputs: np.ndarray) -> dict:
+    """
+    文の出力を, 番号を空白でつないだ文字にする関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+    outputs: np.ndarray
+        (件数, 長さ, 語彙) の logits か (件数, 長さ) の番号の並び
+
+    Returns
+    ----------
+    columns: dict
+        prediction の列
+
+    Raises
+    ----------
+    ValueError
+        出力の次元が合わない場合
+    """
+    # logits は位置ごとに最も大きい番号
+    if outputs.ndim == 3:
+        outputs = outputs.argmax(axis=2)
+    if outputs.ndim != 2:
+        raise ValueError(
+            "文の出力は (件数, 長さ, 語彙) か (件数, 長さ) にしてください "
+            f"(今は {tuple(outputs.shape)})"
+        )
+    columns = {
+        "prediction": [
+            " ".join(str(int(v)) for v in row) for row in outputs
+        ]
+    }
+
+    return columns
+
+
+def decode_class(bundle: Bundle, outputs: np.ndarray) -> dict:
+    """
+    分類の出力を, クラスの名前と確率の列にする関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+    outputs: np.ndarray
+        (件数, クラスの数) か 2 クラスで 1 列の出力
+
+    Returns
+    ----------
+    columns: dict
+        prediction, confidence, p:<クラス> の列
+
+    Raises
+    ----------
+    ValueError
+        出力の形がクラスの数と合わない場合
+    """
     # 分類はクラスごとの確率 (2 クラスで 1 列なら 2 つ目のクラス)
+    count = len(outputs)
     classes = bundle.classes
     kind = bundle.output_kind
     single = outputs.ndim == 1 or (
@@ -500,6 +1008,19 @@ def decode(bundle: Bundle, outputs: np.ndarray) -> dict:
         columns[f"p:{name}"] = probability[:, index]
 
     return columns
+
+
+# 出力の形ごとの読み方
+DECODERS = {
+    "class": decode_class,
+    "value": decode_value,
+    "distribution": decode_distribution,
+    "mask": decode_mask,
+    "point_cloud": decode_array,
+    "vector": decode_array,
+    "image": decode_array,
+    "text": decode_text,
+}
 
 
 def predict(
@@ -545,6 +1066,11 @@ def predict(
     sources: dict = {}
     reasons = [""] * count
     plan = {item["source"] for item in bundle.input_plan().values()}
+    if "state" in plan and bundle.procedure and get_procedure(
+        str(bundle.procedure["name"])
+    ).start == "given":
+        # 文の手順の始まりは渡した番号の並び
+        plan.add("items")
     if "features" in plan:
         sources["features"], found = features_of(bundle, data)
         reasons = [a or b for a, b in zip(reasons, found)]
@@ -558,16 +1084,14 @@ def predict(
     keep = np.array([not r for r in reasons], dtype=bool)
     if keep.any():
         tensors = shape_inputs(
-            bundle, {k: np.asarray(v)[keep] for k, v in sources.items()}
+            bundle, {k: np.asarray(v)[keep] for k, v in sources.items()},
+            int(keep.sum())
         )
-        columns = decode(
-            bundle, run_model(bundle, tensors, batch_size, device)
-        )
-        # 数でない予測 (入力の無限大など) の行は予測しなかった行に
-        check = "prediction" if bundle.task != "classification" else (
-            "confidence"
-        )
-        finite = np.isfinite(np.asarray(columns[check], dtype=float))
+        raw = run_model(bundle, tensors, batch_size, device)
+        columns = decode(bundle, raw)
+        # 数でない予測 (入力の無限大など) の行は予測しなかった行に (整数に
+        # 変える形があるので, 読む前のモデルの出力でも確かめ)
+        finite = finite_rows(bundle, columns) & finite_raw(raw)
         if not finite.all():
             rows = np.flatnonzero(keep)[~finite]
             for row in rows:
@@ -584,21 +1108,53 @@ def predict(
     # 名前の元の列は「(入力)」を付けて残す
     result = data.frame.copy().reset_index(drop=True)
     result.columns = [str(c) for c in result.columns]
-    added = {"status", "reason", "decision", *columns}
+    added = {"status", "reason", "decision", "output", "artifact",
+             *columns}
     result = result.rename(
         columns={c: f"{c} (入力)" for c in result.columns if c in added}
     )
     result["status"] = np.where(keep, OK, SKIPPED)
     result["reason"] = reasons
+    texts = ("output",) + (
+        ("prediction",) if bundle.form in ("class", "text") else ()
+    )
     for name, values in columns.items():
         full = pd.Series([None] * count, dtype=object)
-        full[keep] = list(values)
-        result[name] = (
-            full if name == "prediction" and bundle.task == "classification"
-            else pd.to_numeric(full)
-        )
+        full[keep] = pd.Series(list(values), dtype=object).to_numpy()
+        result[name] = full if name in texts else pd.to_numeric(full)
 
     return result
+
+
+def finite_rows(bundle: Bundle, columns: dict) -> np.ndarray:
+    """
+    予測の値が数 (無限大や欠損でない) の行を返す関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+    columns: dict
+        decode の列
+
+    Returns
+    ----------
+    finite: np.ndarray
+        行ごとの真偽値
+    """
+    # 配列の出力は全ての値, 文は番号なので常に数, 他は確信か値
+    if bundle.form in ARRAY_FORMS:
+        finite = np.array(
+            [bool(np.isfinite(a).all()) for a in columns["output"]],
+            dtype=bool
+        )
+    elif bundle.form == "text":
+        finite = np.ones(len(columns["prediction"]), dtype=bool)
+    else:
+        check = "confidence" if bundle.form == "class" else "prediction"
+        finite = np.isfinite(np.asarray(columns[check], dtype=float))
+
+    return finite
 
 
 def empty_output(bundle: Bundle) -> np.ndarray:
@@ -615,9 +1171,17 @@ def empty_output(bundle: Bundle) -> np.ndarray:
     outputs: np.ndarray
         0 件の出力
     """
-    # 分類はクラスの数の列
-    width = len(bundle.classes) if bundle.task == "classification" else 1
-    outputs = np.zeros((0, width), dtype=np.float32)
+    # 分類はクラスの数, 分布は分位点の数の列. 配列の形は次元の数だけ
+    form = bundle.form
+    if form == "class":
+        shape: tuple = (0, len(bundle.classes))
+    elif form == "distribution":
+        shape = (0, len(bundle.output_info["quantiles"]))
+    elif form in ("point_cloud", "mask"):
+        shape = (0, 1, 1)
+    else:
+        shape = (0, 1)
+    outputs = np.zeros(shape, dtype=np.float32)
 
     return outputs
 
@@ -729,7 +1293,9 @@ def describe_bundle(bundle: Union[str, Path, Bundle]) -> dict:
         "run": info.get("run"),
         "conclusion": info.get("conclusion") or {},
         "decision": info.get("decision"),
-        "forecastable": bundle.task != "classification" and (
+        "forecastable": bundle.column_output and (
+            bundle.task != "classification"
+        ) and (
             bundle.dataset.info.get("target") in lag_settings(bundle)[
                 "columns"
             ]
@@ -737,6 +1303,40 @@ def describe_bundle(bundle: Union[str, Path, Bundle]) -> dict:
         "check": info.get("check"),
         "uncertainty": uncertainty_summary(info.get("uncertainty")),
         "notes": list(info.get("notes") or []),
+        "format_version": info.get("format_version"),
+        "role": bundle.role,
+        "output": bundle.output_info,
+        "column_output": bundle.column_output,
+        "target_info": target_of(bundle),
+        "procedure": bundle.procedure,
+        "pretrained": list(info["model"].get("pretrained") or []),
+        "pretrained_warnings": list(
+            bundle.cache.get("pretrained_warnings") or []
+        ),
     }
 
     return description
+
+
+def target_of(bundle: Bundle) -> Optional[dict]:
+    """
+    一式の正解の種類と出どころを返す関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+
+    Returns
+    ----------
+    target: Optional[dict]
+        kind と origin (版 2 までの一式は kind: column. 分からなければ
+        None)
+    """
+    # 版 3 は書いたまま, 版 2 までは列の予測
+    if "target" in bundle.info:
+        target = bundle.info.get("target")
+        return target
+    target = {"kind": "column"}
+
+    return target

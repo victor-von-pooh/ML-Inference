@@ -6,6 +6,9 @@ import pandas as pd
 # 判断の名前
 UNDECIDED, NO_PREDICTION = "保留", "予測なし"
 
+# 予測した行の status (predict の OK と同じ値)
+OK_STATUS = "ok"
+
 # 結論の決め方の項目
 RULE_KEYS = ("min_confidence", "positive", "threshold", "bands", "group_by")
 
@@ -409,6 +412,14 @@ def conclude(
     ValueError
         決め方に誤りがある場合
     """
+    # 列の出力でない予測 (prediction の無い表) は結論の決め方を使えない
+    if "prediction" not in prediction.columns:
+        raise ValueError(
+            "予測の表に prediction の列がありません. 出力の形が列 (class, "
+            "value, distribution) でない一式の予測には conclude を使えず, "
+            "結論は件数だけ (conclude_outputs) です"
+        )
+
     # 決め方の確認 (numpy の数は Python の数に. 書き出せるように)
     rules = plain(dict(rules or {}))
     errors = check_rules(rules, task, classes, list(prediction.columns))
@@ -427,3 +438,71 @@ def conclude(
     }
 
     return conclusion
+
+
+def conclude_outputs(prediction: pd.DataFrame) -> dict:
+    """
+    列の出力でない一式の予測から件数だけの結論を出す関数
+
+    領域, 点群, ベクトルなどの出力の一式で使う
+
+    Parameters
+    ----------
+    prediction: pd.DataFrame
+        predict の表
+
+    Returns
+    ----------
+    conclusion: dict
+        frame (decision を足した表. 推論した行は空, しなかった行は
+        予測なし), summary (rows, predicted, skipped), sentences, rules
+        (空)
+    """
+    # 判断は無く, 推論したかだけ
+    frame = prediction.copy()
+    ok = frame["status"] == OK_STATUS
+    frame["decision"] = np.where(ok, "", NO_PREDICTION)
+    summary = {
+        "rows": int(len(frame)),
+        "predicted": int(ok.sum()),
+        "skipped": int(len(frame) - ok.sum()),
+    }
+    head = f"{summary['rows']:,} 件のうち {summary['predicted']:,} 件を推論"
+    if summary["skipped"]:
+        head += f" ({summary['skipped']:,} 件は推論できず)"
+    conclusion = {
+        "frame": frame,
+        "summary": summary,
+        "sentences": [head],
+        "rules": {},
+    }
+
+    return conclusion
+
+
+def origin_sentence(target: Optional[dict]) -> Optional[str]:
+    """
+    正解が今の処理の出力の場合に, 超えられないことを述べる文を返す関数
+
+    Parameters
+    ----------
+    target: Optional[dict]
+        一式の正解の種類と出どころ
+
+    Returns
+    ----------
+    sentence: Optional[str]
+        文 (今の処理の出力でなければ None)
+    """
+    # 正解を作った処理との一致という限り
+    origin = (target or {}).get("origin") or {}
+    sentence: Optional[str] = None
+    if origin.get("type") != "process":
+        return sentence
+    name = origin.get("name") or "今の処理"
+    sentence = (
+        f"正解は {name} の出力なので, 予測はその処理との一致までしか分からず, "
+        "その処理を超えられません"
+    )
+
+    return sentence

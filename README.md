@@ -92,6 +92,29 @@ write_result(result, "results/reviews")   # predictions.csv と result.yaml
 | `bands` | 回帰, 予測 | `[{label: 少ない, upper: 100}, {label: 多い}]` のような値の帯 |
 | `group_by` | 全て | 列の値ごとに件数, 判断の内訳, 値の合計などをまとめる |
 
+### 構造のある出力, ベクトル, 繰り返しの手順 (一式の版 3)
+
+一式は受け持ち (`role`) と出力の形 (`form`: `class`, `value`, `distribution`, `mask`, `point_cloud`, `vector`, `text`, `image`) を持ち, 出力の形ごとに読み方を変える. 省くとタスクから決める (分類は `class`, 回帰と予測は `value`). 版 1 と 2 の一式もそのまま読める.
+
+```python
+from ml_inference import infer, make_bundle, write_result
+
+# 埋め込みのモデル (出力がベクトル). 正解の無いデータセットでも作れる
+make_bundle("bundles/embed", spec, "outputs/dataset", weights, form="vector")
+result = infer("bundles/embed", "new_rows.csv")
+write_result(result, "results/embed")   # 配列は artifacts/000000.npy など, 表の artifact の列から指す
+
+# 拡散のモデル. 手順の名前, 回数, 乱数の種を一式に書く (同じ入力と種なら同じ出力)
+make_bundle(
+    "bundles/gen", spec, "outputs/dataset", weights, form="vector",
+    role="generate", output_options={"shape": [16]},
+    inputs={"x": {"source": "state"}, "t": {"source": "time"}},
+    procedure={"name": "ddim", "steps": 50, "seed": 0},
+)
+```
+
+繰り返しの手順 (`ddim`, `euler`, `greedy`, `sample`) は `ml_inference.procedures` の登録簿にあり, PyTorch だけを使うので学習の途中の見本 (ML-Found) からも呼べる (`g = make_generator(0); run_procedure("ddim", model, start_noise(shape, g), 50, g)`). 学習済みの重みは, ML-ModelControl の `pretrained_info` が再配布できるとしたものだけを一式に写し, 他は出どころの名前と版 (`pinned_revision`) から読んで hash を確かめる (違えば警告. 学習で変えた重みは出どころから読み直せないので一式に残し, 注意を書く). 詳しくは DESIGN の「受け持ちと出力の形」「繰り返しの手順」「学習済みの重みの置き方」「書き出し」.
+
 ### 何段も先を予測する
 
 目的の列の過去の値の列 (lag) を作る一式では, 目的の列を空にした先の行を足して `forecast` に渡すと, 系列ごとに予測した値を次の入力に使いながら順に埋める.
