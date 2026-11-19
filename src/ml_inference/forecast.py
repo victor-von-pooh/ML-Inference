@@ -138,6 +138,7 @@ def forecast(
     # 読み込みと, 数の目的の列
     if not isinstance(bundle, Bundle):
         bundle = load_bundle(bundle)
+    bundle.require_column("何段も先の予測")
     if bundle.task == "classification":
         raise ValueError("何段も先の予測は, 回帰と予測の一式だけです")
     data = read_source(bundle, source, options)

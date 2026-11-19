@@ -427,3 +427,69 @@ def conclude(
     }
 
     return conclusion
+
+
+def conclude_outputs(prediction: pd.DataFrame) -> dict:
+    """
+    列の出力でない一式 (領域, 点群, ベクトルなど) の予測から, 件数だけの
+    結論を出す関数
+
+    Parameters
+    ----------
+    prediction: pd.DataFrame
+        predict の表
+
+    Returns
+    ----------
+    conclusion: dict
+        frame (decision を足した表. 推論した行は空, しなかった行は
+        予測なし), summary (rows, predicted, skipped), sentences, rules
+        (空)
+    """
+    # 判断は無く, 推論したかだけ
+    frame = prediction.copy()
+    ok = frame["status"] == "ok"
+    frame["decision"] = np.where(ok, "", NO_PREDICTION)
+    summary = {
+        "rows": int(len(frame)),
+        "predicted": int(ok.sum()),
+        "skipped": int(len(frame) - ok.sum()),
+    }
+    head = f"{summary['rows']:,} 件のうち {summary['predicted']:,} 件を推論"
+    if summary["skipped"]:
+        head += f" ({summary['skipped']:,} 件は推論できず)"
+    conclusion = {
+        "frame": frame,
+        "summary": summary,
+        "sentences": [head],
+        "rules": {},
+    }
+
+    return conclusion
+
+
+def origin_sentence(target: Optional[dict]) -> Optional[str]:
+    """
+    正解が今の処理の出力の場合に, 超えられないことを述べる文を返す関数
+
+    Parameters
+    ----------
+    target: Optional[dict]
+        一式の正解の種類と出どころ
+
+    Returns
+    ----------
+    sentence: Optional[str]
+        文 (今の処理の出力でなければ None)
+    """
+    # 正解を作った処理との一致までしか分からない
+    origin = (target or {}).get("origin") or {}
+    if origin.get("type") != "process":
+        return None
+    name = origin.get("name") or "今の処理"
+    sentence = (
+        f"正解は {name} の出力なので, 予測はその処理との一致までしか分からず, "
+        "その処理を超えられません"
+    )
+
+    return sentence

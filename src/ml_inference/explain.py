@@ -259,6 +259,7 @@ def explain(
     # 表と時系列の元の列だけ
     if not isinstance(bundle, Bundle):
         bundle = load_bundle(bundle)
+    bundle.require_column("列の効き")
     if bundle.kind not in TABLE_KINDS:
         raise ValueError(
             f"{bundle.kind} の一式は, 1 件の中身が列ではないので列の効きを"

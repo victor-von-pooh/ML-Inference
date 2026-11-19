@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import shutil
 from typing import Any, Optional, Union
+import warnings
 
 import numpy as np
 import torch
@@ -13,21 +14,57 @@ from ml_eda.pipeline import DATASET_FORMAT_VERSION
 from ml_modelcontrol import build_model, dump_spec, load_spec
 
 from ml_inference.conclude import check_rules, plain
+from ml_inference.procedures import get_procedure, option_names
+from ml_inference.weights import (
+    PLACES, place_weights, lookup_pretrained, node_keys, pin_spec,
+    state_hash
+)
 
 # 推論の一式の形の版
-BUNDLE_FORMAT_VERSION = 2
+BUNDLE_FORMAT_VERSION = 3
 
 # inference.yaml の一番上の項目
 TOP_KEYS = (
-    "format_version", "name", "created_at", "model", "inputs", "dataset",
-    "run", "conclusion", "decision", "check", "uncertainty", "notes"
+    "format_version", "name", "created_at", "role", "output", "target",
+    "procedure", "model", "inputs", "dataset", "run", "conclusion",
+    "decision", "check", "uncertainty", "notes"
 )
 
 # 出力の扱い方
 OUTPUT_KINDS = ("logits", "probabilities", "value")
 
-# 入力の中身の出どころ
-INPUT_SOURCES = ("features", "items")
+# 受け持ち (ML-Quest の受け持ちと同じ値)
+ROLES = ("predict", "generate", "rank", "group", "effect")
+
+# 出力の形と, 形ごとに使える出力の扱い方 (先頭が既定)
+FORM_KINDS = {
+    "class": ("logits", "probabilities"),
+    "value": ("value",),
+    "distribution": ("value",),
+    "mask": ("logits", "probabilities"),
+    "point_cloud": ("value",),
+    "vector": ("value",),
+    "text": ("logits",),
+    "image": ("value",),
+}
+FORMS = tuple(FORM_KINDS)
+
+# 結論と意思決定を使える列の出力の形
+COLUMN_FORMS = ("class", "value", "distribution")
+
+# 出力の形ごとに要るデータセットのタスク (無い形はタスクを問わない)
+FORM_TASKS = {
+    "class": ("classification",),
+    "value": ("regression", "forecasting"),
+    "distribution": ("regression", "forecasting"),
+}
+
+# 正解の出どころの種類 (ML-EDA の版 2 の target.origin と同じ)
+ORIGIN_TYPES = ("process", "annotation", "measurement", "synthetic",
+                "unknown")
+
+# 入力の中身の出どころ (state と time は繰り返しの手順の中身と時刻)
+INPUT_SOURCES = ("features", "items", "state", "time")
 
 # 一式を作るときに確かめる見本の件数
 SAMPLE_ROWS = 8
@@ -117,6 +154,104 @@ class Bundle:
         return kind
 
     @property
+    def role(self) -> str:
+        """
+        受け持ちを返す関数
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        ----------
+        role: str
+            predict, generate, rank, group, effect (版 2 までは predict)
+        """
+        # 版 2 までの一式は列の予測
+        role = str(self.info.get("role") or "predict")
+
+        return role
+
+    @property
+    def output_info(self) -> dict:
+        """
+        出力の形の説明を返す関数
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        ----------
+        output: dict
+            form と形ごとの欄 (版 2 までは form をタスクから)
+        """
+        # 版 2 までは分類がクラス, 他は値
+        output = dict(self.info.get("output") or {})
+        if not output.get("form"):
+            output["form"] = form_of_task(self.task)
+
+        return output
+
+    @property
+    def form(self) -> str:
+        """
+        出力の形を返す関数
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        ----------
+        form: str
+            class, value, distribution, mask, point_cloud, vector, text,
+            image のどれか
+        """
+        # 出力の形の説明の form
+        form = str(self.output_info["form"])
+
+        return form
+
+    @property
+    def column_output(self) -> bool:
+        """
+        結論と意思決定を使える列の出力かを返す関数
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        ----------
+        column: bool
+            class, value, distribution なら True
+        """
+        # 1 行に 1 つのクラスか値
+        column = self.form in COLUMN_FORMS
+
+        return column
+
+    @property
+    def procedure(self) -> Optional[dict]:
+        """
+        繰り返しの手順の設定を返す関数
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        ----------
+        procedure: Optional[dict]
+            name, steps, seed, options (無ければ None)
+        """
+        # 書かれていなければ 1 回の推論
+        procedure = self.info.get("procedure") or None
+
+        return procedure
+
+    @property
     def output_kind(self) -> str:
         """
         モデルの出力の扱い方を返す関数
@@ -130,10 +265,8 @@ class Bundle:
         kind: str
             logits, probabilities, value のどれか
         """
-        # 書かれていなければ, 分類は logits, それ以外は値
-        kind = self.info["model"].get("kind") or (
-            "logits" if self.task == "classification" else "value"
-        )
+        # 書かれていなければ, 出力の形の既定 (分類は logits, 値は value)
+        kind = self.info["model"].get("kind") or FORM_KINDS[self.form][0]
 
         return kind
 
@@ -186,6 +319,31 @@ class Bundle:
 
         return plan
 
+    def require_column(self, what: str) -> None:
+        """
+        列の出力 (クラスか値) の一式でなければ誤りにする関数
+
+        Parameters
+        ----------
+        what: str
+            使おうとした機能の名前
+
+        Returns
+        ----------
+        None
+
+        Raises
+        ----------
+        ValueError
+            列の出力でない一式の場合
+        """
+        # 結論と意思決定は 1 行に 1 つのクラスか値が前提
+        if not self.column_output:
+            raise ValueError(
+                f"出力の形が {self.form} の一式には {what} を使えません "
+                f"(使えるのは {', '.join(COLUMN_FORMS)} の一式だけ)"
+            )
+
     def model(self) -> Any:
         """
         定義からモデルを組み立て, 重みを読み込んで返す関数
@@ -208,11 +366,97 @@ class Bundle:
         state = torch.load(
             self.weights_path, map_location="cpu", weights_only=True
         )
-        model.load_state_dict(state)
+        sourced = [
+            record for record in self.info["model"].get("pretrained") or []
+            if record.get("place") == "source"
+        ]
+        if sourced:
+            self.cache["pretrained_warnings"] = load_sourced(
+                model, state, sourced
+            )
+        else:
+            model.load_state_dict(state)
         model.eval()
         self.cache["model"] = model
 
         return model
+
+
+def load_sourced(model: Any, state: dict, sourced: list) -> list[str]:
+    """
+    出どころから読むノードを除いた重みを読み込み, 出どころの重みを
+    記録の hash と比べる関数
+
+    Parameters
+    ----------
+    model: nn.Module
+        定義から組み立てたモデル (出どころの重みを読んだもの)
+    state: dict
+        一式の重み (出どころから読むノードを除いたもの)
+    sourced: list
+        出どころから読むノードの記録
+
+    Returns
+    ----------
+    messages: list[str]
+        hash の違ったノードの警告の文 (無ければ空)
+
+    Raises
+    ----------
+    ValueError
+        足りない重みが出どころから読むノードのものだけでない場合
+    """
+    # 足りないキーは出どころから読むノードのものだけ
+    built = model.state_dict()
+    expected = set()
+    for record in sourced:
+        expected.update(node_keys(built, str(record["node"])))
+    missing = set(built) - set(state)
+    extra = set(state) - set(built)
+    if missing != expected or extra:
+        raise ValueError(
+            "一式の重みが定義と合いません (足りない重み "
+            f"{len(missing - expected)} 個, 余る重み {len(extra)} 個)"
+        )
+    model.load_state_dict(state, strict=False)
+
+    # 出どころの重みが一式を作ったときと同じか (違えば警告. 止めない)
+    messages = []
+    for record in sourced:
+        node = str(record["node"])
+        found = state_hash(built, node_keys(built, node))
+        if found != record.get("sha256"):
+            message = (
+                f"ノード {node} の出どころから読んだ重み "
+                f"({record.get('hub_id') or record.get('model') or ''} "
+                f"版 {record.get('pinned_revision')}) が, 一式を作ったとき"
+                "と違います. 出どころの重みが入れ替わったか, 版を固定できない"
+                "部品です. 予測が一式を作ったときと変わることがあります"
+            )
+            warnings.warn(message)
+            messages.append(message)
+
+    return messages
+
+
+def form_of_task(task: str) -> str:
+    """
+    版 2 までの一式の出力の形を, タスクから決める関数
+
+    Parameters
+    ----------
+    task: str
+        データセットのタスク
+
+    Returns
+    ----------
+    form: str
+        分類は class, 他は value
+    """
+    # 版 2 までは列の予測だけ
+    form = "class" if task == "classification" else "value"
+
+    return form
 
 
 def inside(root: Path, relative: str) -> Path:
@@ -280,6 +524,8 @@ def check_info(info: Any) -> list[str]:
         errors.append(
             f"model.kind は {', '.join(OUTPUT_KINDS)} のどれかにしてください"
         )
+    elif model.get("pretrained") is not None:
+        errors.extend(check_pretrained(model["pretrained"]))
     if isinstance(model, dict) and model.get("target_scale") is not None:
         scale = model["target_scale"]
         if not isinstance(scale, dict) or not all(
@@ -312,6 +558,222 @@ def check_info(info: Any) -> list[str]:
             isinstance(v, int) and not isinstance(v, bool) for v in prepend
         ):
             errors.append(f"inputs.{name}.prepend は整数の並びにしてください")
+
+    # 版 3 の受け持ち, 出力の形, 正解, 繰り返しの手順
+    errors.extend(check_kinds(info))
+    errors.extend(check_procedure(info.get("procedure"), info))
+
+    return errors
+
+
+def check_kinds(info: dict) -> list[str]:
+    """
+    受け持ち, 出力の形, 正解の種類と出どころの形を確かめる関数
+
+    Parameters
+    ----------
+    info: dict
+        inference.yaml の中身
+
+    Returns
+    ----------
+    errors: list[str]
+        誤りの一覧 (無ければ空)
+    """
+    # 受け持ち
+    errors = []
+    role = info.get("role")
+    if role is not None and role not in ROLES:
+        errors.append(f"role は {', '.join(ROLES)} のどれかにしてください")
+
+    # 出力の形と形ごとの欄
+    output = info.get("output")
+    if output is not None:
+        if not isinstance(output, dict) or output.get("form") not in FORMS:
+            errors.append(
+                f"output.form は {', '.join(FORMS)} のどれかにしてください"
+            )
+            output = {}
+        form = output.get("form")
+        kind = (info.get("model") or {}).get("kind") if isinstance(
+            info.get("model"), dict
+        ) else None
+        if form in FORM_KINDS and kind is not None and (
+            kind not in FORM_KINDS[form]
+        ):
+            errors.append(
+                f"model.kind {kind} は出力の形 {form} に使えません "
+                f"({', '.join(FORM_KINDS[form])})"
+            )
+        quantiles = output.get("quantiles")
+        if form == "distribution" and not (
+            isinstance(quantiles, list) and quantiles
+            and all(is_level(q) for q in quantiles)
+            and all(a < b for a, b in zip(quantiles, quantiles[1:]))
+        ):
+            errors.append(
+                "output.quantiles は 0 から 1 の間の小さい順の数の並びに"
+                "してください"
+            )
+        shape = output.get("shape")
+        if shape is not None and not (
+            isinstance(shape, list) and shape and all(
+                isinstance(v, int) and not isinstance(v, bool) and v > 0
+                for v in shape
+            )
+        ):
+            errors.append("output.shape は正の整数の並びにしてください")
+
+    # 正解の種類と出どころ
+    target = info.get("target")
+    if target is not None:
+        if not isinstance(target, dict) or not isinstance(
+            target.get("kind"), str
+        ):
+            errors.append("target は kind (文字) を持つ辞書にしてください")
+        elif target.get("origin") is not None:
+            origin = target["origin"]
+            if not isinstance(origin, dict) or origin.get("type") not in (
+                ORIGIN_TYPES
+            ):
+                errors.append(
+                    "target.origin.type は "
+                    f"{', '.join(ORIGIN_TYPES)} のどれかにしてください"
+                )
+
+    return errors
+
+
+def is_level(value: Any) -> bool:
+    """
+    分位点の水準 (0 と 1 の間の数) かを確かめる関数
+
+    Parameters
+    ----------
+    value: Any
+        確かめる値
+
+    Returns
+    ----------
+    result: bool
+        0 より大きく 1 より小さい数なら True
+    """
+    # 真偽値は数にしない
+    result = isinstance(value, (int, float)) and not isinstance(
+        value, bool
+    ) and 0 < value < 1
+
+    return result
+
+
+def check_procedure(procedure: Any, info: dict) -> list[str]:
+    """
+    繰り返しの手順の設定と, 手順の中身と時刻の入力を確かめる関数
+
+    Parameters
+    ----------
+    procedure: Any
+        inference.yaml の procedure
+    info: dict
+        inference.yaml の中身
+
+    Returns
+    ----------
+    errors: list[str]
+        誤りの一覧 (無ければ空)
+    """
+    # 手順の中身と時刻の入力の数
+    inputs = info.get("inputs") if isinstance(info.get("inputs"), dict) else {}
+    sources = [
+        item.get("source") for item in inputs.values()
+        if isinstance(item, dict)
+    ]
+    if procedure is None:
+        if "state" in sources or "time" in sources:
+            return ["入力の state と time は procedure が要ります"]
+        return []
+    if not isinstance(procedure, dict):
+        return ["procedure は name, steps, seed の辞書にしてください"]
+
+    # 名前は登録簿に, 回数と種は整数, 設定は手順の引数
+    errors = []
+    name = procedure.get("name")
+    try:
+        found = get_procedure(str(name))
+    except KeyError as error:
+        return [str(error.args[0])]
+    steps = procedure.get("steps")
+    if not isinstance(steps, int) or isinstance(steps, bool) or steps < 1:
+        errors.append("procedure.steps は 1 以上の整数にしてください")
+    seed = procedure.get("seed")
+    if not isinstance(seed, int) or isinstance(seed, bool):
+        errors.append("procedure.seed は整数にしてください")
+    options = procedure.get("options") or {}
+    known = option_names(str(name))
+    if not isinstance(options, dict):
+        errors.append("procedure.options は辞書にしてください")
+    elif known:
+        unknown = [k for k in options if k not in known]
+        if unknown:
+            errors.append(
+                f"procedure.options の {', '.join(map(str, unknown))} は "
+                f"{name} の設定にありません ({', '.join(known)})"
+            )
+    extra = [k for k in procedure if k not in ("name", "steps", "seed",
+                                               "options")]
+    if extra:
+        errors.append(
+            f"procedure の {', '.join(map(str, extra))} は知らない項目です"
+        )
+
+    # 中身の入力は 1 つ, 時刻は時刻を使う手順だけ
+    if sources.count("state") != 1:
+        errors.append("procedure を使う一式は source が state の入力を 1 つ"
+                      "持ってください")
+    if "time" in sources and not found.time:
+        errors.append(f"手順 {name} は時刻を渡さないので time の入力を使えません")
+    if found.time and sources.count("time") != 1:
+        errors.append(f"手順 {name} は source が time の入力を 1 つ要ります")
+    output = info.get("output") if isinstance(info.get("output"), dict) else {}
+    if found.start == "noise" and not output.get("shape"):
+        errors.append(
+            f"手順 {name} は雑音から始まるので output.shape (1 件の形) が"
+            "要ります"
+        )
+
+    return errors
+
+
+def check_pretrained(records: Any) -> list[str]:
+    """
+    学習済みの重みの置き方の記録の形を確かめる関数
+
+    Parameters
+    ----------
+    records: Any
+        inference.yaml の model.pretrained
+
+    Returns
+    ----------
+    errors: list[str]
+        誤りの一覧 (無ければ空)
+    """
+    # ノードの名前, 置き方, 出どころから読むものは hash
+    if not isinstance(records, list):
+        return ["model.pretrained はノードごとの記録の並びにしてください"]
+    errors = []
+    for record in records:
+        if not isinstance(record, dict) or not record.get("node") or (
+            record.get("place") not in PLACES
+        ):
+            errors.append(
+                "model.pretrained の記録は node と place "
+                f"({', '.join(PLACES)}) を持つ辞書にしてください"
+            )
+        elif record["place"] == "source" and not record.get("sha256"):
+            errors.append(
+                f"model.pretrained の {record['node']} は sha256 が要ります"
+            )
 
     return errors
 
@@ -373,12 +835,26 @@ def load_bundle(path: Union[str, Path]) -> Bundle:
             "動かしたか消した場合は, 一式を作り直してください)"
         )
     kind = info["model"].get("kind")
-    classify = bundle.task == "classification"
-    if kind is not None and (kind == "value") == classify:
+    form = bundle.form
+    if info.get("output") is None:
+        classify = bundle.task == "classification"
+        if kind is not None and (kind == "value") == classify:
+            raise ValueError(
+                f"model.kind {kind} は {bundle.task} に使えません (分類は "
+                "logits か probabilities, 回帰と予測は value)"
+            )
+    elif form in FORM_TASKS and bundle.task not in FORM_TASKS[form]:
         raise ValueError(
-            f"model.kind {kind} は {bundle.task} に使えません (分類は "
-            "logits か probabilities, 回帰と予測は value)"
+            f"出力の形 {form} は {bundle.task or 'タスクの無い'} の"
+            f"データセットに使えません ({', '.join(FORM_TASKS[form])} だけ)"
         )
+    names = set(spec["nodes"])
+    for record in info["model"].get("pretrained") or []:
+        if record["node"] not in names:
+            raise ValueError(
+                f"model.pretrained の {record['node']} はモデルの定義の"
+                "ノードにありません"
+            )
 
     return bundle
 
@@ -507,7 +983,10 @@ def make_bundle(
     target_scale: Union[dict, str, None] = None,
     conclusion: Optional[dict] = None, decision: Optional[dict] = None,
     name: Optional[str] = None, copy_weights: bool = True,
-    overwrite: bool = False
+    overwrite: bool = False, role: Optional[str] = None,
+    form: Optional[str] = None, output_options: Optional[dict] = None,
+    target: Optional[dict] = None, procedure: Optional[dict] = None,
+    pretrained: Optional[dict] = None
 ) -> dict:
     """
     推論の一式を作り, 見本を推論できることを確かめる関数
@@ -543,6 +1022,23 @@ def make_bundle(
         重みを一式に写すか (写さない場合は絶対パスで指す)
     overwrite: bool = False
         既にある一式を置き換えるか
+    role: Optional[str] = None
+        受け持ち (predict, generate, rank, group, effect. 省略すると
+        predict)
+    form: Optional[str] = None
+        出力の形 (class, value, distribution, mask, point_cloud, vector,
+        text, image. 省略するとタスクから)
+    output_options: Optional[dict] = None
+        出力の形ごとの欄 (distribution の quantiles, 雑音から始まる手順の
+        shape, mask の classes)
+    target: Optional[dict] = None
+        正解の種類 (kind) と出どころ (origin. ML-EDA の版 2 の
+        target.origin の形). 省略すると列の出力は kind: column, 他は null
+    procedure: Optional[dict] = None
+        繰り返しの手順 (name, steps, seed, options)
+    pretrained: Optional[dict] = None
+        ノードの名前ごとの重みのライセンスの情報 (ML-ModelControl の
+        pretrained_info の形). 省略すると pretrained_info で読む
 
     Returns
     ----------
@@ -581,6 +1077,23 @@ def make_bundle(
     full = read_dataset(data_dir, frames=True)
     if isinstance(target_scale, str):
         target_scale = train_scale(full, target_scale)
+    spec_dict = load_spec(spec)
+    kinds = output_fields(
+        str(full.info.get("task", "")), role, form, output_options, target
+    )
+
+    # 学習済みの重みを読むノードの置き方 (無ければ前と同じく丸ごと写す)
+    infos, weight_notes = lookup_pretrained(spec_dict, pretrained)
+    records: list = []
+    kept = None
+    if infos:
+        spec_dict = pin_spec(spec_dict, infos)
+        state = torch.load(source, map_location="cpu", weights_only=True)
+        fresh = build_model(spec_dict, seed=0).state_dict()
+        records, kept, notes = place_weights(
+            infos, state, fresh, copy_weights
+        )
+        weight_notes.extend(notes)
 
     # 隣の一時ディレクトリに作り, 確かめてから入れ替える
     target = final.with_name(f".{final.name}.writing")
@@ -588,39 +1101,46 @@ def make_bundle(
         shutil.rmtree(target)
     (target / "dataset").mkdir(parents=True)
     try:
-        dump_spec(load_spec(spec), target / "model_spec.yaml")
+        dump_spec(spec_dict, target / "model_spec.yaml")
         shutil.copy(data_dir / "dataset.yaml", target / "dataset")
         recipe_name = str(full.info.get("recipe", "recipe.yaml"))
         if Path(recipe_name).name != recipe_name:
             raise ValueError(f"レシピの名前 {recipe_name} がファイルの名前では"
                              "ありません")
         shutil.copy(data_dir / recipe_name, target / "dataset" / recipe_name)
-        if copy_weights:
+        if copy_weights and kept is not None:
+            torch.save(kept, target / "final_model.pt")
+        elif copy_weights:
             shutil.copy(source, target / "final_model.pt")
         info = {
             "format_version": BUNDLE_FORMAT_VERSION,
             "name": name or final.name,
             "created_at": dt.datetime.now().astimezone().isoformat(),
+            **kinds,
+            "procedure": plain(procedure) if procedure else None,
             "model": {
                 "spec": "model_spec.yaml",
                 "weights": "final_model.pt" if copy_weights else str(source),
                 "output": output,
                 "kind": kind,
                 "target_scale": target_scale,
+                "pretrained": records,
             },
             "inputs": inputs or {},
             "dataset": "dataset",
             "run": run,
             "conclusion": plain(conclusion or {}),
             "decision": plain(decision) if decision else None,
-            "notes": bundle_notes(full, run),
+            "notes": bundle_notes(full, run) + weight_notes,
         }
         (target / "inference.yaml").write_text(
             yaml.safe_dump(info, allow_unicode=True, sort_keys=False),
             encoding="utf-8"
         )
         bundle = load_bundle(target)
-        # 結論と意思決定の決め方は重い推論の前に確かめる
+        # 結論と意思決定の決め方は重い推論の前に確かめる (列の出力だけ)
+        if conclusion or decision:
+            bundle.require_column("結論の決め方と意思決定")
         if conclusion:
             errors = check_rules(conclusion, bundle.task, bundle.classes)
             if errors:
@@ -634,25 +1154,11 @@ def make_bundle(
                     "意思決定の決め方の誤り: " + " / ".join(errors)
                 )
         check_sample(bundle, full)
-        # 記録との比べは注意のためなので, 失敗しても作るのは止めない
-        try:
-            info["check"] = check_against_run(bundle, full, run)
-        except Exception as error:
+        if bundle.column_output:
+            measure_column(bundle, full, run, info)
+        else:
             info["check"] = None
-            info["notes"].append(
-                f"検証用の分割を推論して記録と比べられませんでした ({error})"
-            )
-        if info["check"] and info["check"]["matches"] is False:
-            info["notes"].append(check_note(info["check"]))
-
-        # 意思決定のための外れ方 (失敗しても作るのは止めない)
-        from ml_inference.uncertainty import measure_uncertainty
-
-        try:
-            info["uncertainty"] = measure_uncertainty(bundle, full)
-        except Exception as error:
             info["uncertainty"] = None
-            info["notes"].append(f"予測の外れ方を測れませんでした ({error})")
         (target / "inference.yaml").write_text(
             yaml.safe_dump(info, allow_unicode=True, sort_keys=False),
             encoding="utf-8"
@@ -665,6 +1171,106 @@ def make_bundle(
     target.rename(final)
 
     return info
+
+
+def measure_column(
+    bundle: Bundle, dataset: Dataset, run: Optional[dict], info: dict
+) -> None:
+    """
+    列の出力の一式で, 実験の記録との比べと予測の外れ方を測って説明に
+    書く関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        作っている一式
+    dataset: Dataset
+        分割の表を持つデータセット
+    run: Optional[dict]
+        実験の状態 (run_summary の結果)
+    info: dict
+        書き足す inference.yaml の中身 (check, uncertainty, notes)
+
+    Returns
+    ----------
+    None
+    """
+    # 記録との比べは注意のためなので, 失敗しても作るのは止めない
+    try:
+        info["check"] = check_against_run(bundle, dataset, run)
+    except Exception as error:
+        info["check"] = None
+        info["notes"].append(
+            f"検証用の分割を推論して記録と比べられませんでした ({error})"
+        )
+    if info["check"] and info["check"]["matches"] is False:
+        info["notes"].append(check_note(info["check"]))
+
+    # 意思決定のための外れ方 (失敗しても作るのは止めない)
+    from ml_inference.uncertainty import measure_uncertainty
+
+    try:
+        info["uncertainty"] = measure_uncertainty(bundle, dataset)
+    except Exception as error:
+        info["uncertainty"] = None
+        info["notes"].append(f"予測の外れ方を測れませんでした ({error})")
+
+
+def output_fields(
+    task: str, role: Optional[str], form: Optional[str],
+    options: Optional[dict], target: Optional[dict]
+) -> dict:
+    """
+    一式の受け持ち, 出力の形, 正解の項目を決める関数
+
+    Parameters
+    ----------
+    task: str
+        データセットのタスク
+    role: Optional[str]
+        受け持ち (省略すると predict)
+    form: Optional[str]
+        出力の形 (省略するとタスクから)
+    options: Optional[dict]
+        出力の形ごとの欄
+    target: Optional[dict]
+        正解の種類と出どころ
+
+    Returns
+    ----------
+    fields: dict
+        role, output, target
+
+    Raises
+    ----------
+    ValueError
+        タスクから出力の形を決められない場合と, 欄に誤りがある場合
+    """
+    # 出力の形は省略するとタスクから (正解の無いデータセットは要る)
+    if form is None:
+        if task not in ("classification", "regression", "forecasting"):
+            raise ValueError(
+                f"タスクが {task or '無い'} のデータセットでは出力の形 "
+                f"(form. {', '.join(FORMS)}) を選んでください"
+            )
+        form = form_of_task(task)
+    output = {"form": form, **plain(dict(options or {}))}
+    if "form" in (options or {}):
+        raise ValueError("output_options に form は書けません (form で選ぶ)")
+
+    # 正解は省略すると, 列の出力は列, 他は分からない
+    if target is None and form in COLUMN_FORMS:
+        target = {"kind": "column"}
+    fields = {
+        "role": role or "predict",
+        "output": output,
+        "target": plain(dict(target)) if target is not None else None,
+    }
+    errors = check_kinds(fields)
+    if errors:
+        raise ValueError("出力の形の誤り: " + " / ".join(errors))
+
+    return fields
 
 
 def split_sources(

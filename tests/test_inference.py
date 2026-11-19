@@ -411,7 +411,7 @@ def test_load_bundle_checks(tmp_path: Path, table_dataset: Path) -> None:
     write(dataset="../dataset")
     with pytest.raises(ValueError, match="一式の外"):
         load_bundle(path)
-    write(format_version=3)
+    write(format_version=4)
     with pytest.raises(ValueError, match="読めません"):
         load_bundle(path)
     write(inputs={"y": {"source": "features"}})

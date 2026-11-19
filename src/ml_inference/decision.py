@@ -1152,6 +1152,7 @@ def decide(
     # 決め方の確認
     if not isinstance(bundle, Bundle):
         bundle = load_bundle(bundle)
+    bundle.require_column("意思決定")
     decision = plain(dict(decision))
     errors = check_decision(
         decision, bundle, list(prediction.columns), with_current=False
@@ -1581,6 +1582,7 @@ def backtest(
     # (上限のある選び方を, 数えない行に使わないように)
     if not isinstance(bundle, Bundle):
         bundle = load_bundle(bundle)
+    bundle.require_column("たどり直し")
     table = predict(bundle, source, options)
     target = bundle.dataset.info.get("target")
     if target not in table.columns:

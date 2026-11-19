@@ -545,6 +545,7 @@ def remeasure(
     # 予測と, 測る行
     if not isinstance(bundle, Bundle):
         bundle = load_bundle(bundle)
+    bundle.require_column("外れ方の測り直し")
     data = read_source(bundle, source, options)
     table = predict(bundle, data)
     keep = counted_rows(bundle, table, count)
