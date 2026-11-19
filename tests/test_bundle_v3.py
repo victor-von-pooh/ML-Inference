@@ -14,14 +14,18 @@ from ml_eda import export_dataset, load_data, load_dataset
 from ml_modelcontrol import build_model, load_example, register_unit
 from torch import nn
 
+import ml_inference.bundle as bundle_module
 from ml_inference import (
     artifact_path, decide, describe_bundle, infer, load_bundle, make_bundle,
     predict, read_result, write_result
 )
-from ml_inference.predict import DECODERS, finite_raw, join_parts
+from ml_inference.conclude import conclude
+from ml_inference.predict import (
+    DECODERS, finite_raw, join_parts, median_of
+)
 from ml_inference.procedures import (
-    get_procedure, make_generator, register_procedure, run_procedure,
-    start_noise
+    get_procedure, make_generator, option_names, register_procedure,
+    run_procedure, start_noise
 )
 
 # 出どころの重みを作る乱数の種 (入れ替わった出どころを試すため変える)
@@ -679,8 +683,8 @@ def license_info(redistributable: bool) -> dict:
     info = {
         "unit": "test.SourceLinear", "model": "demo", "hub_id": "org/demo",
         "revision": "main", "pinned_revision": "abc123",
-        "license": "mit" if redistributable else None,
-        "status": "commercial" if redistributable else "unknown",
+        "license": "mit" if redistributable else "cc-by-nc-4.0",
+        "status": "commercial" if redistributable else "noncommercial",
         "redistributable": redistributable, "source": "テストの情報",
     }
 
@@ -720,6 +724,8 @@ def test_pretrained_weights_placement(
                 pretrained={"base": license_info(False)})
     record = read_info(path)["model"]["pretrained"][0]
     assert record["place"] == "source" and record["keys"] == 2
+    assert any("一式に写さず" in n and "abc123" in n
+               for n in read_info(path)["notes"])
     assert record["pinned_revision"] == "abc123"
     assert torch.load(path / "final_model.pt", weights_only=True) == {}
     pinned = yaml.safe_load((path / "model_spec.yaml").read_text("utf-8"))
@@ -757,6 +763,24 @@ def test_pretrained_weights_placement(
     assert info["model"]["pretrained"][0]["place"] == "bundle"
     assert any("ライセンスを確かめて" in n for n in info["notes"])
     assert len(torch.load(path / "final_model.pt", weights_only=True)) == 2
+
+    # 出どころを読めないとノードと版を添えた誤り
+    broken = load_bundle(tmp_path / "sourced")
+    original = bundle_module.build_model
+    bundle_module.build_model = FailingBuild()
+    try:
+        with pytest.raises(ValueError, match="base .*abc123"):
+            broken.model()
+    finally:
+        bundle_module.build_model = original
+
+    # ライセンスか版を読めなかった重みは除かずに残し, 理由を書く
+    unread = {**license_info(False), "license": None,
+              "pinned_revision": None, "status": "unknown"}
+    info = make_bundle(tmp_path / "unread", spec, table_dataset, weights,
+                       pretrained={"base": unread})
+    assert info["model"]["pretrained"][0]["place"] == "bundle"
+    assert any("ライセンスか版を読めなかった" in n for n in info["notes"])
 
     # 定義に無いノードの情報は誤り
     with pytest.raises(ValueError, match="ノードにありません"):
@@ -801,7 +825,8 @@ def test_pretrained_info_is_read_lazily(
     info = make_bundle(tmp_path / "lazy", spec, table_dataset, weights)
     assert calls == ["test.SourceLinear"]
     record = info["model"]["pretrained"][0]
-    assert record["status"] == "unknown" and record["place"] == "source"
+    assert record["status"] == "unknown" and record["place"] == "bundle"
+    assert any("ライセンスか版を読めなかった" in n for n in info["notes"])
 
 
 class FakeInfo:
@@ -859,7 +884,7 @@ def test_input_columns_named_like_outputs(
     path = table_bundle(tmp_path, table_dataset)
     root = write_result(infer(path, frame), tmp_path / "column")
     back = read_result(root)
-    assert back["format_version"] == 1 and "form" not in back
+    assert back["format_version"] == 1 and back["form"] is None
     assert "output (入力)" in back["frame"].columns
     assert not (root / "artifacts").exists()
 
@@ -1039,3 +1064,192 @@ def euler_twice(
     x = run_procedure("euler", model, state, steps, generator, t_end=2.0)
 
     return x
+
+
+def test_result_round_trip_and_safety(
+    tmp_path: Path, table_dataset: Path, table_csv: Path
+) -> None:
+    """
+    配列の結果を読んで書き直しても配列が残り, 結果のものでない
+    artifacts/ を消さないことを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    table_dataset: Path
+        データセット
+    table_csv: Path
+        元の CSV
+
+    Returns
+    ----------
+    None
+    """
+    # 配列の結果を書き, 読んで同じ場所と別の場所に書き直す
+    vector = table_bundle(tmp_path, table_dataset, 4, name="vec",
+                          form="vector")
+    result = infer(vector, table_csv)
+    root = write_result(result, tmp_path / "first")
+    first = np.load(root / "artifacts" / "000005.npy")
+    back = read_result(root)
+    assert back["form"] == "vector"
+    write_result(back, root)
+    again = read_result(root)
+    assert again["artifacts"]["count"] == 60 and again["form"] == "vector"
+    assert np.array_equal(np.load(root / "artifacts" / "000005.npy"), first)
+    other = write_result(read_result(root), tmp_path / "second")
+    assert np.array_equal(
+        np.load(other / "artifacts" / "000005.npy"), first
+    )
+    assert "directory" not in yaml.safe_load(
+        (other / "result.yaml").read_text(encoding="utf-8")
+    )
+
+    # 結果のものでない artifacts/ は消さずに止まる
+    user = tmp_path / "user"
+    (user / "artifacts").mkdir(parents=True)
+    (user / "artifacts" / "mine.txt").write_text("大事", encoding="utf-8")
+    with pytest.raises(FileExistsError, match="消しません"):
+        write_result(result, user)
+    assert (user / "artifacts" / "mine.txt").exists()
+
+    # 列の結果は artifacts/ に触れない
+    column = table_bundle(tmp_path, table_dataset, name="col")
+    write_result(infer(column, table_csv), user)
+    assert (user / "artifacts" / "mine.txt").exists()
+
+    # 配列の表に結論の決め方は使えない (はっきりした誤り)
+    with pytest.raises(ValueError, match="prediction の列がありません"):
+        conclude(result["frame"], "classification", ["犬", "猫", "鳥"])
+
+
+def test_median_and_option_checks(
+    tmp_path: Path, regression_dataset: Path, table_dataset: Path
+) -> None:
+    """
+    0.5 の無い分位点の真ん中の補いと, 手順の設定の確かめを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    regression_dataset: Path
+        回帰のデータセット
+    table_dataset: Path
+        データセット
+
+    Returns
+    ----------
+    None
+    """
+    # 0.25 と 0.75 の間を線形に補う
+    values = np.array([[1.0, 3.0], [2.0, 6.0]])
+    assert median_of([0.25, 0.75], values).tolist() == [2.0, 4.0]
+    assert median_of([0.1, 0.5, 0.9], np.array([[1.0, 2.0, 9.0]])).tolist() \
+        == [2.0]
+
+    # 設定の無い手順は設定を受け取らず, **kwargs の手順は何でも受け取る
+    register_procedure("plain", plain_steps, "noise", True, overwrite=True)
+    register_procedure("loose", loose_steps, "noise", True, overwrite=True)
+    assert option_names("plain") == [] and option_names("loose") is None
+    spec = load_example("diffusion_denoiser")
+    weights = save_weights(spec, tmp_path / "denoiser.pt")
+    options = {
+        "inputs": {"x": {"source": "state"}, "t": {"source": "time"}},
+        "form": "vector", "output_options": {"shape": [16]},
+    }
+    with pytest.raises(ValueError, match="設定の無い手順"):
+        make_bundle(tmp_path / "plain", spec, table_dataset, weights,
+                    **options, procedure={"name": "plain", "steps": 2,
+                                          "seed": 0, "options": {"a": 1}})
+    make_bundle(tmp_path / "loose", spec, table_dataset, weights, **options,
+                procedure={"name": "loose", "steps": 2, "seed": 0,
+                           "options": {"a": 1}})
+
+    # train_steps は整数だけ
+    with pytest.raises(ValueError, match="train_steps は整数"):
+        make_bundle(tmp_path / "float", spec, table_dataset, weights,
+                    **options, procedure={"name": "ddim", "steps": 2,
+                                          "seed": 0,
+                                          "options": {"train_steps": 1000.0}})
+    with pytest.raises(ValueError, match="train_steps は整数"):
+        run_procedure("ddim", ConstantModel(0.0), torch.zeros(1, 2), 2,
+                      make_generator(0), train_steps=1000.0)
+
+
+def plain_steps(
+    model: Any, state: torch.Tensor, steps: int,
+    generator: torch.Generator
+) -> torch.Tensor:
+    """
+    設定の無い自作の手順の例として, 中身をそのまま返す関数
+
+    Parameters
+    ----------
+    model: Any
+        モデル
+    state: torch.Tensor
+        始まりの中身
+    steps: int
+        回数
+    generator: torch.Generator
+        乱数の生成器
+
+    Returns
+    ----------
+    state: torch.Tensor
+        始まりの中身
+    """
+    # そのまま
+    return state
+
+
+def loose_steps(
+    model: Any, state: torch.Tensor, steps: int,
+    generator: torch.Generator, **options: Any
+) -> torch.Tensor:
+    """
+    何でも設定を受け取る自作の手順の例として, 中身をそのまま返す関数
+
+    Parameters
+    ----------
+    model: Any
+        モデル
+    state: torch.Tensor
+        始まりの中身
+    steps: int
+        回数
+    generator: torch.Generator
+        乱数の生成器
+    **options: Any
+        設定 (使わない)
+
+    Returns
+    ----------
+    state: torch.Tensor
+        始まりの中身
+    """
+    # そのまま
+    return state
+
+
+class FailingBuild:
+    def __call__(self, spec: dict, seed: int = 0) -> Any:
+        """
+        ネットワークの無いときのように組み立てに失敗する関数
+
+        Parameters
+        ----------
+        spec: dict
+            定義
+        seed: int = 0
+            乱数の種
+
+        Returns
+        ----------
+        model: Any
+            返さない (常に誤り)
+        """
+        # 出どころを読めない誤り
+        raise OSError("出どころにつながりません")

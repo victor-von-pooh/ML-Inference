@@ -7,7 +7,7 @@ PyTorch だけを使う純粋な関数で, 推論の一式, ML-EDA, ML-Provide �
 from dataclasses import dataclass
 import inspect
 import math
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 import torch
 
@@ -165,6 +165,8 @@ def ddim(
         作った中身
     """
     # 線形の雑音の予定と, 間引いた時刻 (大きい順)
+    if not isinstance(train_steps, int) or isinstance(train_steps, bool):
+        raise ValueError("ddim の train_steps は整数にしてください")
     if not 1 <= steps <= train_steps:
         raise ValueError(
             f"ddim の回数は 1 から train_steps ({train_steps}) にしてください"
@@ -479,7 +481,7 @@ def get_procedure(name: str) -> Procedure:
     return procedure
 
 
-def option_names(name: str) -> list[str]:
+def option_names(name: str) -> Optional[list[str]]:
     """
     手順の設定 (関数の 5 つ目からの引数) の名前を返す関数
 
@@ -490,15 +492,16 @@ def option_names(name: str) -> list[str]:
 
     Returns
     ----------
-    names: list[str]
-        設定の名前 (**kwargs を持つ関数は空で, 何でも受け取る)
+    names: Optional[list[str]]
+        設定の名前 (設定の無い手順は空. **kwargs を持つ関数は None で,
+        何でも受け取る)
     """
-    # model, state, steps, generator の後の引数
+    # model, state, steps, generator の後の引数 (**kwargs なら何でも)
     signature = inspect.signature(get_procedure(name).function)
     params = list(signature.parameters.values())[4:]
+    names: Optional[list[str]] = [p.name for p in params]
     if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params):
-        return []
-    names = [p.name for p in params]
+        names = None
 
     return names
 

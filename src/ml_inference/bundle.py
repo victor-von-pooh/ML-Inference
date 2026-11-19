@@ -361,15 +361,30 @@ class Bundle:
         if "model" in self.cache:
             return self.cache["model"]
 
-        # 定義から組み立て, 重みだけを読み込む (pickle の任意のコードは不可)
-        model = build_model(self.spec, seed=0)
-        state = torch.load(
-            self.weights_path, map_location="cpu", weights_only=True
-        )
+        # 定義から組み立て, 重みだけを読み込む (pickle の任意のコードは不可).
+        # 出どころから読むノードがあれば, 読めないときにノードと出どころを
         sourced = [
             record for record in self.info["model"].get("pretrained") or []
             if record.get("place") == "source"
         ]
+        try:
+            model = build_model(self.spec, seed=0)
+        except Exception as error:
+            if not sourced:
+                raise
+            names = ", ".join(
+                f"{r['node']} ({r.get('hub_id') or r.get('model') or ''} "
+                f"版 {r.get('pinned_revision')})" for r in sourced
+            )
+            raise ValueError(
+                f"出どころから読むノード {names} を含むモデルを組み立てられ"
+                f"ません ({type(error).__name__}: {error}). ネットワーク, "
+                "トークン (HF_TOKEN), 出どころの版が残っているかを確かめて"
+                "ください"
+            ) from error
+        state = torch.load(
+            self.weights_path, map_location="cpu", weights_only=True
+        )
         if sourced:
             self.cache["pretrained_warnings"] = load_sourced(
                 model, state, sourced
@@ -716,12 +731,13 @@ def check_procedure(procedure: Any, info: dict) -> list[str]:
     known = option_names(str(name))
     if not isinstance(options, dict):
         errors.append("procedure.options は辞書にしてください")
-    elif known:
+    elif known is not None:
         unknown = [k for k in options if k not in known]
         if unknown:
             errors.append(
                 f"procedure.options の {', '.join(map(str, unknown))} は "
-                f"{name} の設定にありません ({', '.join(known)})"
+                f"{name} の設定にありません "
+                f"({', '.join(known) or '設定の無い手順'})"
             )
     extra = [k for k in procedure if k not in ("name", "steps", "seed",
                                                "options")]
@@ -791,6 +807,8 @@ def check_options(name: str, options: dict, steps: Any) -> list[str]:
         value = options[key]
         if not isinstance(value, (int, float)) or isinstance(value, bool):
             errors.append(f"procedure.options.{key} は数にしてください")
+        elif key == "train_steps" and not isinstance(value, int):
+            errors.append("procedure.options.train_steps は整数にしてください")
         elif low is not None and (
             value < low or (key == "temperature" and value == 0)
         ):

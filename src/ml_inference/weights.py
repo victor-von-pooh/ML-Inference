@@ -144,8 +144,9 @@ def lookup_pretrained(
             }
         if info is not None:
             infos[str(node)] = info
+    notes = []
 
-    return infos, []
+    return infos, notes
 
 
 def pin_spec(spec: dict, infos: dict) -> dict:
@@ -166,6 +167,7 @@ def pin_spec(spec: dict, infos: dict) -> dict:
         替えた定義 (元の定義は変えない)
     """
     # 写せない重みで, 版の識別子が分かり, 部品が revision を受け取るもの
+    # (部品が登録簿に無ければ固定しない)
     pinned = copy.deepcopy(spec)
     for node, info in infos.items():
         revision = info.get("pinned_revision")
@@ -182,6 +184,64 @@ def pin_spec(spec: dict, infos: dict) -> dict:
                               "revision": str(revision)}
 
     return pinned
+
+
+def placement_notes(
+    node: str, info: dict, place: str, copy_weights: bool, unchanged: bool,
+    readable: bool
+) -> list[str]:
+    """
+    学習済みの重みの置き方の理由の注意を返す関数
+
+    Parameters
+    ----------
+    node: str
+        ノードの名前
+    info: dict
+        重みのライセンスの情報
+    place: str
+        置き方 (bundle か source)
+    copy_weights: bool
+        重みを一式に写すか
+    unchanged: bool
+        学習で変わっていないか
+    readable: bool
+        ライセンスと版の識別子を読めたか
+
+    Returns
+    ----------
+    notes: list[str]
+        注意の文 (再配布できる重みと, 重みを写さない一式は空)
+    """
+    # 除いたノードは出どころ, 残したノードは残した理由
+    notes: list[str] = []
+    if info.get("redistributable") or not copy_weights:
+        return notes
+    status = info.get("status")
+    name = info.get("hub_id") or info.get("model") or info.get("unit")
+    if place == "source":
+        notes.append(
+            f"ノード {node} の学習済みの重み ({status}, "
+            f"{info.get('license')}) は再配布できないので一式に写さず, "
+            f"出どころ {name} の版 {info.get('pinned_revision')} から読み"
+            "ます (読んだ重みは hash で確かめます)"
+        )
+    elif not readable:
+        notes.append(
+            f"ノード {node} の学習済みの重みは, ライセンスか版を読めなかった"
+            f"ので ({info.get('source')}) 出どころから読み直せるか分からず, "
+            "一式の重みに含めました. 元の重みのライセンスを確かめてから一式"
+            "を渡してください"
+        )
+    elif not unchanged:
+        notes.append(
+            f"ノード {node} の学習済みの重み ({status}) は再配布できるか"
+            "分からないか, できませんが, 学習で変わったので一式の重みに"
+            "含めました. 元の重みのライセンスを確かめてから一式を渡して"
+            "ください"
+        )
+
+    return notes
 
 
 def place_weights(
@@ -222,19 +282,17 @@ def place_weights(
             ) for k in keys
         )
         redistributable = bool(info.get("redistributable"))
+        readable = info.get("license") is not None and bool(
+            info.get("pinned_revision")
+        )
         place = "source" if (
-            copy_weights and not redistributable and unchanged
+            copy_weights and not redistributable and unchanged and readable
         ) else "bundle"
         if place == "source":
             for key in keys:
                 kept.pop(key)
-        elif not redistributable and copy_weights:
-            notes.append(
-                f"ノード {node} の学習済みの重み ({info.get('status')}) は"
-                "再配布できるか分からないか, できませんが, 学習で変わったので"
-                "一式の重みに含めました. 元の重みのライセンスを確かめてから"
-                "一式を渡してください"
-            )
+        notes.extend(placement_notes(node, info, place, copy_weights,
+                                     unchanged, readable))
         record: dict[str, Any] = {"node": node}
         record.update({k: info.get(k) for k in INFO_KEYS})
         record["redistributable"] = redistributable

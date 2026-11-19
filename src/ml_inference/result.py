@@ -21,6 +21,11 @@ RESULT_FORMAT_VERSION = 2
 ARTIFACTS_DIR = "artifacts"
 ARTIFACT_COLUMN = "artifact"
 
+# 書き出すときに result.yaml へ写さない結果の項目 (表, 形, 読んだ場所,
+# 読んだ版と中身の記録)
+RESULT_OWN_KEYS = ("frame", "form", "directory", "format_version",
+                   "artifacts")
+
 
 def infer(
     bundle: Union[str, Path, Bundle],
@@ -141,26 +146,32 @@ def write_result(result: dict, path: Union[str, Path]) -> Path:
     ----------
     root: Path
         書き出したディレクトリ
+
+    Raises
+    ----------
+    FileExistsError
+        書き出し先に前の結果のものでない artifacts/ がある場合
     """
-    # 表に収まらない中身の artifacts/ への書き出し (前の結果の中身は削除)
+    # 出力の形 (infer の結果か, read_result で読んだ結果の記録から)
     root = Path(path).expanduser()
-    root.mkdir(parents=True, exist_ok=True)
-    if (root / ARTIFACTS_DIR).is_dir():
-        shutil.rmtree(root / ARTIFACTS_DIR)
+    form = result.get("form") or (result.get("artifacts") or {}).get("form")
     frame, artifacts = result["frame"], None
-    if result.get("form") in ARRAY_FORMS:
-        frame, artifacts = write_artifacts(frame, root)
-        artifacts["form"] = result["form"]
+    if form in ARRAY_FORMS:
+        frame, artifacts = place_artifacts(result, frame, root)
+        artifacts["form"] = form
+    else:
+        root.mkdir(parents=True, exist_ok=True)
 
     # 表は表計算のアプリで開ける BOM 付きの UTF-8
     frame.to_csv(root / "predictions.csv", index=False, encoding="utf-8-sig")
 
-    # 表以外の説明 (形の版を先頭に. 中身が無ければ版 1 のまま)
+    # 表以外の説明 (形の版を先頭に. 中身が無ければ版 1 のまま. 読んだ結果
+    # の版と中身の記録は書き直し)
     meta: dict[str, Any] = {
         "format_version": RESULT_FORMAT_VERSION if artifacts else 1
     }
     meta.update({
-        k: v for k, v in result.items() if k not in ("frame", "form")
+        k: v for k, v in result.items() if k not in RESULT_OWN_KEYS
     })
     if artifacts:
         meta["artifacts"] = artifacts
@@ -170,6 +181,102 @@ def write_result(result: dict, path: Union[str, Path]) -> Path:
     )
 
     return root
+
+
+def clear_artifacts(root: Path) -> None:
+    """
+    前に書き出した結果の artifacts/ だけを消す関数
+
+    Parameters
+    ----------
+    root: Path
+        書き出すディレクトリ
+
+    Returns
+    ----------
+    None
+
+    Raises
+    ----------
+    FileExistsError
+        artifacts/ があり, 前の結果 (artifacts を記録した result.yaml)
+        のものでない場合
+    """
+    # 結果のものと確かめられない artifacts/ は利用者のデータとして残す
+    folder = root / ARTIFACTS_DIR
+    if not folder.exists():
+        return
+    meta = {}
+    file = root / "result.yaml"
+    if file.is_file():
+        meta = yaml.safe_load(file.read_text(encoding="utf-8")) or {}
+    if not isinstance(meta, dict) or not meta.get("artifacts"):
+        raise FileExistsError(
+            f"{folder} は前の結果の artifacts/ ではないので消しません. "
+            "別の書き出し先を選んでください"
+        )
+    shutil.rmtree(folder)
+
+
+def place_artifacts(
+    result: dict, frame: pd.DataFrame, root: Path
+) -> tuple[pd.DataFrame, dict]:
+    """
+    配列の出力の結果の artifacts/ を書き出し先にそろえる関数
+
+    Parameters
+    ----------
+    result: dict
+        infer か read_result の結果
+    frame: pd.DataFrame
+        予測と判断の表
+    root: Path
+        書き出すディレクトリ
+
+    Returns
+    ----------
+    frame: pd.DataFrame
+        artifact の列 (相対パス) を持つ表
+    artifacts: dict
+        directory, column, format, count
+
+    Raises
+    ----------
+    ValueError
+        表に output の列も artifact の列も無い場合
+    """
+    # 推論したばかりの配列は書き出し, 読んだ結果は配列を持ち越す
+    source = result.get("directory")
+    same = source is not None and Path(source).expanduser().resolve() == (
+        root.resolve()
+    )
+    if "output" in frame.columns:
+        clear_artifacts(root)
+        root.mkdir(parents=True, exist_ok=True)
+        frame, artifacts = write_artifacts(frame, root)
+        return frame, artifacts
+    if ARTIFACT_COLUMN not in frame.columns or source is None:
+        raise ValueError(
+            "配列の出力の結果に output の列も, 読んだ結果の artifact の列も"
+            "ありません"
+        )
+
+    # 別の書き出し先には, 表が指す配列を写す (同じ場所はそのまま)
+    paths = [str(p) for p in frame[ARTIFACT_COLUMN].fillna("") if p]
+    if not same:
+        clear_artifacts(root)
+        (root / ARTIFACTS_DIR).mkdir(parents=True, exist_ok=True)
+        for relative in paths:
+            shutil.copy(artifact_path(source, relative),
+                        artifact_path(root, relative))
+    artifacts = {
+        "directory": ARTIFACTS_DIR,
+        "column": ARTIFACT_COLUMN,
+        "format": "npy",
+        "count": len(paths),
+    }
+
+    return frame, artifacts
 
 
 def write_artifacts(
@@ -259,7 +366,9 @@ def read_result(path: Union[str, Path]) -> dict:
     ----------
     result: dict
         result.yaml の中身と, frame (予測と判断の表. 配列は artifact の
-        列の相対パスのまま. 読むのは artifact_path と numpy.load)
+        列の相対パスのまま. 読むのは artifact_path と numpy.load), form
+        (配列の出力の形. 無ければ None), directory (読んだ場所. 書き直す
+        ときに配列を持ち越すため)
 
     Raises
     ----------
@@ -284,8 +393,12 @@ def read_result(path: Union[str, Path]) -> dict:
         root / "predictions.csv", encoding="utf-8-sig",
         keep_default_na=False, na_values=[""]
     )
-    if ARTIFACT_COLUMN in frame.columns and meta.get("artifacts"):
+    artifacts = meta.get("artifacts") or {}
+    if ARTIFACT_COLUMN in frame.columns and artifacts:
         frame[ARTIFACT_COLUMN] = frame[ARTIFACT_COLUMN].fillna("")
-    result = {**meta, "frame": frame}
+    result = {
+        **meta, "frame": frame, "form": artifacts.get("form"),
+        "directory": str(root.resolve()),
+    }
 
     return result

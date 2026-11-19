@@ -412,6 +412,14 @@ def conclude(
     ValueError
         決め方に誤りがある場合
     """
+    # 列の出力でない予測 (prediction の無い表) は結論の決め方を使えない
+    if "prediction" not in prediction.columns:
+        raise ValueError(
+            "予測の表に prediction の列がありません. 出力の形が列 (class, "
+            "value, distribution) でない一式の予測には conclude を使えず, "
+            "結論は件数だけ (conclude_outputs) です"
+        )
+
     # 決め方の確認 (numpy の数は Python の数に. 書き出せるように)
     rules = plain(dict(rules or {}))
     errors = check_rules(rules, task, classes, list(prediction.columns))
@@ -488,8 +496,9 @@ def origin_sentence(target: Optional[dict]) -> Optional[str]:
     """
     # 正解を作った処理との一致という限り
     origin = (target or {}).get("origin") or {}
+    sentence: Optional[str] = None
     if origin.get("type") != "process":
-        return None
+        return sentence
     name = origin.get("name") or "今の処理"
     sentence = (
         f"正解は {name} の出力なので, 予測はその処理との一致までしか分からず, "

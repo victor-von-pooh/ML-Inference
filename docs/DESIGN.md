@@ -116,7 +116,7 @@ notes: []                      # 作るときの注意 (戻せない変換, 学�
 | --- | --- | --- | --- | --- |
 | `class` | (件数, クラスの数) か 2 クラスで 1 列 | `prediction`, `confidence`, `p:<クラス>` (前と同じ) | `logits`, `probabilities` | 使える |
 | `value` | (件数,) か (件数, 1) | `prediction` (元の単位. 前と同じ) | `value` | 使える |
-| `distribution` | (件数, 分位点の数). 分位点の水準は `output.quantiles` (0 から 1 の小さい順) | `prediction` (0.5 の点. 無ければ真ん中の点), `q:<水準>` (元の単位. 行ごとに小さい順に並べ直す. 分位点の交差を直すため) | `value` | 値と同じ (`prediction` を使う) |
+| `distribution` | (件数, 分位点の数). 分位点の水準は `output.quantiles` (0 から 1 の小さい順) | `prediction` (0.5 の点. 無ければ前後の水準の間を線形に補う. 0.5 が水準の外なら最も近い端の点), `q:<水準>` (元の単位. 行ごとに小さい順に並べ直す. 分位点の交差を直すため) | `value` | 値と同じ (`prediction` を使う) |
 | `mask` | (件数, クラスの数, 高さ, 幅) か (件数, 高さ, 幅) | `output` (1 件の (高さ, 幅) の整数の配列. 書き出しは `artifacts/`) | `logits`, `probabilities` | 件数だけ |
 | `point_cloud` | (件数, 点の数, 次元) | `output` ((点の数, 次元)) | `value` | 件数だけ |
 | `vector` | (件数, 次元) | `output` ((次元,)) | `value` | 件数だけ |
@@ -145,7 +145,7 @@ procedure:
 
 | 名前 | 何をするか | モデルの呼び方 | 始まり | 設定 |
 | --- | --- | --- | --- | --- |
-| `ddim` | 拡散のモデルの DDIM のサンプリング. 雑音から, 予測した雑音を引いて戻す | `model(x, t)` → 予測した雑音. `t` は学習の時刻 (整数) | 雑音 | `train_steps` (学習の時刻の数. 既定 1000), `beta_start`, `beta_end` (線形の雑音の予定. 既定 1e-4, 0.02), `eta` (0 で決まった道. 既定 0) |
+| `ddim` | 拡散のモデルの DDIM のサンプリング. 雑音から, 予測した雑音を引いて戻す | `model(x, t)` → 予測した雑音. `t` は学習の時刻 (整数) | 雑音 | `train_steps` (学習の時刻の数. 整数だけ. 既定 1000), `beta_start`, `beta_end` (線形の雑音の予定. 既定 1e-4, 0.02), `eta` (0 で決まった道. 既定 0) |
 | `euler` | フローのモデルの Euler 法. 時刻 0 の雑音から時刻 1 のデータへ速度を足していく | `model(x, t)` → 速度. `t` は 0 から 1 の小数 | 雑音 | `t_start`, `t_end` (既定 0 と 1) |
 | `greedy` | 文の番号の生成. 毎回最も確率の高い番号を足す | `model(ids)` → logits ((件数, 長さ, 語彙) か (件数, 語彙). 3 次元は最後の位置) | 渡した番号の並び | `eos` (終わりの番号. 全ての件が出したら止め, 出した件はその後も `eos` で埋める) |
 | `sample` | 文の番号の生成. 温度で割った確率から引く | 同上 | 同上 | `temperature` (0 より大きい. 既定 1), `eos` |
@@ -153,7 +153,7 @@ procedure:
 - 入口: `PROCEDURES` (名前から手順), `get_procedure(name)`, `register_procedure(name, function, start, time, description, overwrite=False)` (自作の手順. 組み込みの名前は上書きできない), `make_generator(seed)`, `start_noise(shape, generator)`, `run_procedure(name, model, state, steps, generator, **options)`. 手順の関数は `function(model, state, steps, generator, **options)` で, `model` は呼べるものなら何でもよい (`nn.Module` に限らない). 乱数は渡した `torch.Generator` (cpu) からだけ引くので, 同じ入力と同じ種なら同じ出力になる. 勾配は計算しない
 - ML-Found からの使い方の例: `g = make_generator(0); x = start_noise((8, 16), g); samples = run_procedure("ddim", denoiser, x, 50, g)`
 - 一式で使うとき: モデルの入力の出どころに `state` (繰り返しで変わる中身) と `time` (手順の渡す時刻. `ddim` と `euler` だけ) を足す. 他の入力 (`features`, `items`) は条件として毎回同じものを渡す. 雑音から始まる手順は `output.shape` (1 件の形) が要り, 予測する行の数だけ種から雑音を引く. 文の手順は `items` の番号の並び (`state` の入力の `prepend` を足したもの) から始める. 同じ一式, 同じ入力, 同じ `batch_size` なら同じ出力 (雑音と乱数は 1 つの生成器から予測する行の順に引くので, `batch_size` を変えたり, 予測できない行 (飛ばす行) が変わったりすると, 他の行の出力も変わる. 雑音から始まる手順の始まりの雑音は `batch_size` に依らない). `eos` で件数ずつ止まる長さが違う文の手順は, 最も長いものに `eos` で埋めて並べる
-- 一式を読むときに, 手順の名前が登録簿にあるか, 回数が 1 以上の整数か, 種が整数か, 設定の名前が手順の引数にあるか, 組み込みの設定の値の型と範囲, 手順の始まりと出力の形の組 (雑音からは `class`, `value`, `distribution`, `text` 以外, 番号の並びからは `text` だけ. 番号の並びから始まる手順は文のデータセットだけ) を確かめる. 知らない名前の一式は「登録簿に無い」誤りで止める (自作の手順は, 一式を読む前に `register_procedure` で登録する. 一式に書かれたコードは読まない. ML_tester の決めたこと 14)
+- 一式を読むときに, 手順の名前が登録簿にあるか, 回数が 1 以上の整数か, 種が整数か, 設定の名前が手順の引数にあるか (設定の無い手順は設定を受け取らない. `**kwargs` を持つ自作の手順は何でも受け取る. `option_names` は前者で空, 後者で `None`), 組み込みの設定の値の型と範囲, 手順の始まりと出力の形の組 (雑音からは `class`, `value`, `distribution`, `text` 以外, 番号の並びからは `text` だけ. 番号の並びから始まる手順は文のデータセットだけ) を確かめる. 知らない名前の一式は「登録簿に無い」誤りで止める (自作の手順は, 一式を読む前に `register_procedure` で登録する. 一式に書かれたコードは読まない. ML_tester の決めたこと 14)
 - ビームの探索などは, 要る実例が出てから足す
 
 ### 学習済みの重みの置き方 (版 3. `model.pretrained`)
@@ -161,12 +161,12 @@ procedure:
 学習済みの重みを読むノード (ML-ModelControl の `pretrained_info` が `None` でないノード) の重みを, 一式に写すか, 出どころから読むかを決めて記録する (ML_tester の決めたこと 11).
 
 - 重みのライセンスの情報は `make_bundle(pretrained=...)` で, ノードの名前ごとの `pretrained_info` の形の辞書で渡せる (画面が既に読んだ情報を使う. テストもこれでネットワークを使わない). 省くと, 定義の一番上のノードごとに `ml_modelcontrol.pretrained_info` を呼ぶ (ネットワークを使う. 入っている ML-ModelControl にこの関数が無ければ読まずに注意を残す. 読めなかったノードは `unknown`). 部分モデルの中のノードは今は見ない
-- 写せるか: `redistributable` が真のものだけ写す. 偽と, 情報の無いもの (読めなかった, 不明) は写さない側に倒す
+- 写せるか: `redistributable` が真のものだけ写す. 偽のもののうち, ライセンス (`license`) と版の識別子 (`pinned_revision`) を読めたものだけを写さない. 読めなかったもの (ネットワークが無い, 配布元に書いていない) は, 出どころから同じ重みを読めるか分からないので一式の重みに残し, 理由を `notes` に書く. 写さなかったノードも, 出どころの名前と版を `notes` に必ず書く
 - 写さない重みのノードは, 置き方に依らず, その部品に `revision` の引数があれば一式の定義のその値を読んだ版 (`pinned_revision`) に替えて固定する (比べる重みも固定した版で組み立てる). そのうえで, 学習で変わっていない (定義から組み立てた直後の重みと, 渡した重みのノードの部分が全て等しい) 場合だけ, 一式の重みのファイルからそのノードの重みを除き, 使うときに出どころ (部品の名前と引数, 版) から読む (`place: source`)
 - 学習で変わったノード (微調整した) は出どころから読み直せないので, 写さないライセンスでも一式の重みに残し (`place: bundle`), 「元の重みのライセンスを確かめてから一式を渡す」注意を `notes` に残す
 - 重みを写さない一式 (`copy_weights=False`) は, ファイルを作らないので除かずに記録だけ残す
 - 記録 (ノードごと): `node`, `unit`, `model`, `hub_id`, `revision`, `pinned_revision`, `license`, `status`, `redistributable`, `source` (どこから読んだか), `place` (`bundle` か `source`), `sha256` (ノードの重みの hash. キーの名前, 型, 形, 中身から), `keys` (キーの数)
-- 読むとき (`Bundle.model`): 出どころから読むノードがあれば, 組み立てた後に重みを `strict=False` で読み, 足りないキーがそのノードのものだけかを確かめ (違えば誤り), ノードの重みの hash を記録と比べる. 違えば警告 (`warnings.warn`) し, 説明の `pretrained_warnings` にも出す (出どころの重みが入れ替わった, 版を固定できない部品など. 推論は止めない)
+- 読むとき (`Bundle.model`): 出どころから読むノードがあれば, 組み立てた後に重みを `strict=False` で読み, 足りないキーがそのノードのものだけかを確かめ (違えば誤り), ノードの重みの hash を記録と比べる. 違えば警告 (`warnings.warn`) し, 説明の `pretrained_warnings` にも出す (出どころの重みが入れ替わった, 版を固定できない部品など. 推論は止めない). 出どころから読むノードを持つモデルを組み立てられない場合は, そのノードと出どころと版を添えた誤りにする
 - 今の一式の重み (`final_model.pt`) は学習した `state_dict` を丸ごと写していた. 学習済みのノードの無い一式 (今の全ての一式) は前と同じ
 
 ### 入力のつなぎ方
@@ -335,7 +335,9 @@ procedure:
 - `result.yaml` の `artifacts` に `directory` (`artifacts`), `column` (`artifact`), `format` (`npy`), `form` (出力の形), `count` (書いた数) を書く. 書き出すのは配列の出力の形 (`mask`, `point_cloud`, `vector`, `image`) の結果だけで, 入力に `output` や `artifact` の列があっても, 予測の表では「(入力)」付きの名前になるので混ざらない
 - 版: 表に収まらない中身が無い結果は前と同じ版 1 で書く (今の読む側を壊さない. ML-EDA と同じ決まり). ある場合だけ版 2
 - `read_result(path)` は結果を読み, 表 (`frame`) と説明を返す. 知らない新しい版は「読めません」で止める. `artifact_path(root, relative)` は表の相対パスを結果のディレクトリの中に解決する (外を指せば誤り)
-- 書き出す先が既にある場合, 前の `artifacts/` は消してから書く (別の結果の配列が混ざらないように)
+- 書き出す先に `artifacts/` がある場合, 前の結果のもの (`artifacts` を記録した `result.yaml` がある) だけを消してから書く (別の結果の配列が混ざらないように). 前の結果のものと確かめられない `artifacts/` は利用者のデータとして消さず, 誤りで止まる. 列の結果の書き出しは `artifacts/` に触れない
+- 読んで書き直す (`write_result(read_result(p), q)`) と配列は残る. `read_result` は `form` (配列の出力の形) と `directory` (読んだ場所) を返し, `write_result` は表の `artifact` の列を持つ結果の配列を, 同じ場所ならそのまま使い, 別の場所なら写す. 読んだ版と中身の記録, 読んだ場所は書き直すときに作り直す
+- 配列の出力の表 (`prediction` の列が無い) を `conclude` に渡すと, 件数だけの結論 (`conclude_outputs`) を使うよう言って止まる
 
 ## 安全
 

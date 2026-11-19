@@ -808,12 +808,39 @@ def decode_distribution(bundle: Bundle, outputs: np.ndarray) -> dict:
             f"(今は {tuple(outputs.shape)})"
         )
     values = np.sort(scale_back(bundle, outputs), axis=1)
-    middle = levels.index(0.5) if 0.5 in levels else len(levels) // 2
-    columns: dict = {"prediction": values[:, middle]}
+    columns: dict = {"prediction": median_of(levels, values)}
     for index, level in enumerate(levels):
         columns[f"q:{level:g}"] = values[:, index]
 
     return columns
+
+
+def median_of(levels: list[float], values: np.ndarray) -> np.ndarray:
+    """
+    分位点の並びから 0.5 の点を求める関数
+
+    Parameters
+    ----------
+    levels: list[float]
+        分位点の水準 (小さい順)
+    values: np.ndarray
+        (件数, 分位点の数) の値 (行ごとに小さい順)
+
+    Returns
+    ----------
+    median: np.ndarray
+        0.5 の点 (無ければ前後の水準の間を線形に補う. 0.5 が水準の外なら
+        最も近い端の点)
+    """
+    # 0.5 があればその点, 無ければ水準の間の線形の補い
+    if 0.5 in levels:
+        median = values[:, levels.index(0.5)]
+        return median
+    median = np.array(
+        [np.interp(0.5, levels, row) for row in values], dtype=float
+    )
+
+    return median
 
 
 def decode_mask(bundle: Bundle, outputs: np.ndarray) -> dict:
