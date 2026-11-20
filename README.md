@@ -1,6 +1,6 @@
 # ML-Inference
 
-「機械学習を全て GUI 上で行う」ための段階のうち, 推論の段階のライブラリ. 学習したモデルで新しいデータを推論し, 予測から結論と意思決定の材料を出す. 画面は [ML-Provide](https://github.com/victor-von-pooh/ML-Provide) が使う.
+「機械学習を全て GUI 上で行う」うちの「推論」の段階のライブラリ. 学習したモデルで新しいデータを推論し, 予測から結論と意思決定の材料を出す. 画面のアプリ [ML-Provide](https://github.com/victor-von-pooh/ML-Provide) が使う.
 
 ## できること
 
@@ -189,9 +189,10 @@ print(result["sentences"])
 
 ## 文書
 
-- [docs/DESIGN.md](docs/DESIGN.md): 今の設計と決まり (他のリポジトリとの約束, 推論の一式と結果の形を含む)
-- [TODO.md](TODO.md): まだやっていないこと
+- [docs/DESIGN.md](docs/DESIGN.md): 今の設計と決まり, 他のリポジトリとの約束 (推論の一式と結果の形と版)
+- [TODO.md](TODO.md): まだやっていないこと (優先度の順)
 - [CODING_STYLE.md](CODING_STYLE.md): コードの書き方
+- [CLAUDE.md](CLAUDE.md): このリポジトリで作業するときの方針
 
 ## ライセンス
 
