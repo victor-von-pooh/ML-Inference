@@ -1,12 +1,16 @@
 # ML-Inference
 
-学習したモデルで新しいデータを推論し, 予測から結論を出して価値として提供するライブラリ.
+「機械学習を全て GUI 上で行う」ための段階のうち, 推論の段階のライブラリ. 学習したモデルで新しいデータを推論し, 予測から結論と意思決定の材料を出す. 画面は [ML-Provide](https://github.com/victor-von-pooh/ML-Provide) が使う.
+
+## できること
 
 - **推論の一式**: モデルの定義 (ML-ModelControl), 学習した重み (ML-Found の実験), 前処理 (ML-EDA のデータセット) を 1 つのディレクトリにまとめ, 見本を推論できることを確かめてから作る
-- **予測**: 新しいデータに学習のときと同じ前処理をかけて推論し, クラスの名前と確率, 元の単位の値で返す. 予測できない行 (前処理の後に欠損がある, 中身を読めない) は理由を付けて飛ばす
+- **予測**: 新しいデータに学習のときと同じ前処理をかけて推論し, クラスの名前と確率, 元の単位の値で返す. 予測できない行 (前処理の後に欠損がある, 中身を読めない) は理由を付けて飛ばす. 領域, 点群, ベクトル, 文などの出力と, 拡散のサンプリングのような繰り返しの手順も扱う
 - **結論**: 確信の低いものを保留にする, 決めた確率で陽性を決める, 値を帯に分ける, 列の値ごとにまとめる. 全体のまとめを日本語の文でも返す
+- **何段も先の予測と列の効き**: 予測した値を次の入力に使って先の行を埋める. どの列が予測を動かしているかを並べ替えで求める
+- **意思決定**: 予測から次の行動 (量, 選ぶ対象, 人が確かめる対象) と見込みの得と損を出し, 過去のデータでたどり直して比べる. 新しい実績で外れ方を測り直す
 
-前処理は [ML-EDA](https://github.com/victor-von-pooh/ML-EDA), モデルの組み立ては [ML-ModelControl](https://github.com/victor-von-pooh/ML-ModelControl) を使い, [ML-Found](https://github.com/victor-von-pooh/ML-Found) で学習した重みを読む. 画面は [ML-Provide](https://github.com/victor-von-pooh/ML-Provide). 設計は [docs/DESIGN.md](docs/DESIGN.md).
+前処理は [ML-EDA](https://github.com/victor-von-pooh/ML-EDA), モデルの組み立ては [ML-ModelControl](https://github.com/victor-von-pooh/ML-ModelControl) を使い, [ML-Found](https://github.com/victor-von-pooh/ML-Found) で学習した重みを読む.
 
 ## 導入
 
@@ -18,6 +22,16 @@ pip install "ml-inference @ git+https://github.com/victor-von-pooh/ML-Inference.
 ```
 
 画像, Excel, parquet, 部分語の文を読む場合は `pip install "ml-inference[all] @ git+https://github.com/victor-von-pooh/ML-Inference.git"` で ML-EDA の任意の依存も入れる. ML-EDA と ML-ModelControl は各リポジトリの `main` から入る.
+
+開発する場合は, リポジトリを取ってきて入れ, `pytest` でテストする.
+
+```bash
+git clone https://github.com/victor-von-pooh/ML-Inference.git
+cd ML-Inference
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install -e ".[dev]"
+pytest
+```
 
 ## 使い方
 
@@ -37,14 +51,7 @@ make_bundle(
 )
 ```
 
-- モデルの定義は ML-ModelControl の形 (書き方は ML-ModelControl の README). 入力の幅はデータセットの学習に使う列の数 (表) か中身の配列の形 (画像, 文, 点群), 出力の幅はクラスの数 (2 クラスは 1 列でもよい) か 1 (回帰, 予測)
-- 重みは `state_dict` (ML-Found の `final_model.pt`). 実験のディレクトリを渡すと `final_model.pt` を使い, `run.json` の状態 (ベストの値など) を記録する
-- 作るときに, データセットの学習用の見本を推論して, 入力の形と出力の幅を確かめる. 合わない場合は作らずに理由を返す
-- さらに検証用の分割を推論し, 正解率か平均絶対誤差を実験の記録 (`valid/acc`, `valid/mae` のベストの値) と比べる. 合わない場合は, 前処理の外でしたことの書き忘れを疑う注意を `notes` に残す
-
-- 入力が 1 つのモデルは, 表なら学習に使う列, 画像と文と点群なら中身の配列をそのまま渡す. 入力が複数のモデルや, 学習のスクリプトで並びの先頭に [CLS] などの番号を足した場合は `inputs={"ids": {"source": "items", "prepend": [2001]}}` のように書く
-- 出力が複数のモデルは `output="logits"` のように使う出力を書く
-- 学習のスクリプトで目的の値を `(y - center) / scale` にして学習した場合は `target_scale={"center": ..., "scale": ...}` を書く (予測を元の単位に戻す). 学習用の分割の平均と標準偏差で変えた場合は `target_scale="train"` で求められる
+作るときに, 学習用の見本を推論して入力の形と出力の幅を確かめ, 検証用の分割の評価を実験の記録と比べる (合わなければ `notes` に注意). 入力が複数のモデルや並びの先頭に足した番号 (`inputs`), 使う出力 (`output`), 目的の値の標準化 (`target_scale`) の書き方は [docs/DESIGN.md](docs/DESIGN.md) の「推論の一式の形」.
 
 ### 学習のスクリプトの最後に作る (勧める形)
 
@@ -113,9 +120,7 @@ make_bundle(
 )
 ```
 
-繰り返しの手順 (`ddim`, `euler`, `greedy`, `sample`) は `ml_inference.procedures` の登録簿にあり, PyTorch だけを使うので学習の途中の見本 (ML-Found) からも呼べる (`g = make_generator(0); run_procedure("ddim", model, start_noise(shape, g), 50, g)`). 学習済みの重みは, ML-ModelControl の `pretrained_info` が再配布できるとしたものだけを一式に写し, 他は出どころの名前と版 (`pinned_revision`) から読んで hash を確かめる (違えば警告. 学習で変えた重みは出どころから読み直せないので一式に残し, 注意を書く). 詳しくは DESIGN の「受け持ちと出力の形」「繰り返しの手順」「学習済みの重みの置き方」「書き出し」.
-
-研究の自作の部品 (ML-ModelControl の `register_unit` で登録する部品) を使う一式は, 部品を宣言したモジュールを一式を読む前に `ml_inference.register_units(["my_lab.units"])` で登録する (アプリは起動の設定に書いたモジュールだけを渡す. ML-Provide なら `--units` か `ML_PROVIDE_UNITS`). 一式やモデルの定義に書かれた名前からは何も読み込まず, 登録されていない部品を使う一式は, 部品の名前と起動の設定への足し方を添えた `UnregisteredUnitError` で止まる. 詳しくは DESIGN の「自作の部品」.
+繰り返しの手順 (`ddim`, `euler`, `greedy`, `sample`) と学習済みの重みの置き方は, DESIGN の「繰り返しの手順」「学習済みの重みの置き方」. 研究の自作の部品を使う一式は, 一式を読む前に `ml_inference.register_units(["my_lab.units"])` で部品を登録する (ML-Provide なら起動の `--units` か `ML_PROVIDE_UNITS`. DESIGN の「自作の部品」).
 
 ### 何段も先を予測する
 
@@ -142,7 +147,7 @@ for item in result["columns"]:
 # sales (過去の値) 123262, store 117509, date 99698, temperature 40959, promo 33882
 ```
 
-列を 1 つずつ行の間で並べ替えて推論し直し, 予測の変わり方の平均を効きとする (分類は予測したクラスの確率, 回帰と予測は元の単位の値). 正解の無い新しいデータでも求められる. 表と時系列の一式だけ. 系列を分ける列は系列の名前を入れ替え, 過去の値の列を作るレシピは系列ごとの最後の行を使う (詳しくは DESIGN の「列の効き」).
+列を 1 つずつ行の間で並べ替えて推論し直し, 予測の変わり方の平均を効きとする (表と時系列の一式だけ. DESIGN の「列の効き」).
 
 ### 予測から意思決定へ
 
@@ -170,11 +175,9 @@ print(backtest("bundles/sales", "last_month.csv", decision)["sentences"])
 | `select` | 引き止め, 営業先, 点検 | `positive`, `value` (当たりの価値), `cost` (行動の費用), `effect` (行動で防げる割合. 仮定), `effect_kind` (`uplift` なら `effect` は 行動したとき − しないときの当たりの確率), `effect_goal` (`uplift` の向き. `reduce` か `raise`), `budget` か `budget_cost` |
 | `triage` | 人が確かめる, 再検査 | `positive`, `miss_cost` (見逃しの損), `false_alarm_cost` (空振りの損), `capacity` (回せる件数) |
 
-損得の値は数か, 予測の表の列の名前 (行ごとに違う価値, 外で推定した行ごとの効果など). 値の欠けた行は決めない. `current` に今のやり方の列 (足した量, 行動したか) を書くと, たどり直しで今のやり方とも比べる.
+損得の値は数か, 予測の表の列の名前. 文は「書いた損得と外れ方の記録が正しいとすれば」の前提を先に述べるので, 実際の差は `backtest` で確かめる. 値段を変える判断は扱わない (DESIGN の「意思決定」).
 
-文は「書いた損得と外れ方の記録が正しいとすれば」の前提を先に述べる. その前提での素朴なやり方との比べは必ず方針が良く出るので, 実際の差は `backtest` で確かめる (差に 90 % の幅を付ける). 一式を作るときに測った予測の外れ方 (回帰) と確率の当たり具合 (分類) を使い, その記録を前提として文に添える. 値段を変える判断は, 価格を変えた記録が要るので扱わない (詳しくは DESIGN の「意思決定」).
-
-新しい実績が貯まったら, その実績で外れ方を測り直して一式に書き戻す. 今の記録の幅がその実績をどれだけ覆ったか (分類は確率のずれ) も返すので, 予測の傾向が変わったかに気付ける. 測る実績とたどり直す実績は分ける (同じ行では良く見えすぎる). 一式を作ったときの記録は残り, `restore_uncertainty` で戻せる. 何段も先まで予測して量を決める場合は, `remeasure(..., horizon=7)` で段ごとの外れ方も測ると, 先の段の量にその段の外れ方を使う. たどり直しの差の幅は, 時刻でずらす一式なら時刻ごとに選び直す (同じ日の店どうしは似ているため. `group` で列を選べる).
+新しい実績が貯まったら, その実績で外れ方を測り直して一式に書き戻す (`restore_uncertainty` で戻せる. 何段も先の量には `horizon` で段ごとの外れ方も測る. DESIGN の「外れ方の測り直し」).
 
 ```python
 from ml_inference import remeasure
@@ -184,15 +187,11 @@ print(result["sentences"])
 # ['今の記録の 80 % の幅は, 渡した実績の 606 行の 72 % を覆った (90 % の幅は 83 %). 外れ方を小さく見積もっていた', '測り直した外れ方の 80 % の幅は, 予測の 0.87 倍から 1.14 倍 (606 行で測った)']
 ```
 
-## 開発
+## 文書
 
-```bash
-git clone https://github.com/victor-von-pooh/ML-Inference.git
-cd ML-Inference
-pip install torch --index-url https://download.pytorch.org/whl/cpu
-pip install -e ".[dev]"
-pytest
-```
+- [docs/DESIGN.md](docs/DESIGN.md): 今の設計と決まり (他のリポジトリとの約束, 推論の一式と結果の形を含む)
+- [TODO.md](TODO.md): まだやっていないこと
+- [CODING_STYLE.md](CODING_STYLE.md): コードの書き方
 
 ## ライセンス
 

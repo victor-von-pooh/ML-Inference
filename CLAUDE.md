@@ -4,7 +4,7 @@ ML-Inference で作業するときの方針をまとめる.
 
 ## このリポジトリの目的
 
-学習したモデルで新しいデータを推論し, 予測から結論を出して価値として提供するライブラリ. 設計は [docs/DESIGN.md](docs/DESIGN.md) にまとめる.
+学習したモデルで新しいデータを推論し, 予測から結論を出して価値として提供するライブラリ.
 
 - GUI のアプリ (ML-Provide) が必要とする情報 (推論の一式の説明, 予測の表, 結論) はこのライブラリが返す. 画面に固有のものは入れない
 - 前処理は ML-EDA, モデルの組み立ては ML-ModelControl を使う (約束を持つライブラリだけが中身を正しく扱えるため). 学習は対象外で, ML-Found のコードは使わない
@@ -14,9 +14,16 @@ ML-Inference で作業するときの方針をまとめる.
 - [CODING_STYLE.md](CODING_STYLE.md) に従う (日本語の NumPy 形式の docstring, コメントは体言止め, 79 文字以内など)
 - ドキュメントとコードのコメントでは, 「機械学習を全て GUI 上で行う」という目的のために開発しているリポジトリ (今は ML-Found, ML-Dashboard, ML-ModelControl, ML-CreateArchitecture, ML-EDA, ML-Fathom, ML-Inference, ML-Provide, ML-Quest, ML-Pathfinder, ML_tester) 以外に触れない. ローカルのディレクトリ構成やパスも書かない. 外部のライブラリ (PyTorch, pandas など) には触れてよい
 
+## 文書
+
+- [README.md](README.md): 何をするライブラリか, 導入, 短い使い方
+- [docs/DESIGN.md](docs/DESIGN.md): 今の設計と決まり. 1. 役割と位置づけ, 2. 他のリポジトリとの約束 (推論の一式と結果の形と版) から始める. まだやっていないことは書かない
+- [TODO.md](TODO.md): まだやっていないことを優先度の順に. 終えたら消す
+- [CODING_STYLE.md](CODING_STYLE.md): コードの書き方
+
 ## 進める流れ
 
-1. 方針を変える場合や新しい機能を加える場合は, 先に docs/DESIGN.md を直す
+1. 方針を変える場合や新しい機能を加える場合は, 先に docs/DESIGN.md と TODO.md を直す
 2. テストを書き, `pytest` を通す
 3. **セルフレビュー**: 複数のエージェントを並行して動かし, バグ, 設計との食い違い, CODING_STYLE.md への準拠を確認する
 4. 指摘を直し, 直した内容と残した指摘をユーザーに報告する
