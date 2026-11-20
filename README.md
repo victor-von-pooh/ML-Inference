@@ -123,6 +123,29 @@ make_bundle(
 
 繰り返しの手順 (`ddim`, `euler`, `greedy`, `sample`) と学習済みの重みの置き方は, DESIGN の「繰り返しの手順」「学習済みの重みの置き方」. 研究の自作の部品を使う一式は, 一式を読む前に `ml_inference.register_units(["my_lab.units"])` で部品を登録する (ML-Provide なら起動の `--units` か `ML_PROVIDE_UNITS`. DESIGN の「自作の部品」).
 
+### 領域と点群 (ML-EDA の版 2 のデータセット. 一式の版 4)
+
+ML-EDA の版 2 のデータセット (画像と領域の対, 撮影と点群の対) で学習した重みからも一式を作れる. 版 2 には前処理のレシピが無いので, 学習のスクリプトがした 1 件の扱い (画像を 0 から 1 にする, 深度から点に戻して決まった数を選ぶ) を `items` で一式に書く. 出力は, 領域はデータセットと同じ領域の値, 点群は元の撮影の座標 (正規化の平行移動を引く) で返す.
+
+```python
+from ml_inference import infer, make_bundle, write_result
+
+# 画像と領域. 扱い方とクラスはデータセットから決まる
+make_bundle("bundles/seg", "models/unet.yaml", "outputs/masks", "outputs/seg/2026-11-21/10-00-00")
+
+# 撮影と点群. 選ぶ点の数と乱数の種は学習のスクリプトと同じものを書く
+make_bundle(
+    "bundles/shape", "models/points.yaml", "outputs/clouds", run_dir,
+    items={"options": {"points": 512, "target_points": 1024, "seed": 1}},
+)
+
+# 版 2 のデータセットか, 元の画像や撮影のディレクトリを推論する
+result = infer("bundles/shape", "new_captures/")
+write_result(result, "results/shape")   # 点群は artifacts/000000.npy など
+```
+
+一式を作るときに, 検証用の分割の IoU (領域) か Chamfer 距離 (点群) を求め, 実験の監視した指標 (`valid/iou`, `valid/chamfer`) と比べる (DESIGN の「版 2 のデータセットの一式」).
+
 ### 何段も先を予測する
 
 目的の列の過去の値の列 (lag) を作る一式では, 目的の列を空にした先の行を足して `forecast` に渡すと, 系列ごとに予測した値を次の入力に使いながら順に埋める.
