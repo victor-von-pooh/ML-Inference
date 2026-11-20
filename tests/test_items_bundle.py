@@ -451,3 +451,99 @@ def test_cloud_bundle(tmp_path: Path, clouds: dict) -> None:
     back = read_result(tmp_path / "result")
     assert back["form"] == "point_cloud"
     assert (tmp_path / "result" / "artifacts" / "000000.npy").is_file()
+
+
+def test_resized_mask_bundle(tmp_path: Path) -> None:
+    """
+    大きさをそろえた画像と領域の版 3 のデータセットから一式を作り, 大きさ
+    の違う元の画像を, 書き出しと同じ手順をかけて推論できることを確かめる
+    関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 24 x 32 と 30 x 40 の混ざった画像を 12 x 16 にそろえて書き出す
+    raw = write_image_masks(tmp_path / "raw", count=12, seed=0,
+                            sizes=[(24, 32), (30, 40)])
+    steps = [{"op": "resize", "width": 16, "height": 12}]
+    dataset = tmp_path / "small"
+    export_image_masks(raw["images"], raw["masks"], dataset,
+                       classes=raw["classes"], origin={"type": "synthetic"},
+                       item_steps={"image": steps})
+    assert load_items(dataset).info["format_version"] == 3
+
+    # 一式の写しに手順が残り, 記録と合う
+    spec = mask_spec()
+    best = skeleton_iou(spec, dataset)
+    run = fake_run(tmp_path / "run", spec, "valid/iou", best)
+    info = make_bundle(tmp_path / "bundle", spec, dataset, run)
+    assert info["format_version"] == 4
+    assert info["check"]["matches"] is True, info["check"]
+    copied = yaml.safe_load((tmp_path / "bundle" / "dataset" /
+                             "dataset.yaml").read_text(encoding="utf-8"))
+    assert copied["format_version"] == 3
+    assert copied["entries"]["image"]["steps"] == steps
+
+    # データセットの件と大きさの違う元の画像は, 同じ 12 x 16 の予測
+    bundle = load_bundle(tmp_path / "bundle")
+    by_dataset = predict(bundle, dataset)
+    by_files = predict(bundle, raw["images"])
+    assert (by_files["status"] == "ok").all() and len(by_files) == 12
+    for a, b in zip(by_dataset["output"], by_files["output"]):
+        assert a.shape == (12, 16) and np.array_equal(a, b)
+
+    # 手順の違うデータセット (版 2) は, 黙って読まずに止める
+    export_image_masks(raw["images"], raw["masks"], tmp_path / "full",
+                       classes=raw["classes"], origin={"type": "synthetic"})
+    with pytest.raises(ValueError, match="中身の手順が一式と違います"):
+        predict(bundle, tmp_path / "full")
+
+
+def test_resized_cloud_bundle(tmp_path: Path) -> None:
+    """
+    画像を縮めた撮影と点群の版 3 のデータセットから一式を作り, 元の撮影
+    を, 書き出しと同じ手順をかけて推論できることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 24 x 32 の撮影を 12 x 16 に縮めて書き出す
+    raw = write_shape_captures(tmp_path / "raw", count=8, seed=0,
+                               points=400, views=6)
+    steps = [{"op": "resize", "width": 16, "height": 12}]
+    dataset = tmp_path / "small"
+    export_capture_clouds(raw["captures"], raw["clouds"], dataset,
+                          split={"method": "random", "valid": 0.25,
+                                 "test": 0.0, "seed": 0},
+                          item_steps={"capture": steps})
+
+    # 縮めた深度から選ぶ点で記録と合う
+    spec = cloud_spec(32)
+    options = {"points": 64, "target_points": 128, "seed": 1}
+    best = skeleton_chamfer(spec, dataset, (64, 128), 1)
+    run = fake_run(tmp_path / "run", spec, "valid/chamfer", best)
+    info = make_bundle(tmp_path / "bundle", spec, dataset, run,
+                       items={"options": options})
+    assert info["check"]["matches"] is True, info["check"]
+
+    # 元の撮影も同じ手順で縮めるので, データセットの件と同じ点群
+    by_dataset = predict(tmp_path / "bundle", dataset)
+    by_raw = predict(tmp_path / "bundle", raw["captures"])
+    assert (by_raw["status"] == "ok").all() and len(by_raw) == 8
+    raw_rows = by_raw.assign(id=[Path(p).name for p in by_raw["path"]])
+    raw_rows = raw_rows.set_index("id")
+    for _, row in by_dataset.iterrows():
+        other = raw_rows.loc[row["id"]]
+        assert np.allclose(other["output"], row["output"], atol=1e-5)

@@ -518,10 +518,11 @@ def chamfer(predicted: np.ndarray, target: np.ndarray) -> float:
 
 
 def captured(
-    path: Path, normalize: bool, work: Path, label: str
+    path: Path, normalize: bool, work: Path, label: str,
+    steps: Optional[list] = None
 ) -> tuple[dict, np.ndarray]:
     """
-    元の撮影を, 学習と同じ正規化をかけて読む関数
+    元の撮影を, 学習と同じ正規化と中身の手順をかけて読む関数
 
     Parameters
     ----------
@@ -533,18 +534,32 @@ def captured(
         写す先を作る一時のディレクトリ
     label: str
         写す先の名前
+    steps: Optional[list] = None
+        各枚の画像にかける中身の手順 (版 3 のデータセットの撮影の項目の
+        steps)
 
     Returns
     ----------
     capture: tuple[dict, np.ndarray]
         read_capture の撮影と, 足した平行移動 (かけない場合は 0)
+
+    Raises
+    ----------
+    ValueError
+        正規化しないデータセットの撮影に中身の手順がある場合
     """
-    # 正規化は ML-EDA の書き出しと同じ決まり (写してから姿勢に足す)
+    # 正規化と中身の手順は ML-EDA の書き出しと同じ決まり (写してから
+    # 姿勢に足し, 画像と深度と内部パラメータを直す)
     if not normalize:
+        if steps:
+            raise ValueError(
+                "正規化しないデータセットの撮影には, 中身の手順をかけられ"
+                "ません"
+            )
         capture = (read_capture(path), np.zeros(3))
         return capture
     target = work / label
-    summary = normalize_capture(path, target)
+    summary = normalize_capture(path, target, steps=steps)
     capture = (read_capture(target), np.asarray(summary["shift"], float))
 
     return capture

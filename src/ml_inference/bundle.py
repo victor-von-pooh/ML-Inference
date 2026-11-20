@@ -11,7 +11,7 @@ import torch
 import yaml
 from ml_eda import Dataset, ItemDataset, load_dataset, load_items
 from ml_eda.items import PLACEMENTS
-from ml_eda.pipeline import DATASET_FORMAT_VERSION, ITEMS_FORMAT_VERSION
+from ml_eda.pipeline import DATASET_FORMAT_VERSION, ITEMS_FORMAT_VERSIONS
 from ml_modelcontrol import build_model, dump_spec, load_spec
 
 from ml_inference.conclude import check_rules, plain
@@ -1031,14 +1031,14 @@ def check_items_bundle(bundle: Bundle) -> None:
         版 2 のデータセットの一式が items を持たない場合と, その逆, 出力
         の形や項目が合わない場合
     """
-    # 版 2 のデータセット と items と版 4 は組
+    # 版 2 と 3 のデータセット と items と版 4 は組
     info = bundle.info
     items = info.get("items")
     data_version = bundle.dataset.info.get("format_version")
-    if (data_version == ITEMS_FORMAT_VERSION) != (items is not None):
+    if (data_version in ITEMS_FORMAT_VERSIONS) != (items is not None):
         raise ValueError(
-            "版 2 のデータセットの一式には items が要り, 版 1 のデータセット"
-            "の一式は items を持てません"
+            "版 2 と 3 のデータセットの一式には items が要り, 版 1 のデータ"
+            "セットの一式は items を持てません"
         )
     if items is None and info.get("format_version") == BUNDLE_FORMAT_VERSION:
         raise ValueError(
@@ -1119,13 +1119,14 @@ def read_dataset(
     path: Path
         dataset.yaml (と版 1 は recipe.yaml) を持つディレクトリ
     frames: bool
-        分割の表 (版 2 は件の表) も読むか (一式の中の写しには表が無い)
+        分割の表 (版 2 と 3 は件の表) も読むか (一式の中の写しには表が
+        無い)
 
     Returns
     ----------
     dataset: Union[Dataset, ItemDataset]
-        データセット (表まで読む版 2 は ItemDataset. 写しは版に依らず,
-        説明だけの Dataset で, 版 2 のレシピは空)
+        データセット (表まで読む版 2 と 3 は ItemDataset. 写しは版に
+        依らず, 説明だけの Dataset で, 版 2 と 3 のレシピは空)
 
     Raises
     ----------
@@ -1138,13 +1139,13 @@ def read_dataset(
     info = yaml.safe_load((path / "dataset.yaml").read_text(encoding="utf-8"))
     version = info.get("format_version") if isinstance(info, dict) else None
     if frames:
-        dataset = load_items(path) if version == ITEMS_FORMAT_VERSION else (
+        dataset = load_items(path) if version in ITEMS_FORMAT_VERSIONS else (
             load_dataset(path)
         )
         return dataset
 
-    # 版 2 の写しは説明だけ (読める版と項目の置き方の確認は ML-EDA)
-    if version == ITEMS_FORMAT_VERSION:
+    # 版 2 と 3 の写しは説明だけ (読める版と項目の置き方の確認は ML-EDA)
+    if version in ITEMS_FORMAT_VERSIONS:
         check_entries(info)
         dataset = Dataset(path=path, info=info, frames={}, recipe={})
         return dataset
@@ -1154,8 +1155,9 @@ def read_dataset(
     if not isinstance(version, int) or version > DATASET_FORMAT_VERSION:
         raise ValueError(
             f"format_version {version} のデータセットは, 入っている ML-EDA "
-            f"(版 {DATASET_FORMAT_VERSION} と {ITEMS_FORMAT_VERSION} まで) "
-            "では読めません"
+            f"(版 {DATASET_FORMAT_VERSION} と "
+            f"{' と '.join(str(v) for v in ITEMS_FORMAT_VERSIONS)}) では"
+            "読めません"
         )
     file = inside(path, str(info.get("recipe", "recipe.yaml")))
     recipe = yaml.safe_load(file.read_text(encoding="utf-8"))
