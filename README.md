@@ -22,7 +22,7 @@ pip install torch --index-url https://download.pytorch.org/whl/cpu   # GPU を�
 pip install "ml-inference @ git+https://github.com/victor-von-pooh/ML-Inference.git"
 ```
 
-画像, Excel, parquet, 部分語の文を読む場合は `pip install "ml-inference[all] @ git+https://github.com/victor-von-pooh/ML-Inference.git"` で ML-EDA の任意の依存も入れる. ML-EDA と ML-ModelControl は各リポジトリの `main` から入る.
+ML-EDA が書き出すデータセット (pyarrow があれば parquet) を読めるように, parquet を読む pyarrow は依存に含む. 画像, Excel, 部分語の文を読む場合は `pip install "ml-inference[all] @ git+https://github.com/victor-von-pooh/ML-Inference.git"` で ML-EDA の任意の依存も入れる. ML-EDA と ML-ModelControl は各リポジトリの `main` から入る.
 
 開発する場合は, リポジトリを取ってきて入れ, `pytest` でテストする.
 

@@ -15,7 +15,7 @@ dependencies = [
     "pandas>=2.0",
     "pyyaml",
     "torch>=2.2",
-    "ml-eda @ git+https://github.com/victor-von-pooh/ML-EDA.git",
+    "ml-eda[parquet] @ git+https://github.com/victor-von-pooh/ML-EDA.git",
     "ml-modelcontrol @ git+https://github.com/victor-von-pooh/ML-ModelControl.git"
 ]
 
