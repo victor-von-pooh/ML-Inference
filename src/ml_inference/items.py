@@ -465,6 +465,38 @@ def mask_counts(
     return counts
 
 
+def restore_size(mask: np.ndarray, size: tuple[int, int]) -> np.ndarray:
+    """
+    領域を, 最も近い画素の値で元の画像の大きさに戻す関数
+
+    Parameters
+    ----------
+    mask: np.ndarray
+        予測した領域の値 (高さ, 幅)
+    size: tuple[int, int]
+        元の画像の (高さ, 幅)
+
+    Returns
+    ----------
+    restored: np.ndarray
+        元の画像の大きさの領域の値 (値を混ぜないので, mask の値だけ)
+    """
+    # 戻した画素の中心に最も近い出力の画素 (ML-EDA の書き出しが領域を
+    # そろえるのと同じ選び方. 公開の名前に無いので同じ式で)
+    height, width = int(size[0]), int(size[1])
+    rows = np.minimum(
+        ((np.arange(height) + 0.5) * mask.shape[0] / height).astype(np.int64),
+        mask.shape[0] - 1
+    )
+    columns = np.minimum(
+        ((np.arange(width) + 0.5) * mask.shape[1] / width).astype(np.int64),
+        mask.shape[1] - 1
+    )
+    restored = mask[np.ix_(rows, columns)]
+
+    return restored
+
+
 def mean_iou(counts: np.ndarray, values: list[int]) -> float:
     """
     背景 (値 0) を除くクラスの IoU の平均を求める関数

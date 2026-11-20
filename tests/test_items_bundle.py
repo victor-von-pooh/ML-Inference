@@ -10,9 +10,10 @@ from ml_eda.synthetic import write_image_masks, write_shape_captures
 from ml_modelcontrol import build_model
 
 from ml_inference import (
-    describe_bundle, infer, load_bundle, make_bundle, predict, read_result,
-    write_result
+    artifact_path, describe_bundle, infer, load_bundle, make_bundle, predict,
+    read_result, write_result
 )
+from ml_inference.items import restore_size
 
 # 画像と深度の読み書き (任意の依存. 無い環境では飛ばす)
 Image = pytest.importorskip("PIL.Image")
@@ -490,19 +491,109 @@ def test_resized_mask_bundle(tmp_path: Path) -> None:
     assert copied["format_version"] == 3
     assert copied["entries"]["image"]["steps"] == steps
 
-    # データセットの件と大きさの違う元の画像は, 同じ 12 x 16 の予測
+    # データセットの件は 12 x 16 のまま, 大きさの違う元の画像は同じ予測
+    # を元の大きさに戻したもの
     bundle = load_bundle(tmp_path / "bundle")
     by_dataset = predict(bundle, dataset)
     by_files = predict(bundle, raw["images"])
     assert (by_files["status"] == "ok").all() and len(by_files) == 12
-    for a, b in zip(by_dataset["output"], by_files["output"]):
-        assert a.shape == (12, 16) and np.array_equal(a, b)
+    for a, b, name in zip(by_dataset["output"], by_files["output"],
+                          by_files["path"]):
+        size = Image.open(Path(raw["images"]) / name).size[::-1]
+        assert a.shape == (12, 16) and b.shape == size
+        assert np.array_equal(restore_size(a, size), b)
 
     # 手順の違うデータセット (版 2) は, 黙って読まずに止める
     export_image_masks(raw["images"], raw["masks"], tmp_path / "full",
                        classes=raw["classes"], origin={"type": "synthetic"})
     with pytest.raises(ValueError, match="中身の手順が一式と違います"):
         predict(bundle, tmp_path / "full")
+
+
+def test_mask_restored_to_original_sizes(tmp_path: Path) -> None:
+    """
+    大きさの混ざった元の画像 (幅 48 高さ 40 と幅 24 高さ 32) を 32 x 32
+    にそろえた一式で, 元の画像の領域が元の大きさで返り, データセットの件
+    は 32 x 32 のまま返ることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 2 つの大きさの画像を 32 x 32 にそろえて書き出し, 一式を作る
+    raw = write_image_masks(tmp_path / "raw", count=8, seed=1,
+                            sizes=[(40, 48), (32, 24)])
+    steps = [{"op": "resize", "width": 32, "height": 32}]
+    dataset = tmp_path / "square"
+    export_image_masks(raw["images"], raw["masks"], dataset,
+                       classes=raw["classes"], origin={"type": "synthetic"},
+                       item_steps={"image": steps})
+    spec = mask_spec()
+    run = fake_run(tmp_path / "run", spec, "valid/iou",
+                   skeleton_iou(spec, dataset))
+    make_bundle(tmp_path / "bundle", spec, dataset, run)
+    bundle = load_bundle(tmp_path / "bundle")
+
+    # データセットのディレクトリの件はそろえた大きさのまま
+    by_dataset = predict(bundle, dataset)
+    assert {a.shape for a in by_dataset["output"]} == {(32, 32)}
+
+    # 元の画像は件ごとに元の (高さ, 幅). 値は領域の値だけ
+    by_files = predict(bundle, raw["images"])
+    assert (by_files["status"] == "ok").all() and len(by_files) == 8
+    shapes = set()
+    for a, b, name in zip(by_dataset["output"], by_files["output"],
+                          by_files["path"]):
+        size = Image.open(Path(raw["images"]) / name).size[::-1]
+        assert b.shape == size
+        assert np.array_equal(restore_size(a, size), b)
+        assert set(np.unique(b)) <= {0, 1, 2}
+        shapes.add(b.shape)
+    assert shapes == {(40, 48), (32, 24)}
+
+    # 結果の artifacts/ にも元の大きさで書く
+    write_result(infer(bundle, raw["images"]), tmp_path / "result")
+    table = read_result(tmp_path / "result")["frame"]
+    for output, relative in zip(by_files["output"], table["artifact"]):
+        stored = np.load(artifact_path(tmp_path / "result", relative))
+        assert np.array_equal(stored, output)
+
+
+def test_restore_size_nearest() -> None:
+    """
+    領域を元の大きさに戻すとき, 戻した画素の中心に最も近い出力の画素の
+    値だけを使うことを確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 2 倍は画素の繰り返し, 同じ大きさはそのまま
+    mask = np.array([[0, 1], [2, 3]], dtype=np.int64)
+    expected = np.repeat(np.repeat(mask, 2, axis=0), 2, axis=1)
+    assert np.array_equal(restore_size(mask, (4, 4)), expected)
+    assert np.array_equal(restore_size(mask, (2, 2)), mask)
+
+    # 割り切れない大きさも, 戻した画素の中心を含む出力の画素の値
+    rng = np.random.default_rng(0)
+    grid = rng.integers(0, 3, size=(32, 32)).astype(np.int64)
+    for height, width in [(40, 48), (32, 24), (7, 5), (33, 31)]:
+        ours = restore_size(grid, (height, width))
+        assert ours.shape == (height, width) and ours.dtype == np.int64
+        for r in range(height):
+            for c in range(width):
+                row = int((r + 0.5) * 32 // height)
+                column = int((c + 0.5) * 32 // width)
+                assert ours[r, c] == grid[row, column]
 
 
 def test_resized_cloud_bundle(tmp_path: Path) -> None:
