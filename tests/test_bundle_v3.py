@@ -31,7 +31,7 @@ from ml_inference.procedures import (
 # 出どころの重みを作る乱数の種 (入れ替わった出どころを試すため変える)
 SOURCE = {"seed": 1}
 
-# 版 3 で足した項目
+# 版 3 だけが持つ項目
 ADDED = ("role", "output", "target", "procedure")
 
 
