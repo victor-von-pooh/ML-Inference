@@ -1,5 +1,6 @@
 from importlib import metadata
 
+from ml_inference.baseline import BASELINE_TYPES, current_from_baseline
 from ml_inference.bundle import (
     BUNDLE_FORMAT_VERSION, FORMS, ROLES, Bundle, load_bundle, make_bundle
 )
@@ -18,6 +19,7 @@ from ml_inference.remeasure import remeasure, restore_uncertainty
 from ml_inference.result import (
     RESULT_FORMAT_VERSION, artifact_path, infer, read_result, write_result
 )
+from ml_inference.samples import make_sample_bundle
 from ml_inference.units import UnregisteredUnitError, register_units
 
 try:
@@ -26,6 +28,7 @@ except metadata.PackageNotFoundError:
     __version__ = "0.0.0"
 
 __all__ = [
+    "BASELINE_TYPES",
     "BUNDLE_FORMAT_VERSION",
     "Bundle",
     "FORMS",
@@ -42,6 +45,7 @@ __all__ = [
     "check_decision",
     "check_rules",
     "conclude",
+    "current_from_baseline",
     "decide",
     "describe_bundle",
     "explain",
@@ -51,6 +55,7 @@ __all__ = [
     "load_bundle",
     "make_bundle",
     "make_generator",
+    "make_sample_bundle",
     "predict",
     "read_result",
     "register_procedure",

@@ -8,7 +8,8 @@
 - **予測**: 新しいデータに学習のときと同じ前処理をかけて推論し, クラスの名前と確率, 元の単位の値で返す. 予測できない行 (前処理の後に欠損がある, 中身を読めない) は理由を付けて飛ばす. 領域, 点群, ベクトル, 文などの出力と, 拡散のサンプリングのような繰り返しの手順も扱う
 - **結論**: 確信の低いものを保留にする, 決めた確率で陽性を決める, 値を帯に分ける, 列の値ごとにまとめる. 全体のまとめを日本語の文でも返す
 - **何段も先の予測と列の効き**: 予測した値を次の入力に使って先の行を埋める. どの列が予測を動かしているかを並べ替えで求める
-- **意思決定**: 予測から次の行動 (量, 選ぶ対象, 人が確かめる対象) と見込みの得と損を出し, 過去のデータでたどり直して比べる. 新しい実績で外れ方を測り直す
+- **意思決定**: 予測から次の行動 (量, 選ぶ対象, 人が確かめる対象) と見込みの得と損を出し, 過去のデータでたどり直して, 素朴なやり方と今のやり方 (問題の設定と同じ決まりでも書ける) と比べる. 新しい実績で外れ方を測り直す
+- **見本の一式**: 表か文のデータから小さなモデルをその場で学習し, 画面で操作を試すための一式を作る
 
 前処理は [ML-EDA](https://github.com/victor-von-pooh/ML-EDA), モデルの組み立ては [ML-ModelControl](https://github.com/victor-von-pooh/ML-ModelControl) を使い, [ML-Found](https://github.com/victor-von-pooh/ML-Found) で学習した重みを読む.
 
@@ -175,6 +176,19 @@ print(backtest("bundles/sales", "last_month.csv", decision)["sentences"])
 | `select` | 引き止め, 営業先, 点検 | `positive`, `value` (当たりの価値), `cost` (行動の費用), `effect` (行動で防げる割合. 仮定), `effect_kind` (`uplift` なら `effect` は 行動したとき − しないときの当たりの確率), `effect_goal` (`uplift` の向き. `reduce` か `raise`), `budget` か `budget_cost` |
 | `triage` | 人が確かめる, 再検査 | `positive`, `miss_cost` (見逃しの損), `false_alarm_cost` (空振りの損), `capacity` (回せる件数) |
 
+今のやり方 (`current`) は列の名前か, 問題の設定 (ML-Quest) と同じ決まりで書く. 決まりなら, たどり直しが行ごとの値を作って比べる (`current_from_baseline` で列だけを作ることもできる. DESIGN の「今のやり方を決まりで書く」).
+
+```python
+from ml_inference import backtest, current_from_baseline
+
+# 今のやり方: 同じ店の 7 日前と同じ量を置く (問題の設定の action.current と同じ形)
+rule = {"type": "lag", "periods": 7, "time": "date", "by": ["store"]}
+decision = {"type": "quantity", "under_cost": 3, "over_cost": 1, "current": rule}
+print(backtest("bundles/sales", "last_month.csv", decision)["sentences"])
+
+now = current_from_baseline(frame, rule, target="sales")   # 行ごとの今のやり方の量
+```
+
 損得の値は数か, 予測の表の列の名前. 文は「書いた損得と外れ方の記録が正しいとすれば」の前提を先に述べるので, 実際の差は `backtest` で確かめる. 値段を変える判断は扱わない (DESIGN の「意思決定」).
 
 新しい実績が貯まったら, その実績で外れ方を測り直して一式に書き戻す (`restore_uncertainty` で戻せる. 何段も先の量には `horizon` で段ごとの外れ方も測る. DESIGN の「外れ方の測り直し」).
@@ -185,6 +199,19 @@ from ml_inference import remeasure
 result = remeasure("bundles/sales", "last_month.csv")
 print(result["sentences"])
 # ['今の記録の 80 % の幅は, 渡した実績の 606 行の 72 % を覆った (90 % の幅は 83 %). 外れ方を小さく見積もっていた', '測り直した外れ方の 80 % の幅は, 予測の 0.87 倍から 1.14 倍 (606 行で測った)']
+```
+
+### 画面で試す見本の一式
+
+表か文のデータのファイルと ML-EDA のレシピから, 小さなモデルをその場で学習して一式を作る (操作を試すためのもので, 課題のモデルではない. DESIGN の「見本の一式」).
+
+```python
+from ml_inference import make_sample_bundle
+
+recipe = {"target": "label", "task": "classification", "steps": [],
+          "split": {"method": "stratified", "valid": 0.2, "seed": 0}}
+make_sample_bundle("bundles/sample", "train.csv", recipe,
+                   conclusion={"min_confidence": 0.8})
 ```
 
 ## 文書

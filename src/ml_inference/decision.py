@@ -5,6 +5,9 @@ import numpy as np
 import pandas as pd
 from ml_eda import Data
 
+from ml_inference.baseline import (
+    BASELINE_NAME, baseline_text, check_baseline, current_from_baseline
+)
 from ml_inference.bundle import Bundle, load_bundle
 from ml_inference.conclude import is_number, plain
 from ml_inference.predict import lag_settings, predict
@@ -257,12 +260,52 @@ def check_decision(
             value != int(value)
         ):
             errors.append(f"{name} は件数なので整数にしてください")
-    current = decision.get("current")
-    if current is not None and not isinstance(current, str):
-        errors.append("current は今のやり方の列の名前にしてください")
-    elif with_current and current is not None and columns is not None and (
-        current not in columns
-    ):
+    errors += check_current(
+        decision.get("current"), kind, columns if with_current else None
+    )
+
+    return errors
+
+
+def check_current(
+    current: Any, kind: str, columns: Optional[list[str]]
+) -> list[str]:
+    """
+    今のやり方 (current) の誤りを一覧で返す関数
+
+    Parameters
+    ----------
+    current: Any
+        列の名前か, 今のやり方の決まり (辞書)
+    kind: str
+        意思決定の型
+    columns: Optional[list[str]]
+        予測の表の列 (渡すと, 列があるかも確かめる)
+
+    Returns
+    ----------
+    errors: list[str]
+        誤りの一覧 (無ければ空)
+    """
+    # 列の名前か決まり. k 期前と平均は量を決める型だけ (行動したかは
+    # 前の期の値から作れない)
+    errors: list[str] = []
+    if current is None:
+        return errors
+    if isinstance(current, dict):
+        errors = [f"current: {message}"
+                  for message in check_baseline(current, columns)]
+        if current.get("type") in ("lag", "mean") and kind != "quantity":
+            errors.append(
+                "current の k 期前と平均 (lag, mean) は量を決める型"
+                " (quantity) だけに使えます. 行動したかは列で書いて"
+                "ください"
+            )
+        return errors
+    if not isinstance(current, str):
+        errors.append("current は今のやり方の列の名前か決まり (辞書) に"
+                      "してください")
+    elif columns is not None and current not in columns:
         errors.append(f"current の列 {current} が予測の表にありません")
 
     return errors
@@ -1295,7 +1338,8 @@ def acted_flags(column: pd.Series) -> np.ndarray:
 
 
 def policies_of(
-    kind: str, part: pd.DataFrame, decision: dict
+    kind: str, part: pd.DataFrame, decision: dict,
+    current: Optional[tuple[str, bool]] = None
 ) -> dict[str, np.ndarray]:
     """
     たどり直す方針 (この方針と素朴なやり方) ごとの行動を返す関数
@@ -1308,6 +1352,9 @@ def policies_of(
         数える行の, 行動の列を足した予測の表
     decision: dict
         意思決定の決め方
+    current: Optional[tuple[str, bool]] = None
+        今のやり方の列の名前と, 置いた後の量の列か (決まりから作った列.
+        偽なら量は足した量の列). 無ければ比べない
 
     Returns
     ----------
@@ -1326,15 +1373,18 @@ def policies_of(
                 np.round((point - stock) / step) * step, 0
             ),
         }
-        if decision.get("current"):
-            added = values_of(part, decision["current"])
-            if np.isnan(added).any():
+        if current is not None:
+            values = values_of(part, current[0])
+            if np.isnan(values).any():
                 raise ValueError(
-                    f"今のやり方の列 {decision['current']} に欠けた値か"
+                    f"今のやり方の列 {current[0]} に欠けた値か"
                     "数でない値があります (足した量を全ての行に書いて"
                     "ください)"
                 )
-            flags["今のやり方"] = stock + added
+            # 決まりの値は置いた後の量 (今ある量が多ければ足さない)
+            flags["今のやり方"] = np.maximum(values, stock) if current[1] else (
+                stock + values
+            )
         return flags
 
     # 選ぶと振り分け: 同じ上限の中での確率の高い順と, 全てと何もしない
@@ -1362,8 +1412,8 @@ def policies_of(
         if decision.get("capacity") is None:
             flags["全てを回す"] = usable
         flags["どれも回さない"] = np.zeros(len(part), dtype=bool)
-    if decision.get("current"):
-        flags["今のやり方"] = acted_flags(part[decision["current"]])
+    if current is not None:
+        flags["今のやり方"] = acted_flags(part[current[0]])
 
     return flags
 
@@ -1527,6 +1577,71 @@ def group_labels(
     return result
 
 
+def current_column(
+    bundle: Bundle, table: pd.DataFrame, current: Any, keep: np.ndarray
+) -> tuple[pd.DataFrame, Optional[tuple[str, bool]], np.ndarray]:
+    """
+    たどり直しで比べる今のやり方の列を, 予測の表から選ぶか決まりから作る
+    関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+    table: pd.DataFrame
+        全ての行の予測の表
+    current: Any
+        今のやり方の列の名前か決まり (無ければ None)
+    keep: np.ndarray
+        数える行の印
+
+    Returns
+    ----------
+    result: tuple[pd.DataFrame, Optional[tuple[str, bool]], np.ndarray]
+        (決まりから作った列を足した) 予測の表, 今のやり方の列の名前と
+        置いた後の量の列か (無ければ None), 今のやり方の値が無いので
+        数えない行の印
+
+    Raises
+    ----------
+    ValueError
+        今のやり方の列が無い場合と, 決まりから作れない場合
+    """
+    # 列の名前 (決まりの column も同じ)
+    dropped = np.zeros(len(table), dtype=bool)
+    if not current:
+        return table, None, dropped
+    if isinstance(current, dict) and current.get("type") == "column":
+        current = current.get("column")
+    if not isinstance(current, dict):
+        if current not in table.columns:
+            raise ValueError(f"今のやり方の列 {current} が過去のデータに"
+                             "ありません")
+        result = (table, (str(current), False), dropped)
+        return result
+
+    # k 期前と平均: 時刻と系列を分ける列を省いた決まりは一式の過去の値の
+    # 手順から補い, 全ての行で求めて (前の期の値のため), 値の無い数える
+    # 行は除く
+    rule = dict(current)
+    settings = lag_settings(bundle)
+    if "time" not in rule and len(settings["time"]) == 1:
+        rule["time"] = next(iter(settings["time"]))
+    if "by" not in rule:
+        rule["by"] = sorted(settings["by"])
+    values = current_from_baseline(
+        table, rule, bundle.dataset.info.get("target")
+    )
+    name = BASELINE_NAME
+    while name in table.columns:
+        name = f"_{name}"
+    table = table.assign(**{name: values.to_numpy()})
+    dropped = keep & values.isna().to_numpy()
+    result = (table, (name, True), dropped)
+
+    return result
+
+
 def backtest(
     bundle: Union[str, Path, Bundle],
     source: Union[str, Path, pd.DataFrame, Data], decision: dict,
@@ -1544,7 +1659,8 @@ def backtest(
     source: Union[str, Path, pd.DataFrame, Data]
         目的の列を持つ過去のデータ
     decision: dict
-        意思決定の決め方
+        意思決定の決め方 (current は今のやり方の列の名前か決まり.
+        決まりなら全ての行で値を作り, 値の無い行は数えない)
     options: Optional[dict] = None
         読み込みの設定
     count: Optional[Any] = None
@@ -1583,6 +1699,9 @@ def backtest(
     if not isinstance(bundle, Bundle):
         bundle = load_bundle(bundle)
     bundle.require_column("たどり直し")
+    errors = check_decision(decision, bundle, with_current=False)
+    if errors:
+        raise ValueError("意思決定の決め方の誤り: " + " / ".join(errors))
     table = predict(bundle, source, options)
     target = bundle.dataset.info.get("target")
     if target not in table.columns:
@@ -1595,10 +1714,12 @@ def backtest(
     if not keep.any():
         raise ValueError("たどり直せる行 (予測し, 目的の値が分かる行) が"
                          "ありません")
-    current = decision.get("current")
-    if current is not None and current not in table.columns:
-        raise ValueError(f"今のやり方の列 {current} が過去のデータに"
-                         "ありません")
+    table, current, dropped = current_column(
+        bundle, table, decision.get("current"), keep
+    )
+    keep &= ~dropped
+    if not keep.any():
+        raise ValueError("今のやり方の値のある, たどり直せる行がありません")
     decided = decide(bundle, table[keep].reset_index(drop=True), decision)
     frame, decision = decided["frame"], decided["decision"]
     acted = frame["action"].notna().to_numpy()
@@ -1616,7 +1737,7 @@ def backtest(
     ).to_numpy()
     rows = {
         name: realized(kind, flag, part, decision, actual)
-        for name, flag in policies_of(kind, part, decision).items()
+        for name, flag in policies_of(kind, part, decision, current).items()
     }
     policies = {name: float(values.sum()) for name, values in rows.items()}
     gaps = {
@@ -1655,6 +1776,14 @@ def backtest(
         sentences.append(
             "得は行動の効果の仮定のもとでの値 (行動しなかった過去の結果"
             "しか分からないため)"
+        )
+    rule = decision.get("current")
+    if isinstance(rule, dict) and rule.get("type") != "column":
+        sentences.append(
+            f"今のやり方は, 決まり ({baseline_text(rule)}) から作った"
+            + (f". 今のやり方の値が無い {int(dropped.sum()):,} 行 (前の期の"
+               "値が無い始めの行など) は, どの方針でも数えない"
+               if dropped.any() else "")
         )
     result = {
         "rows": int(len(part)),
