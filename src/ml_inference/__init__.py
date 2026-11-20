@@ -1,6 +1,8 @@
 from importlib import metadata
 
-from ml_inference.baseline import BASELINE_TYPES, current_from_baseline
+from ml_inference.baseline import (
+    BASELINE_TYPES, check_baseline, current_from_baseline
+)
 from ml_inference.bundle import (
     BUNDLE_FORMAT_VERSION, FORMS, ROLES, Bundle, load_bundle, make_bundle
 )
@@ -42,6 +44,7 @@ __all__ = [
     "UnregisteredUnitError",
     "artifact_path",
     "backtest",
+    "check_baseline",
     "check_decision",
     "check_rules",
     "conclude",
