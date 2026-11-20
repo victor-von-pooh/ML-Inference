@@ -4,9 +4,10 @@ from typing import Any, Optional, Union
 import numpy as np
 import pandas as pd
 import torch
-from ml_eda import Data, load_data
+from ml_eda import Data, ItemSplit, load_data, load_items
 
 from ml_inference.bundle import Bundle, load_bundle
+from ml_inference.items import captured, prepare_item, work_directory
 from ml_inference.procedures import (
     get_procedure, make_generator, run_procedure, start_noise
 )
@@ -25,6 +26,15 @@ ARRAY_FORMS = ("mask", "point_cloud", "vector", "image")
 
 # 繰り返しの手順の中身と時刻の入力 (データからは作らない入力)
 STEP_SOURCES = ("state", "time")
+
+# 版 2 のデータセットの入力の項目の種類ごとの, 元のファイルの読み込み
+ITEM_LOADERS = {
+    "image": "image_folder", "capture": "capture",
+    "point_cloud": "pointcloud",
+}
+
+# 元の撮影に足した正規化の平行移動の列
+SHIFT_COLUMNS = ("shift_x", "shift_y", "shift_z")
 
 
 def lag_settings(bundle: Bundle) -> dict:
@@ -876,6 +886,10 @@ def decode_mask(bundle: Bundle, outputs: np.ndarray) -> dict:
             "領域の出力は (件数, クラスの数, 高さ, 幅) か (件数, 高さ, 幅) "
             f"にしてください (今は {tuple(outputs.shape)})"
         )
+    # 版 2 のデータセットの一式は, クラスの番号を領域の値に
+    values = getattr(bundle, "mask_values", None)
+    if values:
+        masks = np.asarray(values, dtype=np.int64)[masks.astype(np.int64)]
     columns = {"output": [m.astype(np.int64) for m in masks]}
 
     return columns
@@ -1056,11 +1070,15 @@ def predict(
     ValueError
         前処理できない場合と, 出力の形が合わない場合
     """
-    # データの読み込みと, 種類に合わせた中身
+    # データの読み込みと, 種類に合わせた中身 (版 2 のデータセットの一式は
+    # 1 件の扱いで)
     if batch_size < 1:
         raise ValueError("batch_size は 1 以上にしてください")
     if not isinstance(bundle, Bundle):
         bundle = load_bundle(bundle)
+    if bundle.from_items:
+        result = predict_items(bundle, source, batch_size, device)
+        return result
     data = read_source(bundle, source, options)
     count = len(data.frame)
     sources: dict = {}
@@ -1264,18 +1282,20 @@ def describe_bundle(bundle: Union[str, Path, Bundle]) -> dict:
         前処理の手順, モデルの入力, 実験, 結論の既定値, 何段も先まで
         予測できるか, 実験の記録との比べ, 外れ方の記録の要約, 注意
     """
-    # 画面が一式を選ぶときに要ること
+    # 画面が一式を選ぶときに要ること (版 2 のデータセットの target は
+    # 正解の種類の辞書なので, 目的の列の名前は無し)
     if not isinstance(bundle, Bundle):
         bundle = load_bundle(bundle)
     info = bundle.info
     dataset = bundle.dataset.info
+    column = dataset.get("target")
     description: dict[str, Any] = {
         "path": str(bundle.path),
         "name": info.get("name"),
         "created_at": info.get("created_at"),
         "kind": bundle.kind,
         "task": bundle.task,
-        "target": dataset.get("target"),
+        "target": column if isinstance(column, str) else None,
         "classes": bundle.classes,
         "features": [item["name"] for item in dataset.get("features", [])],
         "text_column": dataset.get("text_column"),
@@ -1313,9 +1333,36 @@ def describe_bundle(bundle: Union[str, Path, Bundle]) -> dict:
         "pretrained_warnings": list(
             bundle.cache.get("pretrained_warnings") or []
         ),
+        "items": items_of_bundle(bundle),
     }
 
     return description
+
+
+def items_of_bundle(bundle: Bundle) -> Optional[dict]:
+    """
+    版 2 のデータセットの一式の 1 件の扱いを, 説明の形で返す関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+
+    Returns
+    ----------
+    items: Optional[dict]
+        items の欄と入力の項目の種類 (input_kind). 版 1 のデータセットの
+        一式は None
+    """
+    # 画面が入力の選び方 (画像か撮影か点群か) を決めるため
+    if not bundle.from_items:
+        return None
+    entries = bundle.dataset.info.get("entries") or {}
+    found = bundle.info["items"]
+    items = {**found,
+             "input_kind": (entries.get(found["input"]) or {}).get("kind")}
+
+    return items
 
 
 def target_of(bundle: Bundle) -> Optional[dict]:
@@ -1340,3 +1387,349 @@ def target_of(bundle: Bundle) -> Optional[dict]:
     target = {"kind": "column"}
 
     return target
+
+
+def infer_arrays(
+    bundle: Bundle, arrays: list, batch_size: int, device: str
+) -> tuple[list, np.ndarray]:
+    """
+    件ごとの入力の配列を, 形ごとにまとめて推論して読む関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        版 2 のデータセットの一式
+    arrays: list
+        件ごとのモデルの入力の配列 (大きさの違う画像も混ざってよい)
+    batch_size: int
+        1 回に渡す件数
+    device: str
+        使うデバイス
+
+    Returns
+    ----------
+    result: tuple[list, np.ndarray]
+        件ごとの出力 (出力の形で読んだもの. 渡した順) と, 件ごとにモデル
+        の出力が全て数か
+    """
+    # 同じ形の件をまとめて推論 (大きさの違う画像を 1 つに積めないため)
+    groups: dict = {}
+    for index, array in enumerate(arrays):
+        groups.setdefault(tuple(np.shape(array)), []).append(index)
+    outputs: list = [None] * len(arrays)
+    finite = np.ones(len(arrays), dtype=bool)
+    for indexes in groups.values():
+        stacked = np.stack([np.asarray(arrays[i]) for i in indexes])
+        tensors = shape_inputs(bundle, {"items": stacked}, len(indexes))
+        raw = run_model(bundle, tensors, batch_size, device)
+        decoded = decode(bundle, raw)["output"]
+        ok = finite_raw(raw)
+        for position, index in enumerate(indexes):
+            outputs[index] = decoded[position]
+            finite[index] = bool(ok[position]) and bool(
+                np.isfinite(decoded[position]).all()
+            )
+    result = (outputs, finite)
+
+    return result
+
+
+def item_rows(
+    bundle: Bundle, source: Union[str, Path]
+) -> tuple[pd.DataFrame, list, Optional[np.ndarray], list]:
+    """
+    版 2 のデータセットの一式で推論するデータを読み, 件ごとの入力を返す
+    関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        版 2 のデータセットの一式
+    source: Union[str, Path]
+        版 2 のデータセットのディレクトリか, 入力の項目と同じ種類の元の
+        ファイル (画像, 撮影, 点群) の場所
+
+    Returns
+    ----------
+    rows: tuple[pd.DataFrame, list, Optional[np.ndarray], list]
+        元の列の表, 件ごとのモデルの入力 (扱えなかった件は None), 件ごと
+        の正規化の平行移動 ((件数, 3). 戻さない一式は None), 件ごとの
+        予測できない理由
+
+    Raises
+    ----------
+    ValueError
+        場所でない場合, 無い場合, 読めない場合, データセットに入力の項目
+        が無い場合
+    """
+    # 場所だけ (表と ML-EDA の Data は 1 件の扱いを決められない)
+    if not isinstance(source, (str, Path)):
+        raise ValueError(
+            "版 2 のデータセットの一式には, 版 2 のデータセットか元の"
+            "ファイルの場所を渡してください"
+        )
+    path = Path(source).expanduser()
+    if not path.exists():
+        raise ValueError(f"{path} がありません")
+    if (path / "dataset.yaml").is_file():
+        rows = dataset_rows(bundle, path)
+        return rows
+    rows = raw_rows(bundle, path)
+
+    return rows
+
+
+def dataset_rows(
+    bundle: Bundle, path: Path
+) -> tuple[pd.DataFrame, list, Optional[np.ndarray], list]:
+    """
+    版 2 のデータセットの全ての件に, 学習と同じ扱いをかける関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        版 2 のデータセットの一式
+    path: Path
+        版 2 のデータセットのディレクトリ
+
+    Returns
+    ----------
+    rows: tuple[pd.DataFrame, list, Optional[np.ndarray], list]
+        件の表, 件ごとの入力, 件ごとの平行移動, 件ごとの理由
+
+    Raises
+    ----------
+    ValueError
+        入力の項目が無いか種類が違う場合
+    """
+    # 入力の項目は一式と同じ名前と種類
+    items = bundle.info["items"]
+    dataset = load_items(path)
+    name = items["input"]
+    expected = bundle.dataset.info["entries"][name].get("kind")
+    found = (dataset.entries.get(name) or {}).get("kind")
+    if found != expected:
+        raise ValueError(
+            f"データセットに入力の項目 {name} (種類 {expected}) がありません"
+        )
+    frame = dataset.items.reset_index(drop=True)
+    part = ItemSplit(root=dataset.path, entries={name: dataset.entries[name]},
+                     rows=frame)
+
+    # 撮影は正規化した後なので, 表の列の平行移動で戻す
+    shifts = None
+    if items.get("restore") == "shift":
+        columns = list((dataset.info.get("normalization") or {}).get(
+            "columns"
+        ) or [])
+        if len(columns) != 3 or any(c not in frame for c in columns):
+            raise ValueError("データセットの表に正規化の平行移動の列が"
+                             "ありません")
+        shifts = frame[columns].to_numpy(dtype=np.float64)
+    arrays, reasons = [], []
+    for index in range(len(frame)):
+        array, reason = prepared(bundle, part, index)
+        arrays.append(array)
+        reasons.append(reason)
+    rows = (frame, arrays, shifts, reasons)
+
+    return rows
+
+
+def prepared(
+    bundle: Bundle, part: Any, index: int
+) -> tuple[Optional[np.ndarray], str]:
+    """
+    1 件を読んで学習と同じ扱いをかけ, 扱えなければ理由を返す関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        版 2 のデータセットの一式
+    part: Any
+        番号で 1 件 (辞書) か中身を返す並び (ItemSplit か読み込みの関数)
+    index: int
+        件の位置
+
+    Returns
+    ----------
+    result: tuple[Optional[np.ndarray], str]
+        モデルの入力 (扱えなければ None) と理由 (扱えれば空)
+    """
+    # 読めない件, 扱えない件, 画像のチャンネルの数が違う件は飛ばす
+    items = bundle.info["items"]
+    try:
+        content = part[index]
+        if isinstance(part, ItemSplit):
+            content = content[items["input"]]
+        array, _ = prepare_item(items, content, index)
+    except Exception as error:
+        result = (None, f"中身を読めません ({error})")
+        return result
+    shape = bundle.dataset.info["entries"][items["input"]].get("shape")
+    channels = shape[2] if isinstance(shape, list) and len(shape) == 3 else (
+        None
+    )
+    if items["prepare"] == "image" and isinstance(channels, int) and (
+        array.shape[0] != channels
+    ):
+        result = (None, f"画像のチャンネルの数が {array.shape[0]} で, 学習の"
+                        f" {channels} と違います")
+        return result
+    result = (array, "")
+
+    return result
+
+
+def raw_rows(
+    bundle: Bundle, path: Path
+) -> tuple[pd.DataFrame, list, Optional[np.ndarray], list]:
+    """
+    元のファイル (画像, 撮影, 点群) を読み, 学習と同じ扱いをかける関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        版 2 のデータセットの一式
+    path: Path
+        元のファイルかディレクトリ
+
+    Returns
+    ----------
+    rows: tuple[pd.DataFrame, list, Optional[np.ndarray], list]
+        読み込みの表, 件ごとの入力, 件ごとの平行移動, 件ごとの理由
+
+    Raises
+    ----------
+    ValueError
+        入力の項目の種類の読み込みで読めない場合
+    """
+    # 入力の項目の種類の読み込み
+    items = bundle.info["items"]
+    kind = bundle.dataset.info["entries"][items["input"]].get("kind")
+    try:
+        data = load_data(path, loader=ITEM_LOADERS[kind])
+    except Exception as error:
+        raise ValueError(f"{path.name} を読めません ({error})") from error
+    frame = data.frame.reset_index(drop=True)
+    if kind != "capture":
+        arrays, reasons = [], []
+        for index in range(len(frame)):
+            array, reason = prepared(bundle, ItemReader(data, kind), index)
+            arrays.append(array)
+            reasons.append(reason)
+        rows = (frame, arrays, None, reasons)
+        return rows
+
+    # 撮影は学習と同じ正規化をかけて (一時の場所に写して) 読み, 足した
+    # 量を表に残す
+    normalize = bool(bundle.dataset.info.get("normalization"))
+    root = Path(data.source["root"])
+    shifts = np.full((len(frame), 3), np.nan)
+    arrays, reasons = [], []
+    with work_directory() as work:
+        for index in range(len(frame)):
+            try:
+                capture, shift = captured(
+                    root / str(frame["path"].iloc[index]), normalize,
+                    Path(work), f"{index:06d}"
+                )
+            except Exception as error:
+                arrays.append(None)
+                reasons.append(f"撮影を読めません ({error})")
+                continue
+            shifts[index] = shift
+            array, reason = prepared(bundle, {index: capture}, index)
+            arrays.append(array)
+            reasons.append(reason)
+    frame = frame.copy()
+    for axis, column in enumerate(SHIFT_COLUMNS):
+        frame[column] = shifts[:, axis]
+    restore = shifts if items.get("restore") == "shift" else None
+    rows = (frame, arrays, restore, reasons)
+
+    return rows
+
+
+class ItemReader:
+    def __init__(self, data: Data, kind: str):
+        # ML-EDA で読んだデータと入力の項目の種類を保存
+        self.data = data
+        self.kind = kind
+
+    def __getitem__(self, index: int) -> Any:
+        """
+        1 件の中身を, load_items と同じ形で返す関数
+
+        Parameters
+        ----------
+        index: int
+            件の位置
+
+        Returns
+        ----------
+        content: Any
+            画像の配列か (点の数, 3) の点
+        """
+        # 点群の読み込みは辞書なので点だけ
+        content = self.data.load_item(index)
+        if self.kind == "point_cloud":
+            content = np.asarray(content["points"], dtype=np.float32)
+
+        return content
+
+
+def predict_items(
+    bundle: Bundle, source: Union[str, Path], batch_size: int, device: str
+) -> pd.DataFrame:
+    """
+    版 2 のデータセットの一式で, 件ごとの予測を返す関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        版 2 のデータセットの一式
+    source: Union[str, Path]
+        版 2 のデータセットか元のファイルの場所
+    batch_size: int
+        1 回に渡す件数
+    device: str
+        使うデバイス
+
+    Returns
+    ----------
+    result: pd.DataFrame
+        元の列と, status, reason, output (領域の値か, 元の座標の点) の列
+    """
+    # 読んで扱いをかけ, 扱えた件だけ推論
+    frame, arrays, shifts, reasons = item_rows(bundle, source)
+    count = len(frame)
+    keep = np.array([not r for r in reasons], dtype=bool)
+    outputs: list = [None] * count
+    if keep.any():
+        rows = np.flatnonzero(keep)
+        decoded, finite = infer_arrays(
+            bundle, [arrays[i] for i in rows], batch_size, device
+        )
+        for row, output, ok in zip(rows, decoded, finite):
+            if not ok:
+                reasons[row] = NOT_FINITE
+                keep[row] = False
+                continue
+            # 点群は正規化の平行移動を引いて元の座標に
+            if shifts is not None:
+                output = output - shifts[row].astype(np.float32)
+            outputs[row] = output
+
+    # 元の列に予測の列を並べる (予測の列と同じ名前の元の列は「(入力)」)
+    result = frame.copy()
+    result.columns = [str(c) for c in result.columns]
+    added = {"status", "reason", "decision", "output", "artifact"}
+    result = result.rename(
+        columns={c: f"{c} (入力)" for c in result.columns if c in added}
+    )
+    result["status"] = np.where(keep, OK, SKIPPED)
+    result["reason"] = reasons
+    result["output"] = pd.Series(outputs, dtype=object)
+
+    return result

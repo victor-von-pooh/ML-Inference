@@ -9,11 +9,13 @@ import warnings
 import numpy as np
 import torch
 import yaml
-from ml_eda import Dataset, load_dataset
-from ml_eda.pipeline import DATASET_FORMAT_VERSION
+from ml_eda import Dataset, ItemDataset, load_dataset, load_items
+from ml_eda.items import PLACEMENTS
+from ml_eda.pipeline import DATASET_FORMAT_VERSION, ITEMS_FORMAT_VERSION
 from ml_modelcontrol import build_model, dump_spec, load_spec
 
 from ml_inference.conclude import check_rules, plain
+from ml_inference.items import ITEM_FORMS, PREPARE_KINDS, check_items
 from ml_inference.procedures import get_procedure, option_names
 from ml_inference.units import check_units
 from ml_inference.weights import (
@@ -21,14 +23,16 @@ from ml_inference.weights import (
     state_hash
 )
 
-# 推論の一式の形の版
-BUNDLE_FORMAT_VERSION = 3
+# 推論の一式の形の版 (版 4 は版 2 のデータセットの一式だけ. 版 1 の
+# データセットの一式は版 3 で書く)
+BUNDLE_FORMAT_VERSION = 4
+COLUMN_BUNDLE_VERSION = 3
 
 # inference.yaml の一番上の項目
 TOP_KEYS = (
     "format_version", "name", "created_at", "role", "output", "target",
     "procedure", "model", "inputs", "dataset", "run", "conclusion",
-    "decision", "check", "uncertainty", "notes"
+    "decision", "check", "uncertainty", "notes", "items"
 )
 
 # 出力の扱い方
@@ -81,7 +85,13 @@ CHECK_BATCH = 256
 CHECK_TOLERANCE = 0.02
 
 # 実験の監視した指標の名前 (/ の後) から, 比べられる指標
-METRIC_NAMES = {"acc": "acc", "accuracy": "acc", "mae": "mae"}
+METRIC_NAMES = {
+    "acc": "acc", "accuracy": "acc", "mae": "mae", "iou": "iou",
+    "chamfer": "chamfer",
+}
+
+# 版 2 のデータセットの一式の, 出力の形ごとの確かめの指標
+ITEM_METRICS = {"mask": "iou", "point_cloud": "chamfer"}
 
 
 @dataclass
@@ -149,10 +159,51 @@ class Bundle:
         kind: str
             table, timeseries, image, text, pointcloud
         """
-        # データセットの説明の kind
+        # 版 2 のデータセットの一式はファイルの組
+        if self.from_items:
+            kind = "items"
+            return kind
         kind = str(self.dataset.info.get("kind", "table"))
 
         return kind
+
+    @property
+    def from_items(self) -> bool:
+        """
+        版 2 のデータセットの一式かを返す関数
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        ----------
+        items: bool
+            items (1 件の扱い) を持つ一式なら True
+        """
+        # 版 4 の items の有無
+        items = self.info.get("items") is not None
+
+        return items
+
+    @property
+    def mask_values(self) -> Optional[list[int]]:
+        """
+        領域のクラスの番号ごとの領域の値を返す関数
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        ----------
+        values: Optional[list[int]]
+            番号ごとの値 (版 2 のデータセットの領域の一式でなければ None)
+        """
+        # items の values
+        values = (self.info.get("items") or {}).get("values")
+
+        return values
 
     @property
     def role(self) -> str:
@@ -577,9 +628,13 @@ def check_info(info: Any) -> list[str]:
         ):
             errors.append(f"inputs.{name}.prepend は整数の並びにしてください")
 
-    # 版 3 の受け持ち, 出力の形, 正解, 繰り返しの手順
+    # 版 3 の受け持ち, 出力の形, 正解, 繰り返しの手順と, 版 4 の 1 件の扱い
     errors.extend(check_kinds(info))
     errors.extend(check_procedure(info.get("procedure"), info))
+    if info.get("items") is not None:
+        if isinstance(version, int) and version < 4:
+            errors.append(f"版 {version} の一式は items を持てません")
+        errors.extend(check_items(info["items"]))
 
     return errors
 
@@ -944,6 +999,7 @@ def load_bundle(path: Union[str, Path]) -> Bundle:
             f"手順 {procedure['name']} は文の番号の並びから始めるので, 文の"
             f"データセットの一式だけに使えます (今は {bundle.kind})"
         )
+    check_items_bundle(bundle)
     names = set(spec["nodes"])
     for record in info["model"].get("pretrained") or []:
         if record["node"] not in names:
@@ -955,41 +1011,151 @@ def load_bundle(path: Union[str, Path]) -> Bundle:
     return bundle
 
 
-def read_dataset(path: Path, frames: bool) -> Dataset:
+def check_items_bundle(bundle: Bundle) -> None:
+    """
+    一式の版, items, データセットの版と出力の形が食い違わないかを確かめる
+    関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        読んだ一式
+
+    Returns
+    ----------
+    None
+
+    Raises
+    ----------
+    ValueError
+        版 2 のデータセットの一式が items を持たない場合と, その逆, 出力
+        の形や項目が合わない場合
+    """
+    # 版 2 のデータセット と items と版 4 は組
+    info = bundle.info
+    items = info.get("items")
+    data_version = bundle.dataset.info.get("format_version")
+    if (data_version == ITEMS_FORMAT_VERSION) != (items is not None):
+        raise ValueError(
+            "版 2 のデータセットの一式には items が要り, 版 1 のデータセット"
+            "の一式は items を持てません"
+        )
+    if items is None and info.get("format_version") == BUNDLE_FORMAT_VERSION:
+        raise ValueError(
+            f"版 {BUNDLE_FORMAT_VERSION} の一式には items (版 2 のデータ"
+            "セットの 1 件の扱い) が要ります"
+        )
+    if items is None:
+        return
+    if info.get("format_version") != BUNDLE_FORMAT_VERSION:
+        raise ValueError(
+            f"items を持つ一式は版 {BUNDLE_FORMAT_VERSION} にしてください"
+        )
+    if bundle.form not in ITEM_FORMS:
+        raise ValueError(
+            f"版 2 のデータセットの一式の出力の形は {', '.join(ITEM_FORMS)}"
+            f" だけです (今は {bundle.form})"
+        )
+
+    # 項目の名前と種類 (データセットの写しの entries)
+    entries = bundle.dataset.info.get("entries") or {}
+    for key in ("input", "target"):
+        name = items.get(key)
+        if name is not None and name not in entries:
+            raise ValueError(
+                f"items.{key} の {name} はデータセットの項目にありません"
+            )
+    kind = entries[items["input"]].get("kind")
+    if PREPARE_KINDS[items["prepare"]] != kind:
+        raise ValueError(
+            f"扱い方 {items['prepare']} は入力の項目の種類 {kind} に使え"
+            "ません"
+        )
+    if bundle.form == "mask" and not items.get("values"):
+        raise ValueError("領域の一式の items には values が要ります")
+
+
+def check_entries(info: dict) -> None:
+    """
+    版 2 のデータセットの説明の項目が読める形かを確かめる関数
+
+    一式の写しは件の表を持たないので, load_items の代わりに説明だけを見る
+
+    Parameters
+    ----------
+    info: dict
+        版 2 の dataset.yaml の中身
+
+    Returns
+    ----------
+    None
+
+    Raises
+    ----------
+    ValueError
+        項目が無い場合と, 知らない置き方の項目がある場合
+    """
+    # 項目の辞書と置き方 (知らない置き方は読み違えないよう止まる)
+    entries = info.get("entries")
+    if not isinstance(entries, dict) or not entries:
+        raise ValueError("dataset.yaml に entries がありません")
+    for name, spec in entries.items():
+        placement = spec.get("placement") if isinstance(spec, dict) else None
+        if placement not in PLACEMENTS:
+            raise ValueError(
+                f"項目 {name} の置き方 {placement} は, 入っている ML-EDA "
+                f"では読めません ({', '.join(PLACEMENTS)} だけ)"
+            )
+
+
+def read_dataset(
+    path: Path, frames: bool
+) -> Union[Dataset, ItemDataset]:
     """
     ML-EDA のデータセットの説明とレシピを読む関数
 
     Parameters
     ----------
     path: Path
-        dataset.yaml と recipe.yaml を持つディレクトリ
+        dataset.yaml (と版 1 は recipe.yaml) を持つディレクトリ
     frames: bool
-        分割の表も読むか (一式の中の写しには表が無い)
+        分割の表 (版 2 は件の表) も読むか (一式の中の写しには表が無い)
 
     Returns
     ----------
-    dataset: Dataset
-        データセット
+    dataset: Union[Dataset, ItemDataset]
+        データセット (表まで読む版 2 は ItemDataset. 写しは版に依らず,
+        説明だけの Dataset で, 版 2 のレシピは空)
 
     Raises
     ----------
     FileNotFoundError
         dataset.yaml が無い場合
     """
-    # 表まで要る場合は ML-EDA の読み込み (版の確認も含む)
+    # 版を見て, 表まで要る場合は ML-EDA の読み込み (版の確認も含む)
     if not (path / "dataset.yaml").is_file():
         raise FileNotFoundError(f"{path} に dataset.yaml がありません")
-    if frames:
-        dataset = load_dataset(path)
-        return dataset
-
-    # 写しは説明とレシピだけ (版の確認と, レシピが外を指さないことの確認)
     info = yaml.safe_load((path / "dataset.yaml").read_text(encoding="utf-8"))
     version = info.get("format_version") if isinstance(info, dict) else None
+    if frames:
+        dataset = load_items(path) if version == ITEMS_FORMAT_VERSION else (
+            load_dataset(path)
+        )
+        return dataset
+
+    # 版 2 の写しは説明だけ (読める版と項目の置き方の確認は ML-EDA)
+    if version == ITEMS_FORMAT_VERSION:
+        check_entries(info)
+        dataset = Dataset(path=path, info=info, frames={}, recipe={})
+        return dataset
+
+    # 版 1 の写しは説明とレシピ (版の確認と, レシピが外を指さないことの
+    # 確認)
     if not isinstance(version, int) or version > DATASET_FORMAT_VERSION:
         raise ValueError(
             f"format_version {version} のデータセットは, 入っている ML-EDA "
-            f"(版 {DATASET_FORMAT_VERSION} まで) では読めません"
+            f"(版 {DATASET_FORMAT_VERSION} と {ITEMS_FORMAT_VERSION} まで) "
+            "では読めません"
         )
     file = inside(path, str(info.get("recipe", "recipe.yaml")))
     recipe = yaml.safe_load(file.read_text(encoding="utf-8"))
@@ -1024,13 +1190,15 @@ def run_summary(run_dir: Path) -> dict:
     return summary
 
 
-def bundle_notes(dataset: Dataset, run: Optional[dict]) -> list[str]:
+def bundle_notes(
+    dataset: Union[Dataset, ItemDataset], run: Optional[dict]
+) -> list[str]:
     """
     一式を作るときの注意 (戻せない変換, 学習を終えていない実験) を返す関数
 
     Parameters
     ----------
-    dataset: Dataset
+    dataset: Union[Dataset, ItemDataset]
         データセット
     run: Optional[dict]
         実験の状態 (run_summary の結果. 重みのファイルを渡した場合は None)
@@ -1057,9 +1225,10 @@ def bundle_notes(dataset: Dataset, run: Optional[dict]) -> list[str]:
         if run.get("final_weights") == "partial":
             notes.append("重みは途中で止めたエポックのものです")
 
-    # 外れ値の切り詰めは戻せない
+    # 外れ値の切り詰めは戻せない (レシピは版 1 のデータセットだけ)
     target = dataset.info.get("target")
-    for spec in dataset.recipe.get("steps", []):
+    recipe = dataset.recipe if isinstance(dataset, Dataset) else {}
+    for spec in recipe.get("steps", []):
         columns = spec.get("state", {}).get("columns") or spec.get("columns")
         columns = [columns] if isinstance(columns, str) else columns or []
         if spec["op"] == "clip" and target in columns:
@@ -1082,7 +1251,7 @@ def make_bundle(
     overwrite: bool = False, role: Optional[str] = None,
     form: Optional[str] = None, output_options: Optional[dict] = None,
     target: Optional[dict] = None, procedure: Optional[dict] = None,
-    pretrained: Optional[dict] = None
+    pretrained: Optional[dict] = None, items: Optional[dict] = None
 ) -> dict:
     """
     推論の一式を作り, 見本を推論できることを確かめる関数
@@ -1094,7 +1263,8 @@ def make_bundle(
     spec: Union[str, Path, dict]
         モデルの定義 (ML-ModelControl の形) かそのファイル
     dataset: Union[str, Path]
-        ML-EDA で書き出したデータセットのディレクトリ
+        ML-EDA で書き出したデータセットのディレクトリ (版 1 か, 版 2 の
+        ファイルの組)
     weights: Union[str, Path]
         重み (state_dict) のファイルか, ML-Found の実験のディレクトリ
         (final_model.pt を使い, 実験の状態を記録する)
@@ -1135,6 +1305,10 @@ def make_bundle(
     pretrained: Optional[dict] = None
         ノードの名前ごとの重みのライセンスの情報 (ML-ModelControl の
         pretrained_info の形). 省略すると pretrained_info で読む
+    items: Optional[dict] = None
+        版 2 のデータセットの 1 件の扱い (input, target, prepare,
+        options, values, restore. 省いた欄はデータセットから. 点を選ぶ
+        扱い方は options.points が要る)
 
     Returns
     ----------
@@ -1173,11 +1347,24 @@ def make_bundle(
     spec_dict = load_spec(spec)
     check_units(spec_dict)
     full = read_dataset(data_dir, frames=True)
-    if isinstance(target_scale, str):
-        target_scale = train_scale(full, target_scale)
-    kinds = output_fields(
-        str(full.info.get("task", "")), role, form, output_options, target
-    )
+    item_info = None
+    if isinstance(full, ItemDataset):
+        if target_scale is not None:
+            raise ValueError("版 2 のデータセットの一式に target_scale は"
+                             "使えません")
+        kinds, item_info = item_fields(
+            full, role, form, output_options, target, items
+        )
+    else:
+        if items is not None:
+            raise ValueError("items は版 2 のデータセットの一式だけに使え"
+                             "ます")
+        if isinstance(target_scale, str):
+            target_scale = train_scale(full, target_scale)
+        kinds = output_fields(
+            str(full.info.get("task", "")), role, form, output_options,
+            target
+        )
 
     # 学習済みの重みを読むノードの置き方 (無ければ丸ごとの写し)
     infos, weight_notes = lookup_pretrained(spec_dict, pretrained)
@@ -1200,17 +1387,20 @@ def make_bundle(
     try:
         dump_spec(spec_dict, writing / "model_spec.yaml")
         shutil.copy(data_dir / "dataset.yaml", writing / "dataset")
-        recipe_name = str(full.info.get("recipe", "recipe.yaml"))
-        if Path(recipe_name).name != recipe_name:
-            raise ValueError(f"レシピの名前 {recipe_name} がファイルの名前では"
-                             "ありません")
-        shutil.copy(data_dir / recipe_name, writing / "dataset" / recipe_name)
+        if item_info is None:
+            recipe_name = str(full.info.get("recipe", "recipe.yaml"))
+            if Path(recipe_name).name != recipe_name:
+                raise ValueError(f"レシピの名前 {recipe_name} がファイルの"
+                                 "名前ではありません")
+            shutil.copy(data_dir / recipe_name,
+                        writing / "dataset" / recipe_name)
         if copy_weights and kept is not None:
             torch.save(kept, writing / "final_model.pt")
         elif copy_weights:
             shutil.copy(source, writing / "final_model.pt")
         info = {
-            "format_version": BUNDLE_FORMAT_VERSION,
+            "format_version": COLUMN_BUNDLE_VERSION if item_info is None
+            else BUNDLE_FORMAT_VERSION,
             "name": name or final.name,
             "created_at": dt.datetime.now().astimezone().isoformat(),
             **kinds,
@@ -1230,6 +1420,8 @@ def make_bundle(
             "decision": plain(decision) if decision else None,
             "notes": bundle_notes(full, run) + weight_notes,
         }
+        if item_info is not None:
+            info["items"] = item_info
         (writing / "inference.yaml").write_text(
             yaml.safe_dump(info, allow_unicode=True, sort_keys=False),
             encoding="utf-8"
@@ -1257,10 +1449,14 @@ def make_bundle(
                 raise ValueError(
                     "意思決定の決め方の誤り: " + " / ".join(errors)
                 )
-        check_sample(bundle, full)
-        if bundle.column_output:
+        if bundle.from_items:
+            check_item_sample(bundle, full)
+            measure_items(bundle, full, run, info)
+        elif bundle.column_output:
+            check_sample(bundle, full)
             measure_column(bundle, full, run, info)
         else:
+            check_sample(bundle, full)
             info["check"] = None
             info["uncertainty"] = None
         (writing / "inference.yaml").write_text(
@@ -1546,14 +1742,7 @@ def check_against_run(
 
     # 監視した指標が同じで, 最終の重みがベストのときだけ記録と比べる.
     # 比べられない場合は, 値を残すだけなので少しの行で済ませる
-    monitor = str((run or {}).get("monitor") or "")
-    phase, _, name = monitor.partition("/")
-    comparable = (
-        run is not None and phase == split and len(y) <= CHECK_ROWS
-        and METRIC_NAMES.get(name) == metric
-        and run.get("final_weights") == "best"
-        and isinstance(run.get("best_value"), (int, float))
-    )
+    comparable = comparable_run(run, split, len(y), metric)
     rows = len(y) if comparable else min(len(y), CHECK_SAMPLE_ROWS)
 
     # 少しずつ推論して, 正解の数か誤差の合計だけを積み上げる
@@ -1574,14 +1763,83 @@ def check_against_run(
             answers = inverse_target(bundle, np.asarray(y[start:stop]))
             total += float(np.sum(np.abs(columns["prediction"] - answers)))
     value = total / rows
+    check = check_record(run, comparable, split, rows, metric, value)
+
+    return check
+
+
+def comparable_run(
+    run: Optional[dict], split: str, rows: int, metric: str
+) -> bool:
+    """
+    実験の記録と一式の評価を比べられるかを返す関数
+
+    Parameters
+    ----------
+    run: Optional[dict]
+        実験の状態 (run_summary の結果)
+    split: str
+        評価する分割
+    rows: int
+        分割の行 (件) の数
+    metric: str
+        一式の評価の指標 (acc, mae, iou, chamfer)
+
+    Returns
+    ----------
+    comparable: bool
+        監視した指標が同じ分割の同じ指標で, 最終の重みがベストで, 行の数
+        が上限までなら True
+    """
+    # 監視した指標の分割と名前 (<分割>/<名前>)
+    monitor = str((run or {}).get("monitor") or "")
+    phase, _, name = monitor.partition("/")
+    comparable = (
+        run is not None and phase == split and rows <= CHECK_ROWS
+        and METRIC_NAMES.get(name) == metric
+        and run.get("final_weights") == "best"
+        and isinstance(run.get("best_value"), (int, float))
+    )
+
+    return comparable
+
+
+def check_record(
+    run: Optional[dict], comparable: bool, split: str, rows: int,
+    metric: str, value: float
+) -> dict:
+    """
+    一式の評価と実験の記録の比べを, 説明の check の形にする関数
+
+    Parameters
+    ----------
+    run: Optional[dict]
+        実験の状態
+    comparable: bool
+        記録と比べられるか
+    split: str
+        評価した分割
+    rows: int
+        評価した行 (件) の数
+    metric: str
+        指標
+    value: float
+        一式で求めた値
+
+    Returns
+    ----------
+    check: dict
+        split, rows, metric, value, recorded, matches
+    """
+    # 比べられれば, 記録との差の割合が許す範囲か
     recorded, matches = None, None
-    if comparable:
+    if comparable and run is not None:
         recorded = float(run["best_value"])
         gap = abs(value - recorded) / max(abs(recorded), 1e-12)
         matches = bool(gap <= CHECK_TOLERANCE)
     check = {
-        "split": split, "rows": int(rows), "metric": metric, "value": value,
-        "recorded": recorded, "matches": matches,
+        "split": split, "rows": int(rows), "metric": metric,
+        "value": float(value), "recorded": recorded, "matches": matches,
     }
 
     return check
@@ -1609,6 +1867,296 @@ def check_note(check: dict) -> str:
         "番号 prepend, 目的の値の標準化 target_scale など) を一式に書いたか"
         "確かめてください (学習のスクリプトが指標を元の単位でない値や違う"
         "決まりで求めている場合も合いません)"
+    )
+
+    return note
+
+
+def item_fields(
+    dataset: ItemDataset, role: Optional[str], form: Optional[str],
+    options: Optional[dict], target: Optional[dict], items: Optional[dict]
+) -> tuple[dict, dict]:
+    """
+    版 2 のデータセットから, 一式の受け持ち, 出力の形, 正解, 1 件の扱いを
+    決める関数
+
+    Parameters
+    ----------
+    dataset: ItemDataset
+        版 2 のデータセット
+    role: Optional[str]
+        受け持ち (省くとデータセットの role)
+    form: Optional[str]
+        出力の形 (省くと正解の種類)
+    options: Optional[dict]
+        出力の形ごとの欄 (省いた領域の classes は値の名前)
+    target: Optional[dict]
+        正解の種類と出どころ (省くとデータセットの target)
+    items: Optional[dict]
+        1 件の扱い (省いた欄はデータセットから)
+
+    Returns
+    ----------
+    fields: tuple[dict, dict]
+        role, output, target の辞書と items
+
+    Raises
+    ----------
+    ValueError
+        予測するの領域か点群のデータセットでない場合と, 出力の形が正解の
+        種類と違う場合
+    """
+    # 作れるのは予測するで, 正解の種類が領域か点群のものだけ
+    from ml_inference.items import resolve_items
+
+    described = dataset.info.get("target") or {}
+    kind = described.get("kind")
+    if dataset.info.get("role") != "predict" or kind not in ITEM_FORMS:
+        raise ValueError(
+            f"版 2 のデータセットから一式を作れるのは, 予測する (role: "
+            f"predict) で正解の種類が {', '.join(ITEM_FORMS)} のものだけ"
+            f"です (今は role: {dataset.info.get('role')}, 正解の種類: "
+            f"{kind})"
+        )
+    form = form or kind
+    if form != kind:
+        raise ValueError(
+            f"出力の形 {form} は正解の種類 {kind} と同じにしてください"
+        )
+
+    # 1 件の扱いと, 正解と領域のクラスの名前の既定
+    resolved, names = resolve_items(dataset, form, items)
+    if target is None:
+        target = {"kind": kind}
+        if described.get("origin") is not None:
+            target["origin"] = described["origin"]
+    options = dict(options or {})
+    if names is not None and "classes" not in options:
+        options["classes"] = names
+    kinds = output_fields(
+        "", role or "predict", form, options, target
+    )
+    fields = (kinds, resolved)
+
+    return fields
+
+
+def item_batches(
+    bundle: Bundle, dataset: ItemDataset, split: str, start: int,
+    stop: int
+) -> tuple[list, list]:
+    """
+    分割の件に学習と同じ扱いをかけ, 入力と比べる正解を返す関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        作っている一式
+    dataset: ItemDataset
+        版 2 のデータセット
+    split: str
+        分割の名前
+    start: int
+        最初の件
+    stop: int
+        最後の件の次
+
+    Returns
+    ----------
+    batches: tuple[list, list]
+        件ごとのモデルの入力の配列と, 比べる正解 (領域の値か点. 正解の
+        項目が無ければ None)
+    """
+    # 件の位置は分割の中の番号 (点を選ぶ乱数に使う)
+    from ml_inference.items import prepare_item, target_points
+
+    items = bundle.info["items"]
+    part = dataset.split(split)
+    arrays, truths = [], []
+    for position in range(start, stop):
+        item = part[position]
+        array, rng = prepare_item(items, item[items["input"]], position)
+        arrays.append(array)
+        truth = item.get(items["target"]) if items.get("target") else None
+        if truth is not None and bundle.form == "point_cloud":
+            truth = target_points(items, truth, rng)
+        truths.append(truth)
+    batches = (arrays, truths)
+
+    return batches
+
+
+def check_item_sample(bundle: Bundle, dataset: ItemDataset) -> None:
+    """
+    版 2 のデータセットの学習用の見本を推論し, 出力の形を確かめる関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        作っている一式
+    dataset: ItemDataset
+        版 2 のデータセット
+
+    Returns
+    ----------
+    None
+
+    Raises
+    ----------
+    ValueError
+        見本を扱えない場合と, モデルに渡せない場合, 出力の形が合わない
+        場合
+    """
+    # 予測の関数はこのモジュールを読むので, 使うときに読み込む
+    from ml_inference.predict import infer_arrays
+
+    # 学習用の最初の数件 (分割の名前は train を優先)
+    splits = list(dataset.info.get("splits") or {})
+    if not splits:
+        raise ValueError("データセットに件がありません")
+    split = "train" if "train" in splits else splits[0]
+    count = min(SAMPLE_ROWS, len(dataset.split(split)))
+    try:
+        arrays, _ = item_batches(bundle, dataset, split, 0, count)
+        infer_arrays(bundle, arrays, 64, "cpu")
+    except ValueError:
+        raise
+    except Exception as error:
+        text = str(error)
+        text = text if len(text) <= 300 else text[:300] + " …"
+        hint = (
+            "重みが定義と合いません. 学習に使った定義と重みの組を選んで"
+            "ください" if "state_dict" in text else
+            "1 件の扱い (items) と定義の入力の形を確かめてください"
+        )
+        raise ValueError(
+            f"見本の推論に失敗しました ({type(error).__name__}: {text}). "
+            f"{hint}"
+        ) from error
+
+
+def check_items_against_run(
+    bundle: Bundle, dataset: ItemDataset, run: Optional[dict]
+) -> Optional[dict]:
+    """
+    版 2 のデータセットの分割を一式で推論した評価を, 実験の記録と比べる
+    関数
+
+    1 件の扱い (点の数, 選ぶ乱数, 領域の値) の書き違いは, 形が合っても
+    予測を黙って変える. 検証用の分割の IoU か Chamfer 距離が, 実験の記録
+    (ベストの値) と合うかで見つける
+
+    Parameters
+    ----------
+    bundle: Bundle
+        作っている一式
+    dataset: ItemDataset
+        版 2 のデータセット
+    run: Optional[dict]
+        実験の状態 (run_summary の結果)
+
+    Returns
+    ----------
+    check: Optional[dict]
+        split, rows, metric, value, recorded, matches (正解の項目か分割が
+        無ければ None)
+    """
+    # 予測の関数はこのモジュールを読むので, 使うときに読み込む
+    from ml_inference.items import chamfer, mask_counts, mean_iou
+    from ml_inference.predict import infer_arrays
+
+    # 検証用の分割 (無ければテスト用, 学習用) と指標
+    splits = dataset.info.get("splits") or {}
+    split = next((s for s in ("valid", "test", "train") if s in splits),
+                 None)
+    if split is None or not bundle.info["items"].get("target"):
+        return None
+    total = len(dataset.split(split))
+    if total == 0:
+        return None
+    metric = ITEM_METRICS[bundle.form]
+    comparable = comparable_run(run, split, total, metric)
+    rows = total if comparable else min(total, CHECK_SAMPLE_ROWS)
+
+    # 少しずつ推論して, 画素数か距離の合計だけを積み上げる (正規化した
+    # 座標のまま比べる)
+    values = bundle.mask_values or []
+    counts = np.zeros((3, len(values)))
+    distance = 0.0
+    for start in range(0, rows, CHECK_BATCH):
+        stop = min(rows, start + CHECK_BATCH)
+        arrays, truths = item_batches(bundle, dataset, split, start, stop)
+        outputs, _ = infer_arrays(bundle, arrays, CHECK_BATCH, "cpu")
+        for output, truth in zip(outputs, truths):
+            if bundle.form == "mask":
+                counts += mask_counts(output, np.asarray(truth), values)
+            else:
+                distance += chamfer(output, truth)
+    value = mean_iou(counts, values) if bundle.form == "mask" else (
+        distance / rows
+    )
+    check = check_record(run, comparable, split, rows, metric, value)
+
+    return check
+
+
+def measure_items(
+    bundle: Bundle, dataset: ItemDataset, run: Optional[dict], info: dict
+) -> None:
+    """
+    版 2 のデータセットの一式の, 記録との比べを測る関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        作っている一式
+    dataset: ItemDataset
+        版 2 のデータセット
+    run: Optional[dict]
+        実験の状態
+    info: dict
+        書き足す inference.yaml の中身 (check, uncertainty, notes)
+
+    Returns
+    ----------
+    None
+    """
+    # 記録との比べは注意のためなので, 失敗しても作るのは止めない. 外れ方
+    # は列の出力だけ
+    info["uncertainty"] = None
+    try:
+        info["check"] = check_items_against_run(bundle, dataset, run)
+    except Exception as error:
+        info["check"] = None
+        info["notes"].append(
+            f"検証用の分割を推論して記録と比べられませんでした ({error})"
+        )
+    if info["check"] and info["check"]["matches"] is False:
+        info["notes"].append(item_check_note(info["check"]))
+
+
+def item_check_note(check: dict) -> str:
+    """
+    版 2 のデータセットの一式の, 記録と合わない評価の注意の文を返す関数
+
+    Parameters
+    ----------
+    check: dict
+        check_items_against_run の結果
+
+    Returns
+    ----------
+    note: str
+        注意の文
+    """
+    # 1 件の扱いの書き違いを疑う
+    note = (
+        f"{check['split']} の分割を一式で推論した {check['metric']} "
+        f"{check['value']:.4g} が, 実験の記録 {check['recorded']:.4g} と"
+        "合いません. 1 件の扱い (items の prepare, 点の数 points と "
+        "target_points, 乱数の種 seed, 領域の値 values) が学習のスクリプト"
+        "と同じか確かめてください (学習のスクリプトが指標を違う決まりで"
+        "求めている場合も合いません)"
     )
 
     return note
