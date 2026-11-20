@@ -1179,7 +1179,7 @@ def make_bundle(
         str(full.info.get("task", "")), role, form, output_options, target
     )
 
-    # 学習済みの重みを読むノードの置き方 (無ければ前と同じく丸ごとの写し)
+    # 学習済みの重みを読むノードの置き方 (無ければ丸ごとの写し)
     infos, weight_notes = lookup_pretrained(spec_dict, pretrained)
     records: list = []
     kept = None
