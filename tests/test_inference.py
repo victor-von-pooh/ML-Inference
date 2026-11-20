@@ -845,7 +845,6 @@ def test_train_scale_and_reading(
 
     # csv で学習した一式に parquet, ディレクトリは分かる誤り
     frame = pd.DataFrame({"shop": ["東"], "x": [0.2]})
-    pytest.importorskip("pyarrow")
     frame.to_parquet(tmp_path / "new.parquet")
     assert predict(tmp_path / "bundle", tmp_path / "new.parquet")[
         "status"
