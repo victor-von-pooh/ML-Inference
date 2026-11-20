@@ -4,7 +4,9 @@ from typing import Any, Optional, Union
 import numpy as np
 import pandas as pd
 import torch
-from ml_eda import Data, ItemSplit, load_data, load_items
+from ml_eda import (
+    Data, ItemSplit, load_data, load_items, transform_entry
+)
 
 from ml_inference.bundle import Bundle, load_bundle
 from ml_inference.items import captured, prepare_item, work_directory
@@ -1512,6 +1514,14 @@ def dataset_rows(
         raise ValueError(
             f"データセットに入力の項目 {name} (種類 {expected}) がありません"
         )
+
+    # 件は書き出しで手順をかけた後なので, 一式と同じ手順のものだけ
+    steps = bundle.dataset.info["entries"][name].get("steps") or []
+    if (dataset.entries[name].get("steps") or []) != steps:
+        raise ValueError(
+            f"データセットの項目 {name} の中身の手順が一式と違います. 元の"
+            "ファイルを渡すと, 一式と同じ手順をかけて推論します"
+        )
     frame = dataset.items.reset_index(drop=True)
     part = ItemSplit(root=dataset.path, entries={name: dataset.entries[name]},
                      rows=frame)
@@ -1614,16 +1624,18 @@ def raw_rows(
     frame = data.frame.reset_index(drop=True)
     if kind != "capture":
         arrays, reasons = [], []
+        reader = ItemReader(data, bundle.dataset.info, items["input"])
         for index in range(len(frame)):
-            array, reason = prepared(bundle, ItemReader(data, kind), index)
+            array, reason = prepared(bundle, reader, index)
             arrays.append(array)
             reasons.append(reason)
         rows = (frame, arrays, None, reasons)
         return rows
 
-    # 撮影は学習と同じ正規化をかけて (一時の場所に写して) 読み, 足した
-    # 量を表に残す
+    # 撮影は学習と同じ正規化と中身の手順をかけて (一時の場所に写して)
+    # 読み, 足した量を表に残す
     normalize = bool(bundle.dataset.info.get("normalization"))
+    steps = bundle.dataset.info["entries"][items["input"]].get("steps")
     root = Path(data.source["root"])
     shifts = np.full((len(frame), 3), np.nan)
     arrays, reasons = [], []
@@ -1632,7 +1644,7 @@ def raw_rows(
             try:
                 capture, shift = captured(
                     root / str(frame["path"].iloc[index]), normalize,
-                    Path(work), f"{index:06d}"
+                    Path(work), f"{index:06d}", steps
                 )
             except Exception as error:
                 arrays.append(None)
@@ -1652,14 +1664,16 @@ def raw_rows(
 
 
 class ItemReader:
-    def __init__(self, data: Data, kind: str):
-        # ML-EDA で読んだデータと入力の項目の種類を保存
+    def __init__(self, data: Data, info: dict, name: str):
+        # ML-EDA で読んだデータ, データセットの説明, 入力の項目の名前を保存
         self.data = data
-        self.kind = kind
+        self.info = info
+        self.name = name
 
     def __getitem__(self, index: int) -> Any:
         """
-        1 件の中身を, load_items と同じ形で返す関数
+        1 件の中身に書き出しと同じ中身の手順をかけ, load_items と同じ形で
+        返す関数
 
         Parameters
         ----------
@@ -1669,12 +1683,12 @@ class ItemReader:
         Returns
         ----------
         content: Any
-            画像の配列か (点の数, 3) の点
+            (高さ, 幅, チャンネル) の画像の配列か (点の数, 3) の点
         """
-        # 点群の読み込みは辞書なので点だけ
-        content = self.data.load_item(index)
-        if self.kind == "point_cloud":
-            content = np.asarray(content["points"], dtype=np.float32)
+        # 手順は項目の steps から (版 2 のデータセットは手順無し)
+        content = transform_entry(
+            self.info, self.name, self.data.load_item(index)
+        )
 
         return content
 
