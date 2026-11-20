@@ -19,7 +19,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # 任意の依存を入れない場合と, 全て入れた場合
+          # 任意の依存を入れない場合 (parquet を読む pyarrow は依存に含む) と, 全て入れた場合
           - python-version: "3.10"
             extras: dev
             torch: torch
