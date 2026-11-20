@@ -98,8 +98,8 @@ def test_make_sample_bundle(tmp_path: Path) -> None:
         result = infer(bundle, frames[kind].head(20))
         assert (result["frame"]["status"] == "ok").sum() > 0
 
-        # 学習した小さなモデルは見本のデータで当たる (回帰と予測は元の単位に
-        # 戻した平均絶対誤差)
+        # 学習した小さなモデルの当たり具合 (回帰と予測は元の単位に戻した
+        # 平均絶対誤差)
         check = info["check"]
         if recipe["task"] == "classification":
             assert check["value"] > 0.9
@@ -117,6 +117,13 @@ def test_make_sample_bundle(tmp_path: Path) -> None:
     make_sample_bundle(tmp_path / "class", tmp_path / "class.csv",
                        settings["class"][0], overwrite=True, steps=5)
 
+    # 目的の値が一定なら学習できないので誤り (NaN の一式を作らない)
+    flat = tmp_path / "flat.csv"
+    frames["value"].assign(y=5.0).to_csv(flat, index=False)
+    with pytest.raises(ValueError, match="一定"):
+        make_sample_bundle(tmp_path / "flat", flat, settings["value"][0])
+    assert not (tmp_path / "flat").exists()
+
 
 def test_sample_needs_table_or_text() -> None:
     """
@@ -132,5 +139,5 @@ def test_sample_needs_table_or_text() -> None:
     """
     # 画像のデータセット (説明だけ)
     dataset = SimpleNamespace(info={"kind": "image"})
-    with pytest.raises(ValueError, match="表と文"):
+    with pytest.raises(ValueError, match="表, 時系列, 文"):
         sample_spec(dataset, 2)

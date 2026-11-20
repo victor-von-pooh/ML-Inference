@@ -1578,7 +1578,8 @@ def group_labels(
 
 
 def current_column(
-    bundle: Bundle, table: pd.DataFrame, current: Any, keep: np.ndarray
+    bundle: Bundle, table: pd.DataFrame, current: Any, keep: np.ndarray,
+    decision_type: str
 ) -> tuple[pd.DataFrame, Optional[tuple[str, bool]], np.ndarray]:
     """
     たどり直しで比べる今のやり方の列を, 予測の表から選ぶか決まりから作る
@@ -1594,6 +1595,9 @@ def current_column(
         今のやり方の列の名前か決まり (無ければ None)
     keep: np.ndarray
         数える行の印
+    decision_type: str
+        意思決定の型 (量の決まりの列は置いた後の量. 選ぶと振り分けの
+        決まりの列は列の名前と同じ)
 
     Returns
     ----------
@@ -1607,11 +1611,14 @@ def current_column(
     ValueError
         今のやり方の列が無い場合と, 決まりから作れない場合
     """
-    # 列の名前 (決まりの column も同じ)
+    # 列の名前 (選ぶと振り分けの決まりの column も同じ)
     dropped = np.zeros(len(table), dtype=bool)
     if not current:
         return table, None, dropped
-    if isinstance(current, dict) and current.get("type") == "column":
+    kind = str(decision_type)
+    if isinstance(current, dict) and current.get("type") == "column" and (
+        kind != "quantity"
+    ):
         current = current.get("column")
     if not isinstance(current, dict):
         if current not in table.columns:
@@ -1620,18 +1627,18 @@ def current_column(
         result = (table, (str(current), False), dropped)
         return result
 
-    # k 期前と平均: 時刻と系列を分ける列を省いた決まりは一式の過去の値の
-    # 手順から補い, 全ての行で求めて (前の期の値のため), 値の無い数える
-    # 行は除く
+    # 量の決まり: 時刻と系列を分ける列を省いた決まりは一式の過去の値の
+    # 手順から補い, 全ての行で求め (前の期の値のため), 値の無い数える
+    # 行の除外 (問題の設定と同じ. 数にできない値も欠損)
     rule = dict(current)
     settings = lag_settings(bundle)
     if "time" not in rule and len(settings["time"]) == 1:
         rule["time"] = next(iter(settings["time"]))
     if "by" not in rule:
         rule["by"] = sorted(settings["by"])
-    values = current_from_baseline(
+    values = pd.to_numeric(current_from_baseline(
         table, rule, bundle.dataset.info.get("target")
-    )
+    ), errors="coerce")
     name = BASELINE_NAME
     while name in table.columns:
         name = f"_{name}"
@@ -1715,7 +1722,7 @@ def backtest(
         raise ValueError("たどり直せる行 (予測し, 目的の値が分かる行) が"
                          "ありません")
     table, current, dropped = current_column(
-        bundle, table, decision.get("current"), keep
+        bundle, table, decision.get("current"), keep, decision["type"]
     )
     keep &= ~dropped
     if not keep.any():
@@ -1778,11 +1785,11 @@ def backtest(
             "しか分からないため)"
         )
     rule = decision.get("current")
-    if isinstance(rule, dict) and rule.get("type") != "column":
+    if isinstance(rule, dict) and current is not None and current[1]:
         sentences.append(
             f"今のやり方は, 決まり ({baseline_text(rule)}) から作った"
             + (f". 今のやり方の値が無い {int(dropped.sum()):,} 行 (前の期の"
-               "値が無い始めの行など) は, どの方針でも数えない"
+               "値が無い始めの行, 列の空欄など) は, どの方針でも数えない"
                if dropped.any() else "")
         )
     result = {

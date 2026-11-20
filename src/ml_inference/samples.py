@@ -36,7 +36,7 @@ def sample_spec(dataset: Dataset, outputs: int) -> dict[str, Any]:
     Raises
     ----------
     ValueError
-        表と文でないデータセットの場合
+        表, 時系列, 文でないデータセットの場合
     """
     # 文は番号の並び, 表は学習に使う列
     kind = dataset.info.get("kind")
@@ -78,7 +78,8 @@ def sample_spec(dataset: Dataset, outputs: int) -> dict[str, Any]:
         inputs = {"x": {"shape": [2, width]}}
     else:
         raise ValueError(
-            f"見本の一式は表と文のデータだけで作れます (このデータは {kind})"
+            f"見本の一式は表, 時系列, 文のデータだけで作れます (このデータは"
+            f" {kind})"
         )
     spec = {"format_version": 1, "name": "sample", "inputs": inputs,
             "nodes": nodes, "outputs": {"y": "head"}}
@@ -109,8 +110,14 @@ def train_sample(
     result: tuple[nn.Module, Optional[dict[str, float]]]
         学習したモデルと, 回帰と予測で目的の値を標準化した中心と幅
         (一式の target_scale. 分類は None)
+
+    Raises
+    ----------
+    ValueError
+        目的の値が一定の場合 (標準化の幅が 0)
     """
-    # 回帰と予測の目的の値の標準化 (一式の target_scale で戻す)
+    # 回帰と予測の目的の値の標準化 (一式の target_scale で戻す. 幅が 0 なら
+    # 学習できないので誤り)
     model = build_model(spec, seed=seed)
     x, y = dataset.tensors("train")
     scale: Optional[dict[str, float]] = None
@@ -118,6 +125,11 @@ def train_sample(
         loss_fn: nn.Module = nn.CrossEntropyLoss()
     else:
         scale = {"center": y.mean().item(), "scale": y.std().item()}
+        if not scale["scale"] > 0:
+            raise ValueError(
+                "目的の値が一定か, 学習用の行が 1 行なので, 見本のモデルを"
+                "学習できません"
+            )
         y = ((y - scale["center"]) / scale["scale"]).unsqueeze(1)
         loss_fn = nn.MSELoss()
 
@@ -179,11 +191,19 @@ def make_sample_bundle(
 
     Raises
     ----------
+    FileExistsError
+        一式が既にあり, overwrite が False の場合
     ValueError
-        表と文でないデータの場合と, make_bundle の誤り
+        表, 時系列, 文でないデータの場合, 目的の値が一定の場合と,
+        make_bundle の誤り
     """
-    # データセットと重みは一時の場所に書き, 一式に写す (一式は写した
-    # データセットの説明とレシピと重みだけで読める)
+    # 学習の前の, 置き換えの確かめ
+    final = Path(path).expanduser()
+    if final.exists() and not overwrite:
+        raise FileExistsError(f"{final} は既にあります")
+
+    # データセットと重みの一時の置き場 (一式は写したデータセットの説明と
+    # レシピと重みだけで読める)
     with tempfile.TemporaryDirectory() as work:
         place = Path(work)
         data = load_data(Path(source).expanduser(), **(options or {}))

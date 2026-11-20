@@ -13,7 +13,9 @@ from ml_inference import load_bundle, make_bundle
 
 def shop_days() -> pd.DataFrame:
     """
-    2 つの店の日ごとの売上の表を作る関数 (駅前店は 2025-01-05 が休み)
+    2 つの店の日ごとの売上の表を作る関数
+
+    駅前店は 2025-01-05 が休み
 
     Parameters
     ----------
@@ -107,7 +109,12 @@ def test_baseline_errors() -> None:
         ({"type": "column", "column": "no_such"}, "no_such"),
         ({"type": "lag", "periods": 1}, "時刻の列"),
         ({"type": "lag", "periods": 1, "time": "date", "freq": "x"}, "freq"),
-        ({"type": "lag", "periods": 1, "time": "date", "by": ["x"]}, "x"),
+        ({"type": "lag", "periods": 1, "time": "date", "by": ["x"]},
+         "列 x が"),
+        ({"type": "lag", "periods": 1.5, "time": "date"}, "periods"),
+        ({"type": "lag", "periods": 1, "time": "date", "by": [1]}, "by"),
+        ({"type": "lag", "periods": 1, "time": "date", "by": "sales"},
+         "系列を分ける列にできません"),
         ({"type": "lag", "periods": 1, "time": "date", "extra": 1}, "extra"),
     ]
     for baseline, message in cases:
@@ -120,6 +127,11 @@ def test_baseline_errors() -> None:
     with pytest.raises(ValueError, match="間隔"):
         current_from_baseline(single, {"type": "lag", "periods": 1,
                                        "time": "date"}, target="sales")
+    short = pd.DataFrame({"t": ["2025-01-01 00:00:00.5",
+                                "2025-01-01 00:00:01"], "sales": [1, 2]})
+    with pytest.raises(ValueError, match="間隔を求められません"):
+        current_from_baseline(short, {"type": "lag", "periods": 1,
+                                      "time": "t"}, target="sales")
 
 
 def test_backtest_with_baseline(tmp_path: Path) -> None:
@@ -155,7 +167,8 @@ def test_backtest_with_baseline(tmp_path: Path) -> None:
     assert any("7 期前の値と同じ量" in s and "12 行" in s
                for s in result["sentences"])
 
-    # 今ある量が決まりの量より多ければ足さない (決まりは置いた後の量)
+    # 今ある量が決まりの量より多い行の, 足さない今のやり方 (決まりは
+    # 置いた後の量)
     stock = np.where(np.arange(400) % 2 == 0, 0.0, 1000.0)
     stocked = frame.assign(stock=stock)
     placed = backtest(path, stocked, {**decision, "stock": "stock"})
@@ -169,11 +182,22 @@ def test_backtest_with_baseline(tmp_path: Path) -> None:
         by_column["policies"]["今のやり方"]
     )
 
-    # 決まりの列は列の名前と同じ
-    named = backtest(path, frame.assign(now=10.0),
-                     {**decision, "current": {"type": "column",
-                                              "column": "now"}})
-    assert named["rows"] == 398
+    # 量の決まりの列も置いた後の量で, k 期前の決まりと同じ損. 空欄の行は
+    # 数えない (問題の設定と同じ)
+    by_rule_column = backtest(
+        path, stocked.assign(now=level),
+        {**decision, "stock": "stock",
+         "current": {"type": "column", "column": "now"}}
+    )
+    assert by_rule_column["rows"] == placed["rows"]
+    assert by_rule_column["policies"] == pytest.approx(placed["policies"])
+
+    # 平均の決まり (始めの行は前の期の値が無いので, 数えない行は 0)
+    mean = backtest(path, frame, {**decision, "current": {
+        "type": "mean", "periods": 3
+    }})
+    assert mean["rows"] == 398
+    assert not any("数えない" in s for s in mean["sentences"])
 
 
 def test_baseline_in_decision(tmp_path: Path) -> None:
@@ -190,7 +214,7 @@ def test_baseline_in_decision(tmp_path: Path) -> None:
     ----------
     None
     """
-    # 振り分けに k 期前は使えない. 列の決まりはよい
+    # 振り分けの k 期前は誤り, 列の決まりは誤りでない
     source = tmp_path / "two.csv"
     rng = np.random.default_rng(0)
     pd.DataFrame({"x": rng.normal(size=100),
@@ -220,7 +244,7 @@ def test_baseline_in_decision(tmp_path: Path) -> None:
         backtest(tmp_path / "b", tmp_path / "two.csv",
                  {**triage, "current": {"type": "lag", "periods": 1}})
 
-    # 既定値の current は列の名前だけ
+    # 既定値の current は列の名前だけ (決まりは誤り)
     with pytest.raises(ValueError, match="既定値の current"):
         make_bundle(tmp_path / "c", spec, tmp_path / "two", weights,
                     decision={**triage, "current": {"type": "column",

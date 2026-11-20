@@ -106,6 +106,11 @@ def check_baseline(
                 f"今のやり方の freq を正の間隔として読めません: "
                 f"{baseline['freq']} (86400s, 1D, 1h など)"
             )
+    target = baseline.get("target")
+    if isinstance(target, str) and target in [baseline.get("time"),
+                                              *series_columns(baseline)]:
+        errors.append(f"今のやり方の目的の列 {target} は, 時刻の列と系列を"
+                      "分ける列にできません")
     if columns is not None:
         wanted = [baseline.get("target"), baseline.get("time"),
                   *series_columns(baseline)]
@@ -131,7 +136,7 @@ def series_columns(baseline: dict) -> list[str]:
     by: list[str]
         系列を分ける列 (無ければ空)
     """
-    # 1 つの名前も並びに
+    # 1 つの名前も並びの形
     by = baseline.get("by") or []
     by = [by] if isinstance(by, str) else list(by)
 
@@ -152,15 +157,17 @@ def interval_freq(times: pd.Series) -> Optional[str]:
     Returns
     ----------
     freq: Optional[str]
-        間隔 (秒の数の文字. 例: 86400s). 求められなければ None
+        間隔 (秒の数の文字. 例: 86400s). 求められない (1 秒より短いなど)
+        なら None
     """
     # 重ならない時刻の差の最頻値
     parsed = pd.to_datetime(times, errors="coerce", format="mixed").dropna()
     steps = pd.Series(np.sort(parsed.unique())).diff().dropna()
     steps = steps[steps > pd.Timedelta(0)]
-    if steps.empty:
+    seconds = int(steps.mode().iloc[0].total_seconds()) if len(steps) else 0
+    if seconds < 1:
         return None
-    freq = f"{int(steps.mode().iloc[0].total_seconds())}s"
+    freq = f"{seconds}s"
 
     return freq
 
@@ -209,12 +216,15 @@ def current_from_baseline(
         values = frame[baseline["column"]].rename(BASELINE_NAME)
         return values
 
-    # k 期前と平均は目的の列, 時刻の列, 間隔が要る
+    # k 期前と平均の目的の列, 時刻の列, 間隔の確かめ
     name = baseline.get("target") or target
     time = baseline.get("time")
     if not name or name not in frame.columns:
         raise ValueError(f"今のやり方を求める目的の列 {name} がデータに"
                          "ありません")
+    if name == baseline.get("time") or name in series_columns(baseline):
+        raise ValueError(f"今のやり方の目的の列 {name} は, 時刻の列と系列を"
+                         "分ける列にできません")
     if not time:
         raise ValueError(
             "k 期前と平均は時刻の列で数えるので, 今のやり方の time に時刻の"

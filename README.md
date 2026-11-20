@@ -179,6 +179,7 @@ print(backtest("bundles/sales", "last_month.csv", decision)["sentences"])
 今のやり方 (`current`) は列の名前か, 問題の設定 (ML-Quest) と同じ決まりで書く. 決まりなら, たどり直しが行ごとの値を作って比べる (`current_from_baseline` で列だけを作ることもできる. DESIGN の「今のやり方を決まりで書く」).
 
 ```python
+import pandas as pd
 from ml_inference import backtest, current_from_baseline
 
 # 今のやり方: 同じ店の 7 日前と同じ量を置く (問題の設定の action.current と同じ形)
@@ -186,6 +187,7 @@ rule = {"type": "lag", "periods": 7, "time": "date", "by": ["store"]}
 decision = {"type": "quantity", "under_cost": 3, "over_cost": 1, "current": rule}
 print(backtest("bundles/sales", "last_month.csv", decision)["sentences"])
 
+frame = pd.read_csv("last_month.csv")
 now = current_from_baseline(frame, rule, target="sales")   # 行ごとの今のやり方の量
 ```
 
