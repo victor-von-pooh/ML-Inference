@@ -1245,7 +1245,14 @@ def make_bundle(
         if decision:
             from ml_inference.decision import check_decision
 
+            # 既定値の今のやり方は列の名前だけ (一式の版 3 の形のまま.
+            # 決まりはたどり直しで渡す)
             errors = check_decision(decision, bundle)
+            if isinstance(decision.get("current"), dict):
+                errors.append(
+                    "一式の既定値の current は列の名前にしてください "
+                    "(決まりで書いた今のやり方は, たどり直しで渡す)"
+                )
             if errors:
                 raise ValueError(
                     "意思決定の決め方の誤り: " + " / ".join(errors)
