@@ -9,7 +9,9 @@ from ml_eda import (
 )
 
 from ml_inference.bundle import Bundle, load_bundle
-from ml_inference.items import captured, prepare_item, work_directory
+from ml_inference.items import (
+    captured, prepare_item, restore_size, work_directory
+)
 from ml_inference.procedures import (
     get_procedure, make_generator, run_procedure, start_noise
 )
@@ -1438,7 +1440,7 @@ def infer_arrays(
 
 def item_rows(
     bundle: Bundle, source: Union[str, Path]
-) -> tuple[pd.DataFrame, list, Optional[np.ndarray], list]:
+) -> tuple[pd.DataFrame, list, Optional[np.ndarray], list, list]:
     """
     版 2 のデータセットの一式で推論するデータを読み, 件ごとの入力を返す
     関数
@@ -1453,10 +1455,11 @@ def item_rows(
 
     Returns
     ----------
-    rows: tuple[pd.DataFrame, list, Optional[np.ndarray], list]
+    rows: tuple[pd.DataFrame, list, Optional[np.ndarray], list, list]
         元の列の表, 件ごとのモデルの入力 (扱えなかった件は None), 件ごと
         の正規化の平行移動 ((件数, 3). 戻さない一式は None), 件ごとの
-        予測できない理由
+        予測できない理由, 件ごとの領域を戻す元の画像の (高さ, 幅) (戻さ
+        ない件は None)
 
     Raises
     ----------
@@ -1483,7 +1486,7 @@ def item_rows(
 
 def dataset_rows(
     bundle: Bundle, path: Path
-) -> tuple[pd.DataFrame, list, Optional[np.ndarray], list]:
+) -> tuple[pd.DataFrame, list, Optional[np.ndarray], list, list]:
     """
     版 2 のデータセットの全ての件に, 学習と同じ扱いをかける関数
 
@@ -1496,8 +1499,9 @@ def dataset_rows(
 
     Returns
     ----------
-    rows: tuple[pd.DataFrame, list, Optional[np.ndarray], list]
-        件の表, 件ごとの入力, 件ごとの平行移動, 件ごとの理由
+    rows: tuple[pd.DataFrame, list, Optional[np.ndarray], list, list]
+        件の表, 件ごとの入力, 件ごとの平行移動, 件ごとの理由, 件ごとの
+        元の画像の大きさ (書き出しでそろえた後なので全て None)
 
     Raises
     ----------
@@ -1541,7 +1545,7 @@ def dataset_rows(
         array, reason = prepared(bundle, part, index)
         arrays.append(array)
         reasons.append(reason)
-    rows = (frame, arrays, shifts, reasons)
+    rows = (frame, arrays, shifts, reasons, [None] * len(frame))
 
     return rows
 
@@ -1593,7 +1597,7 @@ def prepared(
 
 def raw_rows(
     bundle: Bundle, path: Path
-) -> tuple[pd.DataFrame, list, Optional[np.ndarray], list]:
+) -> tuple[pd.DataFrame, list, Optional[np.ndarray], list, list]:
     """
     元のファイル (画像, 撮影, 点群) を読み, 学習と同じ扱いをかける関数
 
@@ -1606,8 +1610,9 @@ def raw_rows(
 
     Returns
     ----------
-    rows: tuple[pd.DataFrame, list, Optional[np.ndarray], list]
-        読み込みの表, 件ごとの入力, 件ごとの平行移動, 件ごとの理由
+    rows: tuple[pd.DataFrame, list, Optional[np.ndarray], list, list]
+        読み込みの表, 件ごとの入力, 件ごとの平行移動, 件ごとの理由, 件
+        ごとの領域を戻す元の画像の (高さ, 幅) (戻さない件は None)
 
     Raises
     ----------
@@ -1629,7 +1634,8 @@ def raw_rows(
             array, reason = prepared(bundle, reader, index)
             arrays.append(array)
             reasons.append(reason)
-        rows = (frame, arrays, None, reasons)
+        sizes = [reader.sizes.get(i) for i in range(len(frame))]
+        rows = (frame, arrays, None, reasons, sizes)
         return rows
 
     # 撮影は学習と同じ正規化と中身の手順をかけて (一時の場所に写して)
@@ -1658,7 +1664,7 @@ def raw_rows(
     for axis, column in enumerate(SHIFT_COLUMNS):
         frame[column] = shifts[:, axis]
     restore = shifts if items.get("restore") == "shift" else None
-    rows = (frame, arrays, restore, reasons)
+    rows = (frame, arrays, restore, reasons, [None] * len(frame))
 
     return rows
 
@@ -1669,6 +1675,12 @@ class ItemReader:
         self.data = data
         self.info = info
         self.name = name
+        # 中身の手順のある画像の, 件ごとの元の (高さ, 幅)
+        entry = (info.get("entries") or {}).get(name) or {}
+        self.remember = entry.get("kind") == "image" and bool(
+            entry.get("steps")
+        )
+        self.sizes: dict = {}
 
     def __getitem__(self, index: int) -> Any:
         """
@@ -1685,10 +1697,13 @@ class ItemReader:
         content: Any
             (高さ, 幅, チャンネル) の画像の配列か (点の数, 3) の点
         """
-        # 手順は項目の steps から (版 2 のデータセットは手順無し)
-        content = transform_entry(
-            self.info, self.name, self.data.load_item(index)
-        )
+        # 手順は項目の steps から (版 2 のデータセットは手順無し). 領域
+        # を戻すため, 手順の前の大きさ
+        item = self.data.load_item(index)
+        if self.remember:
+            shape = np.shape(item)
+            self.sizes[index] = (int(shape[0]), int(shape[1]))
+        content = transform_entry(self.info, self.name, item)
 
         return content
 
@@ -1713,10 +1728,11 @@ def predict_items(
     Returns
     ----------
     result: pd.DataFrame
-        元の列と, status, reason, output (領域の値か, 元の座標の点) の列
+        元の列と, status, reason, output (領域の値か, 元の座標の点) の列.
+        中身の手順をかけた元の画像の領域は, 元の画像の大きさ
     """
     # 読んで扱いをかけ, 扱えた件だけ推論
-    frame, arrays, shifts, reasons = item_rows(bundle, source)
+    frame, arrays, shifts, reasons, sizes = item_rows(bundle, source)
     count = len(frame)
     keep = np.array([not r for r in reasons], dtype=bool)
     outputs: list = [None] * count
@@ -1733,6 +1749,12 @@ def predict_items(
             # 点群は正規化の平行移動を引いて元の座標に
             if shifts is not None:
                 output = output - shifts[row].astype(np.float32)
+            # 領域は最も近い画素の値で元の画像の大きさに
+            size = sizes[row]
+            if bundle.form == "mask" and size is not None and (
+                np.shape(output) != size
+            ):
+                output = restore_size(output, size)
             outputs[row] = output
 
     # 元の列に予測の列を並べる (予測の列と同じ名前の元の列は「(入力)」)
