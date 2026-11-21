@@ -175,7 +175,7 @@ def lookup_pretrained(
     return infos, notes
 
 
-def unchecked_notes(spec: dict) -> list[str]:
+def unchecked_notes(spec: dict, noted: set[str]) -> list[str]:
     """
     ライセンスを確かめずに一式に写す学習済みの重みの注意を返す関数
 
@@ -186,17 +186,19 @@ def unchecked_notes(spec: dict) -> list[str]:
     ----------
     spec: dict
         モデルの定義
+    noted: set[str]
+        置き方の注意で既にライセンスを確かめるよう書いた, 一番上のノードの
+        名前 (外部の重みの注意から除く)
 
     Returns
     ----------
     notes: list[str]
         注意の文 (部分モデルの中と外部の重みで 1 文ずつ. 無ければ空)
     """
-    # 本体と部分モデルのノード (部分モデルの中は「部分モデル/ノード」)
-    graphs = [("", spec)]
-    subgraphs = spec.get("subgraphs")
-    if isinstance(subgraphs, dict):
-        graphs += [(f"{name}/", graph) for name, graph in subgraphs.items()]
+    # 本体と, 本体から辿れる部分モデルのノード (中は「部分モデル/ノード」)
+    graphs = [("", spec)] + [
+        (f"{name}/", graph) for name, graph in used_subgraphs(spec).items()
+    ]
     inner = []
     external = []
     for prefix, graph in graphs:
@@ -207,7 +209,7 @@ def unchecked_notes(spec: dict) -> list[str]:
             weights = item.get("weights")
             if isinstance(weights, dict) and (
                 "hub" in weights or "unit" in weights
-            ):
+            ) and f"{prefix}{node}" not in noted:
                 external.append(f"{prefix}{node}")
             if prefix and inner_pretrained(item):
                 inner.append(f"{prefix}{node}")
@@ -228,6 +230,43 @@ def unchecked_notes(spec: dict) -> list[str]:
         )
 
     return notes
+
+
+def used_subgraphs(spec: dict) -> dict:
+    """
+    本体のノードから辿れる部分モデルを返す関数
+
+    Parameters
+    ----------
+    spec: dict
+        モデルの定義
+
+    Returns
+    ----------
+    used: dict
+        部分モデルの名前ごとの定義 (どのノードも sub.<名前> で参照しない
+        部分モデルは除く)
+    """
+    # 本体から sub.<名前> の参照を順に辿る
+    subgraphs = spec.get("subgraphs")
+    subgraphs = subgraphs if isinstance(subgraphs, dict) else {}
+    used: dict = {}
+    pending = [spec]
+    while pending:
+        graph = pending.pop()
+        nodes = graph.get("nodes") if isinstance(graph, dict) else None
+        for item in (nodes if isinstance(nodes, dict) else {}).values():
+            unit = item.get("unit") if isinstance(item, dict) else None
+            if not isinstance(unit, str) or not unit.startswith(
+                SUBGRAPH_PREFIX
+            ):
+                continue
+            name = unit[len(SUBGRAPH_PREFIX):]
+            if name in subgraphs and name not in used:
+                used[name] = subgraphs[name]
+                pending.append(subgraphs[name])
+
+    return used
 
 
 def inner_pretrained(item: dict) -> bool:

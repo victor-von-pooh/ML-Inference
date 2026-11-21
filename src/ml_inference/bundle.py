@@ -1384,10 +1384,8 @@ def make_bundle(
             target
         )
 
-    # 学習済みの重みを読むノードの置き方 (無ければ丸ごとの写し) と,
-    # ライセンスを確かめずに写す重みの注意
+    # 学習済みの重みを読むノードの置き方 (無ければ丸ごとの写し)
     infos, weight_notes = lookup_pretrained(spec_dict, pretrained)
-    weight_notes.extend(unchecked_notes(spec_dict))
     records: list = []
     kept = None
     if infos:
@@ -1400,6 +1398,14 @@ def make_bundle(
             infos, state, fresh, copy_weights, spec_dict
         )
         weight_notes.extend(notes)
+
+    # ライセンスを確かめずに一式に写す重みの注意 (写す場合だけ. 置き方の
+    # 注意でライセンスを確かめるよう書いたノードは除く)
+    if copy_weights:
+        noted = {
+            str(r["node"]) for r in records if not r["redistributable"]
+        }
+        weight_notes.extend(unchecked_notes(spec_dict, noted))
 
     # 隣の一時ディレクトリに作り, 確かめてから入れ替える
     writing = final.with_name(f".{final.name}.writing")
