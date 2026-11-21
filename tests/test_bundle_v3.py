@@ -908,6 +908,138 @@ def test_pretrained_info_is_read_lazily(
     assert any("ライセンスか版を読めなかった" in n for n in info["notes"])
 
 
+def test_subgraph_node_skips_pretrained_info(
+    tmp_path: Path, table_dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    部分モデルを部品にしたノードを pretrained_info に渡さず, 部分モデルの
+    中の学習済みの部品と weights の hub から読む重みに注意を残すことを
+    確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    table_dataset: Path
+        データセット
+    monkeypatch: pytest.MonkeyPatch
+        差し替え
+
+    Returns
+    ----------
+    None
+    """
+    # 部分モデルの全結合 2 層だけのモデル (使わない部分モデルも持つ)
+    width = len(load_dataset(table_dataset).features)
+    linear = {"unit": "nn.Linear", "inputs": "x",
+              "params": {"in_features": width, "out_features": 3}}
+    spec = {
+        "format_version": 1,
+        "name": "nested",
+        "inputs": {"x": {"shape": [4, width]}},
+        "nodes": {"block": {"unit": "sub.head", "inputs": "x"}},
+        "outputs": {"logits": "block"},
+        "subgraphs": {
+            "head": {
+                "inputs": {"x": {}},
+                "nodes": {"fc": dict(linear), "fc2": {
+                    "unit": "nn.Linear", "inputs": "fc",
+                    "params": {"in_features": 3, "out_features": 3},
+                }},
+                "outputs": {"out": "fc2"},
+            },
+            "spare": {
+                "inputs": {"x": {}},
+                "nodes": {"unused": dict(linear)},
+                "outputs": {"out": "unused"},
+            },
+        },
+    }
+    weights = tmp_path / "w.pt"
+    torch.save(build_model(spec, seed=0).state_dict(), weights)
+
+    # 学習済みの重みを読むノードは無く, ライセンスの注意も無い
+    info = make_bundle(tmp_path / "nested", spec, table_dataset, weights)
+    assert info["model"]["pretrained"] == []
+    assert not any("ライセンス" in n for n in info["notes"])
+
+    # 部分モデルの中の学習済みの部品は, ネットワークを使わずに見て, 記録
+    # せずに 1 文の注意 (使わない部分モデルは見ない)
+    calls: list = []
+    monkeypatch.setattr(
+        ml_modelcontrol, "pretrained_info", LinearInfo(calls), raising=False
+    )
+    info = make_bundle(tmp_path / "inner", spec, table_dataset, weights)
+    assert info["model"]["pretrained"] == []
+    assert calls == [("nn.Linear", False), ("nn.Linear", False)]
+    inner = [n for n in info["notes"] if "ライセンス" in n]
+    assert len(inner) == 1 and "head/fc, head/fc2 " in inner[0]
+    assert "spare" not in inner[0]
+
+    # 重みを写さない一式には注意を出さない
+    info = make_bundle(tmp_path / "unwritten", spec, table_dataset, weights,
+                       copy_weights=False)
+    assert not any("ライセンス" in n for n in info["notes"])
+
+    # 本体の学習済みのノードが weights の hub を重ねる場合は置き方の 1 文
+    sourced = pretrained_spec(width)
+    sourced["format_version"] = 2
+    sourced["nodes"]["base"]["weights"] = {"hub": "org/demo", "file": "w.pt"}
+    sourced_weights = tmp_path / "sourced.pt"
+    torch.save(build_model(sourced, seed=0, load_weights=False).state_dict(),
+               sourced_weights)
+    info = make_bundle(tmp_path / "layered", sourced, table_dataset,
+                       sourced_weights,
+                       pretrained={"base": license_info(False)})
+    noted = [n for n in info["notes"] if "ライセンス" in n]
+    assert len(noted) == 1 and "外部の重み (weights) を重ねた" in noted[0]
+    monkeypatch.undo()
+
+    # weights の hub から読む外部の重みは注意, path は注意しない
+    flat = linear_spec(width, 3)
+    flat["format_version"] = 2
+    flat["nodes"]["head"]["weights"] = {"hub": "org/demo", "file": "w.pt"}
+    plain = save_weights(linear_spec(width, 3), tmp_path / "plain.pt")
+    info = make_bundle(tmp_path / "hub", flat, table_dataset, plain)
+    external = [n for n in info["notes"] if "hub か unit" in n]
+    assert len(external) == 1 and "ノード head " in external[0]
+    flat["nodes"]["head"]["weights"] = {"path": "w.pt"}
+    info = make_bundle(tmp_path / "path", flat, table_dataset, plain)
+    assert not any("ライセンス" in n for n in info["notes"])
+
+
+class LinearInfo:
+    def __init__(self, calls: list):
+        # 呼ばれた部品の名前とネットワークを使うかの記録を保存
+        self.calls = calls
+
+    def __call__(
+        self, unit: str, params: dict, fetch: bool = True
+    ) -> Any:
+        """
+        全結合を学習済みの部品とみなす pretrained_info の代わりの関数
+
+        Parameters
+        ----------
+        unit: str
+            部品の名前
+        params: dict
+            引数
+        fetch: bool = True
+            ネットワークを使うか
+
+        Returns
+        ----------
+        info: Any
+            全結合は再配布できない情報, 他は None
+        """
+        # 全結合だけ学習済み
+        self.calls.append((unit, fetch))
+        info = license_info(False) if unit == "nn.Linear" else None
+
+        return info
+
+
 class FakeInfo:
     def __init__(self, calls: list):
         # 呼ばれた部品の名前の記録を保存

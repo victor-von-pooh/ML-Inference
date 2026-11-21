@@ -5,6 +5,8 @@ from typing import Any, Optional
 import torch
 from ml_modelcontrol import get_unit
 
+from ml_inference.units import SUBGRAPH_PREFIX
+
 # 学習済みの重みの置き方 (一式の重み, 出どころ)
 PLACES = ("bundle", "source")
 
@@ -157,7 +159,7 @@ def lookup_pretrained(
     infos = {}
     for node, item in nodes.items():
         unit = item.get("unit") if isinstance(item, dict) else None
-        if not unit:
+        if not unit or str(unit).startswith(SUBGRAPH_PREFIX):
             continue
         try:
             info = pretrained_info(unit, dict(item.get("params") or {}))
@@ -171,6 +173,135 @@ def lookup_pretrained(
     notes = []
 
     return infos, notes
+
+
+def unchecked_notes(spec: dict, noted: set[str]) -> list[str]:
+    """
+    ライセンスを確かめずに一式に写す学習済みの重みの注意を返す関数
+
+    部分モデルの中の学習済みの部品と, ノードの weights の hub か unit から
+    読んだ外部の重みは, 置き方を決めずに学習した重みとして一式に写るため
+
+    Parameters
+    ----------
+    spec: dict
+        モデルの定義
+    noted: set[str]
+        置き方の注意で既にライセンスを確かめるよう書いた, 一番上のノードの
+        名前 (外部の重みの注意から除く)
+
+    Returns
+    ----------
+    notes: list[str]
+        注意の文 (部分モデルの中と外部の重みで 1 文ずつ. 無ければ空)
+    """
+    # 本体と, 本体から辿れる部分モデルのノード (中は「部分モデル/ノード」)
+    graphs = [("", spec)] + [
+        (f"{name}/", graph) for name, graph in used_subgraphs(spec).items()
+    ]
+    inner = []
+    external = []
+    for prefix, graph in graphs:
+        nodes = graph.get("nodes") if isinstance(graph, dict) else None
+        for node, item in (nodes if isinstance(nodes, dict) else {}).items():
+            if not isinstance(item, dict):
+                continue
+            weights = item.get("weights")
+            if isinstance(weights, dict) and (
+                "hub" in weights or "unit" in weights
+            ) and f"{prefix}{node}" not in noted:
+                external.append(f"{prefix}{node}")
+            if prefix and inner_pretrained(item):
+                inner.append(f"{prefix}{node}")
+
+    # 確かめていない重みのノードを挙げた注意
+    notes = []
+    if inner:
+        notes.append(
+            f"部分モデルの中のノード {', '.join(inner)} の学習済みの重みは"
+            "ライセンスを確かめずに一式の重みに含めました. 元の重みの"
+            "ライセンスを確かめてから一式を渡してください"
+        )
+    if external:
+        notes.append(
+            f"ノード {', '.join(external)} が weights の hub か unit から"
+            "読んだ外部の重みはライセンスを確かめずに一式の重みに含めました."
+            " 元の重みのライセンスを確かめてから一式を渡してください"
+        )
+
+    return notes
+
+
+def used_subgraphs(spec: dict) -> dict:
+    """
+    本体のノードから辿れる部分モデルを返す関数
+
+    Parameters
+    ----------
+    spec: dict
+        モデルの定義
+
+    Returns
+    ----------
+    used: dict
+        部分モデルの名前ごとの定義 (どのノードも sub.<名前> で参照しない
+        部分モデルは除く)
+    """
+    # 本体から sub.<名前> の参照を順に辿る
+    subgraphs = spec.get("subgraphs")
+    subgraphs = subgraphs if isinstance(subgraphs, dict) else {}
+    used: dict = {}
+    pending = [spec]
+    while pending:
+        graph = pending.pop()
+        nodes = graph.get("nodes") if isinstance(graph, dict) else None
+        for item in (nodes if isinstance(nodes, dict) else {}).values():
+            unit = item.get("unit") if isinstance(item, dict) else None
+            if not isinstance(unit, str) or not unit.startswith(
+                SUBGRAPH_PREFIX
+            ):
+                continue
+            name = unit[len(SUBGRAPH_PREFIX):]
+            if name in subgraphs and name not in used:
+                used[name] = subgraphs[name]
+                pending.append(subgraphs[name])
+
+    return used
+
+
+def inner_pretrained(item: dict) -> bool:
+    """
+    部分モデルの中のノードが学習済みの重みを読む部品かを返す関数
+
+    Parameters
+    ----------
+    item: dict
+        ノードの定義
+
+    Returns
+    ----------
+    loads: bool
+        pretrained_info が None でない場合と, 読めなかった場合は True
+        (入っている ML-ModelControl に pretrained_info が無い場合と,
+        部分モデルの部品は False)
+    """
+    # ネットワークを使わずに, 重みを読む部品かだけを見る
+    unit = item.get("unit")
+    if not unit or str(unit).startswith(SUBGRAPH_PREFIX):
+        return False
+    try:
+        from ml_modelcontrol import pretrained_info
+    except ImportError:
+        return False
+    try:
+        info = pretrained_info(
+            unit, dict(item.get("params") or {}), fetch=False
+        )
+    except Exception:
+        return True
+    loads = info is not None
+
+    return loads
 
 
 def pin_spec(spec: dict, infos: dict) -> dict:

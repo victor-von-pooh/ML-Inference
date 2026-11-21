@@ -20,7 +20,7 @@ from ml_inference.procedures import get_procedure, option_names
 from ml_inference.units import check_units
 from ml_inference.weights import (
     PLACES, layers_weights, place_weights, lookup_pretrained, node_keys,
-    pin_spec, state_hash
+    pin_spec, state_hash, unchecked_notes
 )
 
 # 推論の一式の形の版 (版 4 は版 2 のデータセットの一式だけ. 版 1 の
@@ -1398,6 +1398,14 @@ def make_bundle(
             infos, state, fresh, copy_weights, spec_dict
         )
         weight_notes.extend(notes)
+
+    # ライセンスを確かめずに一式に写す重みの注意 (写す場合だけ. 置き方の
+    # 注意でライセンスを確かめるよう書いたノードは除く)
+    if copy_weights:
+        noted = {
+            str(r["node"]) for r in records if not r["redistributable"]
+        }
+        weight_notes.extend(unchecked_notes(spec_dict, noted))
 
     # 隣の一時ディレクトリに作り, 確かめてから入れ替える
     writing = final.with_name(f".{final.name}.writing")
