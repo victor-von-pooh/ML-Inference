@@ -19,8 +19,8 @@ from ml_inference.items import ITEM_FORMS, PREPARE_KINDS, check_items
 from ml_inference.procedures import get_procedure, option_names
 from ml_inference.units import check_units
 from ml_inference.weights import (
-    PLACES, place_weights, lookup_pretrained, node_keys, pin_spec,
-    state_hash
+    PLACES, layers_weights, place_weights, lookup_pretrained, node_keys,
+    pin_spec, state_hash
 )
 
 # 推論の一式の形の版 (版 4 は版 2 のデータセットの一式だけ. 版 1 の
@@ -440,7 +440,7 @@ class Bundle:
         )
         if sourced:
             self.cache["pretrained_warnings"] = load_sourced(
-                model, state, sourced
+                model, state, sourced, self.spec
             )
         else:
             model.load_state_dict(state)
@@ -450,7 +450,9 @@ class Bundle:
         return model
 
 
-def load_sourced(model: Any, state: dict, sourced: list) -> list[str]:
+def load_sourced(
+    model: Any, state: dict, sourced: list, spec: dict
+) -> list[str]:
     """
     出どころから読むノードの重みを hash で確かめる関数
 
@@ -465,6 +467,8 @@ def load_sourced(model: Any, state: dict, sourced: list) -> list[str]:
         一式の重み (出どころから読むノードを除いたもの)
     sourced: list
         出どころから読むノードの記録
+    spec: dict
+        一式のモデルの定義
 
     Returns
     ----------
@@ -474,7 +478,9 @@ def load_sourced(model: Any, state: dict, sourced: list) -> list[str]:
     Raises
     ----------
     ValueError
-        足りない重みが出どころから読むノードのものだけでない場合
+        足りない重みが出どころから読むノードのものだけでない場合と, hash の
+        違ったノードが外部の重み (weights) を重ねる場合 (外部の重みを
+        読まずに組み立てるので, 出どころの重みと違う)
     """
     # 足りないキーは出どころから読むノードのものだけ
     built = model.state_dict()
@@ -490,11 +496,20 @@ def load_sourced(model: Any, state: dict, sourced: list) -> list[str]:
         )
     model.load_state_dict(state, strict=False)
 
-    # 出どころの重みと一式を作ったときの重みの比べ (違えば警告. 推論は続行)
+    # 出どころの重みと一式を作ったときの重みの比べ (違えば警告. 推論は続行.
+    # 外部の重みを重ねたノードは, 重ねた重みが一式に無いので誤り)
     messages = []
     for record in sourced:
         node = str(record["node"])
         found = state_hash(built, node_keys(built, node))
+        if found != record.get("sha256") and layers_weights(spec, node):
+            raise ValueError(
+                f"ノード {node} は出どころから読む記録ですが, 定義で外部の"
+                "重み (weights) を重ねています. 一式は外部の重みを読まずに"
+                "組み立てるので, 一式を作ったときの重みになりません. 今の"
+                "ライブラリで一式を作り直してください (重ねたノードの重みは"
+                "一式に含めます)"
+            )
         if found != record.get("sha256"):
             message = (
                 f"ノード {node} の出どころから読んだ重み "
@@ -1380,7 +1395,7 @@ def make_bundle(
             spec_dict, seed=0, load_weights=False
         ).state_dict()
         records, kept, notes = place_weights(
-            infos, state, fresh, copy_weights
+            infos, state, fresh, copy_weights, spec_dict
         )
         weight_notes.extend(notes)
 
