@@ -908,6 +908,53 @@ def test_pretrained_info_is_read_lazily(
     assert any("ライセンスか版を読めなかった" in n for n in info["notes"])
 
 
+def test_subgraph_node_skips_pretrained_info(
+    tmp_path: Path, table_dataset: Path
+) -> None:
+    """
+    部分モデルを部品にしたノードを pretrained_info に渡さず, 誤った
+    ライセンスの注意を出さないことを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    table_dataset: Path
+        データセット
+
+    Returns
+    ----------
+    None
+    """
+    # 部分モデルの全結合 1 層だけのモデル
+    width = len(load_dataset(table_dataset).features)
+    spec = {
+        "format_version": 1,
+        "name": "nested",
+        "inputs": {"x": {"shape": [4, width]}},
+        "nodes": {"block": {"unit": "sub.head", "inputs": "x"}},
+        "outputs": {"logits": "block"},
+        "subgraphs": {
+            "head": {
+                "inputs": {"x": {}},
+                "nodes": {"fc": {
+                    "unit": "nn.Linear",
+                    "params": {"in_features": width, "out_features": 3},
+                    "inputs": "x",
+                }},
+                "outputs": {"out": "fc"},
+            }
+        },
+    }
+    weights = tmp_path / "w.pt"
+    torch.save(build_model(spec, seed=0).state_dict(), weights)
+
+    # 学習済みの重みを読むノードは無く, ライセンスの注意も無い
+    info = make_bundle(tmp_path / "nested", spec, table_dataset, weights)
+    assert info["model"]["pretrained"] == []
+    assert not any("ライセンス" in n for n in info["notes"])
+
+
 class FakeInfo:
     def __init__(self, calls: list):
         # 呼ばれた部品の名前の記録を保存

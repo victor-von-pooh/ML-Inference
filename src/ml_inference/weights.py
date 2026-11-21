@@ -5,6 +5,8 @@ from typing import Any, Optional
 import torch
 from ml_modelcontrol import get_unit
 
+from ml_inference.units import SUBGRAPH_PREFIX
+
 # 学習済みの重みの置き方 (一式の重み, 出どころ)
 PLACES = ("bundle", "source")
 
@@ -157,7 +159,7 @@ def lookup_pretrained(
     infos = {}
     for node, item in nodes.items():
         unit = item.get("unit") if isinstance(item, dict) else None
-        if not unit:
+        if not unit or str(unit).startswith(SUBGRAPH_PREFIX):
             continue
         try:
             info = pretrained_info(unit, dict(item.get("params") or {}))
