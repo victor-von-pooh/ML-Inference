@@ -15,6 +15,7 @@ from ml_inference.items import (
 from ml_inference.procedures import (
     get_procedure, make_generator, run_procedure, start_noise
 )
+from ml_inference.texts import ids_to_text, text_vocabulary
 
 # 予測しなかった行の印
 OK, SKIPPED = "ok", "skipped"
@@ -974,9 +975,40 @@ def decode_array(bundle: Bundle, outputs: np.ndarray) -> dict:
     return columns
 
 
+def text_settings(bundle: Bundle) -> tuple[Optional[dict], list[int], Any]:
+    """
+    文の出力を戻すための語彙と, 除く先頭の番号と終わりの番号を返す関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+
+    Returns
+    ----------
+    decoding: Optional[dict]
+        レシピの語彙と分け方 (当てはめた語彙が無ければ None)
+    prepend: list[int]
+        繰り返しの手順の中身の入力の先頭に足した番号 (手順の無い一式は空)
+    eos: Any
+        繰り返しの手順の終わりの番号 (無ければ None)
+    """
+    # 先頭に足した番号と終わりの番号は手順の出した並びだけ
+    decoding = text_vocabulary(bundle.dataset.recipe)
+    prepend: list[int] = []
+    eos = None
+    if bundle.procedure:
+        eos = (bundle.procedure.get("options") or {}).get("eos")
+        for item in bundle.input_plan().values():
+            if item["source"] == "state":
+                prepend = list(item["prepend"])
+
+    return decoding, prepend, eos
+
+
 def decode_text(bundle: Bundle, outputs: np.ndarray) -> dict:
     """
-    文の出力を, 番号を空白でつないだ文字にする関数
+    文の出力を, 語彙で戻した文と番号を空白でつないだ文字にする関数
 
     Parameters
     ----------
@@ -988,7 +1020,8 @@ def decode_text(bundle: Bundle, outputs: np.ndarray) -> dict:
     Returns
     ----------
     columns: dict
-        prediction の列
+        prediction (文. レシピに語彙が無ければ番号) と tokens (番号を
+        空白でつないだ文字) の列
 
     Raises
     ----------
@@ -1003,11 +1036,15 @@ def decode_text(bundle: Bundle, outputs: np.ndarray) -> dict:
             "文の出力は (件数, 長さ, 語彙) か (件数, 長さ) にしてください "
             f"(今は {tuple(outputs.shape)})"
         )
-    columns = {
-        "prediction": [
-            " ".join(str(int(v)) for v in row) for row in outputs
-        ]
-    }
+    rows = [[int(v) for v in row] for row in outputs]
+    tokens = [" ".join(str(v) for v in row) for row in rows]
+
+    # 番号はレシピの語彙で文に (語彙が無ければ番号のまま)
+    decoding, prepend, eos = text_settings(bundle)
+    texts = tokens if decoding is None else [
+        ids_to_text(row, decoding, prepend, eos) for row in rows
+    ]
+    columns = {"prediction": texts, "tokens": tokens}
 
     return columns
 
@@ -1249,13 +1286,13 @@ def attach_columns(
     result = frame.copy().reset_index(drop=True)
     result.columns = [str(c) for c in result.columns]
     added = {"status", "reason", "decision", "output", "artifact",
-             *columns}
+             "tokens", *columns}
     result = result.rename(
         columns={c: f"{c} (入力)" for c in result.columns if c in added}
     )
     result["status"] = np.where(keep, OK, SKIPPED)
     result["reason"] = reasons
-    texts = ("output",) + (
+    texts = ("output", "tokens") + (
         ("prediction",) if bundle.form in ("class", "text") else ()
     )
     for name, values in columns.items():
@@ -1390,7 +1427,8 @@ def finite_rows(bundle: Bundle, columns: dict) -> np.ndarray:
     finite: np.ndarray
         行ごとの真偽値
     """
-    # 配列の出力は全ての値, 文は番号なので常に数, 他は確信か値
+    # 配列の出力は全ての値, 他は確信か値. 文は番号の並びから作るので数で
+    # ない値は無い (戻した文が空でも予測した行)
     if bundle.form in ARRAY_FORMS:
         finite = np.array(
             [bool(np.isfinite(a).all()) for a in columns["output"]],
@@ -1986,7 +2024,8 @@ def predict_items(
     # 元の列に予測の列を並べる (予測の列と同じ名前の元の列は「(入力)」)
     result = frame.copy()
     result.columns = [str(c) for c in result.columns]
-    added = {"status", "reason", "decision", "output", "artifact"}
+    added = {"status", "reason", "decision", "output", "artifact",
+             "tokens"}
     result = result.rename(
         columns={c: f"{c} (入力)" for c in result.columns if c in added}
     )

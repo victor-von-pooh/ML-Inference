@@ -13,7 +13,7 @@ from ml_inference.conclude import conclude, conclude_outputs, origin_sentence
 from ml_inference.decision import decide
 from ml_inference.forecast import forecast as forecast_rows
 from ml_inference.predict import (
-    ARRAY_FORMS, noise_request, predict, target_of
+    ARRAY_FORMS, OK, noise_request, predict, target_of
 )
 
 # 結果のファイル (result.yaml) の形の版 (表に収まらない中身が無ければ 1)
@@ -22,6 +22,9 @@ RESULT_FORMAT_VERSION = 2
 # 表に収まらない中身の置き場と, 表の列
 ARTIFACTS_DIR = "artifacts"
 ARTIFACT_COLUMN = "artifact"
+
+# 文の出力の番号の並びの列 (この列のある表は文の出力)
+TOKENS_COLUMN = "tokens"
 
 # 書き出すときに result.yaml へ写さない結果の項目 (表, 形, 読んだ場所,
 # 読んだ版と中身の記録)
@@ -381,6 +384,40 @@ def artifact_path(root: Union[str, Path], relative: str) -> Path:
     return path
 
 
+def read_predictions(path: Path) -> pd.DataFrame:
+    """
+    予測の表を読む関数 (文の出力の文と番号は文字のまま)
+
+    Parameters
+    ----------
+    path: Path
+        predictions.csv
+
+    Returns
+    ----------
+    frame: pd.DataFrame
+        予測の表 (空の欄は欠損. 文の出力の予測した行の空の文は空の文字)
+    """
+    # tokens の列のある表は文の出力なので, 文と番号を文字で読む (番号が 1
+    # つの並びや数に見える文を数にしない)
+    head = pd.read_csv(path, encoding="utf-8-sig", nrows=0)
+    text = TOKENS_COLUMN in head.columns
+    frame = pd.read_csv(
+        path, encoding="utf-8-sig", keep_default_na=False, na_values=[""],
+        dtype={"prediction": str, TOKENS_COLUMN: str} if text else None
+    )
+
+    # 予測した行の空の文 (戻すと何も残らない並び) は欠損と分ける
+    if text and "status" in frame.columns:
+        done = frame["status"] == OK
+        for name in ("prediction", TOKENS_COLUMN):
+            if name in frame.columns:
+                frame[name] = frame[name].astype(object)
+                frame.loc[done & frame[name].isna(), name] = ""
+
+    return frame
+
+
 def read_result(path: Union[str, Path]) -> dict:
     """
     書き出した結果を読む関数
@@ -417,10 +454,7 @@ def read_result(path: Union[str, Path]) -> dict:
             f"format_version {version} の結果は, このライブラリ (版 "
             f"{RESULT_FORMAT_VERSION} まで) では読めません"
         )
-    frame = pd.read_csv(
-        root / "predictions.csv", encoding="utf-8-sig",
-        keep_default_na=False, na_values=[""]
-    )
+    frame = read_predictions(root / "predictions.csv")
     artifacts = meta.get("artifacts") or {}
     if ARTIFACT_COLUMN in frame.columns and artifacts:
         frame[ARTIFACT_COLUMN] = frame[ARTIFACT_COLUMN].fillna("")
