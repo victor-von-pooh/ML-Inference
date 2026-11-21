@@ -12,7 +12,9 @@ from ml_inference.bundle import Bundle, inside, load_bundle
 from ml_inference.conclude import conclude, conclude_outputs, origin_sentence
 from ml_inference.decision import decide
 from ml_inference.forecast import forecast as forecast_rows
-from ml_inference.predict import ARRAY_FORMS, predict, target_of
+from ml_inference.predict import (
+    ARRAY_FORMS, noise_request, predict, target_of
+)
 
 # 結果のファイル (result.yaml) の形の版 (表に収まらない中身が無ければ 1)
 RESULT_FORMAT_VERSION = 2
@@ -27,9 +29,35 @@ RESULT_OWN_KEYS = ("frame", "form", "directory", "format_version",
                    "artifacts")
 
 
+def source_text(bundle: Bundle, source: Any) -> Optional[str]:
+    """
+    結果に残す入力の説明を返す関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+    source: Any
+        推論したデータ
+
+    Returns
+    ----------
+    text: Optional[str]
+        パスはそのまま, 雑音だけの一式は「件数 n, 種 s」, 他は None
+    """
+    # 雑音だけの一式は件数と種
+    if bundle.from_noise:
+        count, seed = noise_request(bundle, source)
+        text: Optional[str] = f"件数 {count}, 種 {seed}"
+        return text
+    text = str(source) if isinstance(source, (str, Path)) else None
+
+    return text
+
+
 def infer(
     bundle: Union[str, Path, Bundle],
-    source: Union[str, Path, pd.DataFrame, Data],
+    source: Union[str, Path, pd.DataFrame, Data, dict],
     rules: Optional[dict] = None, options: Optional[dict] = None,
     batch_size: int = 256, device: str = "cpu", forecast: bool = False,
     decision: Optional[dict] = None
@@ -41,8 +69,8 @@ def infer(
     ----------
     bundle: Union[str, Path, Bundle]
         推論の一式かそのディレクトリ
-    source: Union[str, Path, pd.DataFrame, Data]
-        推論するデータ
+    source: Union[str, Path, pd.DataFrame, Data, dict]
+        推論するデータ (雑音だけの一式は件数と種の辞書)
     rules: Optional[dict] = None
         結論の決め方 (一式の既定値に上書きする. 値を None にすると消す)
     options: Optional[dict] = None
@@ -91,7 +119,7 @@ def infer(
         result = {
             "bundle": {"name": bundle.info.get("name"),
                        "path": str(bundle.path)},
-            "source": str(source) if isinstance(source, (str, Path)) else None,
+            "source": source_text(bundle, source),
             "created_at": dt.datetime.now().astimezone().isoformat(),
             "form": bundle.form,
             **conclude_outputs(prediction),

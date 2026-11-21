@@ -517,7 +517,8 @@ class StepModel:
 
 
 def run_steps(
-    bundle: Bundle, tensors: list, batch_size: int, device: str
+    bundle: Bundle, tensors: list, batch_size: int, device: str,
+    seed: Optional[int] = None
 ) -> np.ndarray:
     """
     繰り返しの手順で, 決まった件数ずつ出力を作る関数
@@ -532,6 +533,8 @@ def run_steps(
         1 回に渡す件数
     device: str
         使うデバイス
+    seed: Optional[int] = None
+        乱数の種 (省略すると一式の手順の種)
 
     Returns
     ----------
@@ -542,17 +545,20 @@ def run_steps(
     config = bundle.procedure or {}
     name = str(config["name"])
     procedure = get_procedure(name)
-    generator = make_generator(int(config["seed"]))
+    generator = make_generator(int(config["seed"] if seed is None else seed))
     sources = [item["source"] for item in bundle.input_plan().values()]
     index = sources.index("state")
     model = bundle.model().to(device)
     chosen = bundle.info["model"].get("output")
+    noise = start_states(tensors[index], generator) if (
+        procedure.start == "noise"
+    ) else None
     parts = []
     for start in range(0, len(tensors[index]), batch_size):
         batch = [t[start:start + batch_size].to(device) for t in tensors]
         state = batch[index]
-        if procedure.start == "noise":
-            state = start_noise(tuple(state.shape), generator).to(device)
+        if noise is not None:
+            state = noise[start:start + batch_size].to(device)
         step_model = StepModel(model, batch, sources, chosen)
         out = run_procedure(
             name, step_model, state, int(config["steps"]), generator,
@@ -564,6 +570,35 @@ def run_steps(
     outputs = join_parts(parts, (config.get("options") or {}).get("eos"))
 
     return outputs
+
+
+def start_states(
+    like: torch.Tensor, generator: torch.Generator
+) -> torch.Tensor:
+    """
+    雑音から始まる手順の, 全ての件の始まりの雑音を件の順に引く関数
+
+    件ごとに引くので, 1 回に渡す件数に依らず, 件数を増やしても前の件の
+    雑音は変わらない
+
+    Parameters
+    ----------
+    like: torch.Tensor
+        (件数, 1 件の形) の置き場
+    generator: torch.Generator
+        乱数の生成器
+
+    Returns
+    ----------
+    noise: torch.Tensor
+        (件数, 1 件の形) の雑音 (cpu)
+    """
+    # 1 件ずつ引いて並べる
+    shape = (1, *like.shape[1:])
+    rows = [start_noise(shape, generator) for _ in range(len(like))]
+    noise = torch.cat(rows) if rows else torch.zeros(tuple(like.shape))
+
+    return noise
 
 
 def join_parts(parts: list, eos: Any) -> np.ndarray:
@@ -624,7 +659,8 @@ def finite_raw(raw: np.ndarray) -> np.ndarray:
 
 
 def run_model(
-    bundle: Bundle, tensors: list, batch_size: int, device: str
+    bundle: Bundle, tensors: list, batch_size: int, device: str,
+    seed: Optional[int] = None
 ) -> np.ndarray:
     """
     モデルを推論のモードで決まった件数ずつ動かす関数
@@ -639,6 +675,8 @@ def run_model(
         1 回に渡す件数
     device: str
         使うデバイス
+    seed: Optional[int] = None
+        繰り返しの手順の乱数の種 (省略すると一式の手順の種)
 
     Returns
     ----------
@@ -652,7 +690,7 @@ def run_model(
     """
     # 繰り返しの手順の一式は手順で
     if bundle.procedure:
-        outputs = run_steps(bundle, tensors, batch_size, device)
+        outputs = run_steps(bundle, tensors, batch_size, device, seed)
         return outputs
 
     # 出力が辞書なら, 書いた名前か 1 つだけの出力
@@ -1043,7 +1081,7 @@ DECODERS = {
 
 def predict(
     bundle: Union[str, Path, Bundle],
-    source: Union[str, Path, pd.DataFrame, Data],
+    source: Union[str, Path, pd.DataFrame, Data, dict],
     options: Optional[dict] = None, batch_size: int = 256,
     device: str = "cpu"
 ) -> pd.DataFrame:
@@ -1054,8 +1092,9 @@ def predict(
     ----------
     bundle: Union[str, Path, Bundle]
         推論の一式かそのディレクトリ
-    source: Union[str, Path, pd.DataFrame, Data]
-        推論するデータ
+    source: Union[str, Path, pd.DataFrame, Data, dict]
+        推論するデータ (雑音だけの一式は件数と種の辞書 {"count": n,
+        "seed": s})
     options: Optional[dict] = None
         読み込みの設定 (学習のときの設定に上書きする)
     batch_size: int = 256
@@ -1066,8 +1105,8 @@ def predict(
     Returns
     ----------
     result: pd.DataFrame
-        元の列と, status, reason, prediction (分類は confidence と
-        p:<クラス> も) の列
+        元の列 (雑音だけの一式は sample と seed) と, status, reason,
+        prediction (分類は confidence と p:<クラス> も) か output の列
 
     Raises
     ----------
@@ -1083,6 +1122,19 @@ def predict(
     if bundle.from_items:
         result = predict_items(bundle, source, batch_size, device)
         return result
+    if bundle.from_noise:
+        if options:
+            raise ValueError(
+                "雑音だけの一式はデータを読まないので, 読み込みの設定 "
+                "(options) は使えません"
+            )
+        result = predict_noise(bundle, source, batch_size, device)
+        return result
+    if isinstance(source, dict):
+        raise ValueError(
+            "件数と種 (count, seed) は雑音だけの一式 (データセットを持たない"
+            "一式) だけに渡せます. この一式にはデータを渡してください"
+        )
     data = read_source(bundle, source, options)
     count = len(data.frame)
     sources: dict = {}
@@ -1102,33 +1154,99 @@ def predict(
             sources["items"] = items
         reasons = [a or b for a, b in zip(reasons, found)]
 
-    # 予測できる行だけ推論
+    # 予測できる行だけ推論し, 元の列に予測の列を並べる
     keep = np.array([not r for r in reasons], dtype=bool)
-    if keep.any():
-        tensors = shape_inputs(
-            bundle, {k: np.asarray(v)[keep] for k, v in sources.items()},
-            int(keep.sum())
-        )
-        raw = run_model(bundle, tensors, batch_size, device)
-        columns = decode(bundle, raw)
-        # 数でない予測 (入力の無限大など) の行は予測しなかった行に (整数に
-        # 変える形があるので, 読む前のモデルの出力でも確かめ)
-        finite = finite_rows(bundle, columns) & finite_raw(raw)
-        if not finite.all():
-            rows = np.flatnonzero(keep)[~finite]
-            for row in rows:
-                reasons[row] = NOT_FINITE
-            keep[rows] = False
-            columns = {
-                name: [v for v, ok in zip(values, finite) if ok]
-                for name, values in columns.items()
-            }
-    else:
-        columns = decode(bundle, empty_output(bundle))
+    columns = infer_kept(bundle, sources, keep, reasons, batch_size, device)
+    result = attach_columns(bundle, data.frame, columns, keep, reasons)
 
-    # 元の列に予測の列を並べる (予測しなかった行は空). 予測の列と同じ
-    # 名前の元の列は「(入力)」を付けて残す
-    result = data.frame.copy().reset_index(drop=True)
+    return result
+
+
+def infer_kept(
+    bundle: Bundle, sources: dict, keep: np.ndarray, reasons: list,
+    batch_size: int, device: str, seed: Optional[int] = None
+) -> dict:
+    """
+    予測できる行だけを推論し, 数でない予測の行を予測しなかった行にする
+    関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+    sources: dict
+        features と items の全ての行の配列 (あるものだけ)
+    keep: np.ndarray
+        行ごとの予測するか (数でない予測の行を False に書き換える)
+    reasons: list
+        行ごとの予測しなかった理由 (数でない予測の行に理由を書き足す)
+    batch_size: int
+        1 回に渡す件数
+    device: str
+        使うデバイス
+    seed: Optional[int] = None
+        繰り返しの手順の乱数の種 (省略すると一式の手順の種)
+
+    Returns
+    ----------
+    columns: dict
+        予測した行だけの decode の列
+    """
+    # 予測する行が無ければ 0 件の列
+    if not keep.any():
+        columns = decode(bundle, empty_output(bundle))
+        return columns
+    tensors = shape_inputs(
+        bundle, {k: np.asarray(v)[keep] for k, v in sources.items()},
+        int(keep.sum())
+    )
+    raw = run_model(bundle, tensors, batch_size, device, seed)
+    columns = decode(bundle, raw)
+
+    # 数でない予測 (入力の無限大など) の行は予測しなかった行に (整数に
+    # 変える形があるので, 読む前のモデルの出力でも確かめ)
+    finite = finite_rows(bundle, columns) & finite_raw(raw)
+    if not finite.all():
+        rows = np.flatnonzero(keep)[~finite]
+        for row in rows:
+            reasons[row] = NOT_FINITE
+        keep[rows] = False
+        columns = {
+            name: [v for v, ok in zip(values, finite) if ok]
+            for name, values in columns.items()
+        }
+
+    return columns
+
+
+def attach_columns(
+    bundle: Bundle, frame: pd.DataFrame, columns: dict, keep: np.ndarray,
+    reasons: list
+) -> pd.DataFrame:
+    """
+    元の列に, status, reason と予測の列を並べる関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+    frame: pd.DataFrame
+        元の列の表
+    columns: dict
+        予測した行だけの decode の列
+    keep: np.ndarray
+        行ごとの予測したか
+    reasons: list
+        行ごとの予測しなかった理由
+
+    Returns
+    ----------
+    result: pd.DataFrame
+        予測の表 (予測しなかった行は空)
+    """
+    # 予測の列と同じ名前の元の列は「(入力)」を付けて残す
+    count = len(frame)
+    result = frame.copy().reset_index(drop=True)
     result.columns = [str(c) for c in result.columns]
     added = {"status", "reason", "decision", "output", "artifact",
              *columns}
@@ -1144,6 +1262,114 @@ def predict(
         full = pd.Series([None] * count, dtype=object)
         full[keep] = pd.Series(list(values), dtype=object).to_numpy()
         result[name] = full if name in texts else pd.to_numeric(full)
+
+    return result
+
+
+def noise_request(bundle: Bundle, source: Any) -> tuple[int, int]:
+    """
+    雑音だけの一式に渡した件数と種を確かめる関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        雑音だけの一式
+    source: Any
+        件数と種の辞書 ({"count": n, "seed": s}. seed は省略可)
+
+    Returns
+    ----------
+    count: int
+        作る件数
+    seed: int
+        乱数の種 (省略すると一式の手順の種)
+
+    Raises
+    ----------
+    ValueError
+        辞書でない場合, 知らない項目がある場合, 件数が 1 以上の整数でない
+        場合, 種が範囲の中の整数でない場合
+    """
+    # 件数と種だけの辞書
+    if not isinstance(source, dict):
+        raise ValueError(
+            "雑音だけの一式には, データの代わりに件数と種の辞書 "
+            '{"count": 件数, "seed": 種} を渡してください'
+        )
+    unknown = [str(k) for k in source if k not in ("count", "seed")]
+    if unknown:
+        raise ValueError(
+            f"{', '.join(unknown)} は知らない項目です (count と seed だけ)"
+        )
+
+    # 件数は 1 以上の整数, 種は整数 (省くと一式の手順の種)
+    count = source.get("count")
+    if not is_integer(count) or int(count) < 1:
+        raise ValueError("count (作る件数) は 1 以上の整数にしてください")
+    seed = source.get("seed")
+    if seed is None:
+        seed = (bundle.procedure or {})["seed"]
+    if not is_integer(seed) or not -(2 ** 63) <= int(seed) < 2 ** 64:
+        raise ValueError(
+            "seed (乱数の種) は整数 (-2^63 以上 2^64 未満) にしてください"
+        )
+
+    return int(count), int(seed)
+
+
+def is_integer(value: Any) -> bool:
+    """
+    真偽値でない整数 (numpy の整数も) かを確かめる関数
+
+    Parameters
+    ----------
+    value: Any
+        確かめる値
+
+    Returns
+    ----------
+    result: bool
+        整数なら True
+    """
+    # True と False は整数にしない
+    result = isinstance(value, (int, np.integer)) and not isinstance(
+        value, (bool, np.bool_)
+    )
+
+    return result
+
+
+def predict_noise(
+    bundle: Bundle, source: Any, batch_size: int, device: str
+) -> pd.DataFrame:
+    """
+    雑音だけの一式で, 件数と種から件ごとの出力を作る関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        雑音だけの一式
+    source: Any
+        件数と種の辞書
+    batch_size: int
+        1 回に渡す件数
+    device: str
+        使うデバイス
+
+    Returns
+    ----------
+    result: pd.DataFrame
+        sample (0 からの番号), seed, status, reason, output の列
+    """
+    # データの入力は無く, 手順の中身と時刻だけ
+    count, seed = noise_request(bundle, source)
+    keep = np.ones(count, dtype=bool)
+    reasons = [""] * count
+    columns = infer_kept(
+        bundle, {}, keep, reasons, batch_size, device, seed
+    )
+    frame = pd.DataFrame({"sample": np.arange(count), "seed": seed})
+    result = attach_columns(bundle, frame, columns, keep, reasons)
 
     return result
 
