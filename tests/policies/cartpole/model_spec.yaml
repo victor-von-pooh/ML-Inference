@@ -1,0 +1,16 @@
+format_version: 1
+name: policy
+inputs:
+  obs:
+    shape: [1, 4]
+nodes:
+  hidden:
+    unit: nn.Linear
+    params: {in_features: 4, out_features: 8}
+    inputs: obs
+  act: {unit: nn.Tanh, inputs: hidden}
+  head:
+    unit: nn.Linear
+    params: {in_features: 8, out_features: 2}
+    inputs: act
+outputs: {out: head}
