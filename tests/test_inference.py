@@ -10,6 +10,7 @@ import yaml
 from conftest import linear_spec, save_weights
 from ml_eda import export_dataset, load_data, load_dataset
 from ml_modelcontrol import build_model
+from torch import nn
 
 from ml_inference import (
     check_rules, conclude, describe_bundle, infer, load_bundle, make_bundle,
@@ -366,6 +367,81 @@ def test_bundle_from_run_dir_and_overwrite(
     other.mkdir()
     with pytest.raises(FileExistsError, match="一式ではない"):
         make_bundle(other, spec, table_dataset, run, overwrite=True)
+
+
+def test_relative_external_weights(
+    tmp_path: Path, table_dataset: Path, table_csv: Path,
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    外部の重みを相対パスで持つ定義から, 定義と別の今のディレクトリで一式を
+    作り, 一式を別の場所へ移しても推論できることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    table_dataset: Path
+        データセット
+    table_csv: Path
+        元の CSV
+    monkeypatch: pytest.MonkeyPatch
+        今のディレクトリの差し替え
+
+    Returns
+    ----------
+    None
+    """
+    # 定義の隣の外部の重みを相対パスで読む定義
+    width = len(load_dataset(table_dataset).features)
+    spec = linear_spec(width, 3)
+    spec["format_version"] = 2
+    spec["nodes"]["head"]["weights"] = {"path": "head.pt"}
+    defs = tmp_path / "defs"
+    defs.mkdir()
+    head = nn.Linear(width, 3)
+    torch.save(head.state_dict(), defs / "head.pt")
+    spec_file = defs / "model.yaml"
+    spec_file.write_text(yaml.safe_dump(spec), encoding="utf-8")
+
+    # 外部の重みを読んで学習した後の重み
+    model = build_model(spec_file, seed=0)
+    state = model.state_dict()
+    state["nodes.head.bias"] = state["nodes.head.bias"] + 0.5
+    weights = tmp_path / "trained.pt"
+    torch.save(state, weights)
+    model.load_state_dict(state)
+    model.eval()
+
+    # 定義と別の今のディレクトリで, ファイルと辞書の定義から一式づくり
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    make_bundle(tmp_path / "from_file", spec_file, table_dataset, weights)
+    make_bundle(tmp_path / "from_dict", yaml.safe_load(
+        spec_file.read_text(encoding="utf-8")
+    ), table_dataset, weights)
+    copied = yaml.safe_load(
+        (tmp_path / "from_file" / "model_spec.yaml").read_text("utf-8")
+    )
+    assert copied["nodes"]["head"]["weights"] == {"path": "head.pt"}
+
+    # 一式を移し, 外部の重みのファイルを消しても同じ予測
+    moved = tmp_path / "moved"
+    moved.mkdir()
+    for name in ("from_file", "from_dict"):
+        (tmp_path / name).rename(moved / name)
+    (defs / "head.pt").unlink()
+    x = load_bundle(moved / "from_file").dataset.transform(
+        pd.read_csv(table_csv)
+    ).to_numpy(dtype=np.float32)
+    with torch.no_grad():
+        expected = model(torch.from_numpy(x)).softmax(dim=1).numpy()
+    for name in ("from_file", "from_dict"):
+        result = predict(moved / name, table_csv)
+        bundle = load_bundle(moved / name)
+        got = result[[f"p:{c}" for c in bundle.classes]].to_numpy()
+        assert np.allclose(got, expected, atol=1e-6)
 
 
 def test_load_bundle_checks(tmp_path: Path, table_dataset: Path) -> None:

@@ -257,7 +257,8 @@ def place_weights(
     state: dict
         渡した重み (学習した state_dict)
     fresh: dict
-        定義から組み立てた直後の state_dict (出どころの重み)
+        外部の重みを読まずに定義から組み立てた直後の state_dict (出どころ
+        の重み)
     copy_weights: bool
         重みを一式に写すか (写さない場合は除かない)
 

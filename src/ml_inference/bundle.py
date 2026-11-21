@@ -414,13 +414,14 @@ class Bundle:
             return self.cache["model"]
 
         # 定義から組み立て, 重みだけを読み込む (pickle の任意のコードは不可).
-        # 出どころから読むノードがあれば, 読めないときにノードと出どころを
+        # 外部の重みは学習した重みに含まれるので読まない. 出どころから読む
+        # ノードがあれば, 読めないときにノードと出どころを添えた誤り
         sourced = [
             record for record in self.info["model"].get("pretrained") or []
             if record.get("place") == "source"
         ]
         try:
-            model = build_model(self.spec, seed=0)
+            model = build_model(self.spec, seed=0, load_weights=False)
         except Exception as error:
             if not sourced:
                 raise
@@ -1375,7 +1376,9 @@ def make_bundle(
     if infos:
         spec_dict = pin_spec(spec_dict, infos)
         state = torch.load(source, map_location="cpu", weights_only=True)
-        fresh = build_model(spec_dict, seed=0).state_dict()
+        fresh = build_model(
+            spec_dict, seed=0, load_weights=False
+        ).state_dict()
         records, kept, notes = place_weights(
             infos, state, fresh, copy_weights
         )
