@@ -9,6 +9,7 @@
 - **結論**: 確信の低いものを保留にする, 決めた確率で陽性を決める, 値を帯に分ける, 列の値ごとにまとめる. 全体のまとめを日本語の文でも返す
 - **何段も先の予測と列の効き**: 予測した値を次の入力に使って先の行を埋める. どの列が予測を動かしているかを並べ替えで求める
 - **意思決定**: 予測から次の行動 (量, 選ぶ対象, 人が確かめる対象) と見込みの得と損を出し, 過去のデータでたどり直して, 素朴なやり方と今のやり方 (問題の設定と同じ決まりでも書ける) と比べる. 新しい実績で外れ方を測り直す
+- **方策の一式**: ML-Found が書き出す強化学習の方策を読み, 観測から行動と守り (行動の範囲, 止める条件, 外れたときの動き) の結果を返す. 実機では動かさない
 - **見本の一式**: 表か文のデータから小さなモデルをその場で学習し, 画面で操作を試すための一式を作る
 
 前処理は [ML-EDA](https://github.com/victor-von-pooh/ML-EDA), モデルの組み立ては [ML-ModelControl](https://github.com/victor-von-pooh/ML-ModelControl) を使い, [ML-Found](https://github.com/victor-von-pooh/ML-Found) で学習した重みを読む.
@@ -226,6 +227,20 @@ from ml_inference import remeasure
 result = remeasure("bundles/sales", "last_month.csv")
 print(result["sentences"])
 # ['今の記録の 80 % の幅は, 渡した実績の 606 行の 72 % を覆った (90 % の幅は 83 %). 外れ方を小さく見積もっていた', '測り直した外れ方の 80 % の幅は, 予測の 0.87 倍から 1.14 倍 (606 行で測った)']
+```
+
+### 強化学習の方策に守りを当てる
+
+ML-Found が書き出した方策の一式 (`policy/`) を読み, 観測から行動と守りの結果 (`ok`, `clipped`, `fallback`, `stop`, `handover`) を返す. モデルは一式に写したモデルの定義 (`metadata.model.spec`) から組み立てるか, 同じ組み立てのモデルを渡す (DESIGN の「方策の一式」).
+
+```python
+from ml_inference import load_policy
+
+policy = load_policy("outputs/cartpole/policy")
+policy.act([0.01, -0.2, 0.03, 0.1])
+# {"action": 1, "status": "ok", "reasons": []}
+policy.act([2.5, 0.0, 0.0, 0.0])
+# {"action": None, "status": "handover", "reasons": ["観測の要素 0 が範囲の外 (2.5)"]}
 ```
 
 ### 画面で試す見本の一式

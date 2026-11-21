@@ -12,6 +12,10 @@ from ml_inference.conclude import (
 from ml_inference.decision import backtest, check_decision, decide
 from ml_inference.explain import explain
 from ml_inference.forecast import forecast
+from ml_inference.policy import (
+    POLICY_FORMAT_VERSION, GuardedPolicy, apply_guards, load_policy,
+    read_policy_spec
+)
 from ml_inference.predict import OK, SKIPPED, describe_bundle, predict
 from ml_inference.procedures import (
     PROCEDURES, get_procedure, make_generator, register_procedure,
@@ -35,13 +39,16 @@ __all__ = [
     "Bundle",
     "FORMS",
     "NO_PREDICTION",
+    "GuardedPolicy",
     "OK",
+    "POLICY_FORMAT_VERSION",
     "PROCEDURES",
     "RESULT_FORMAT_VERSION",
     "ROLES",
     "SKIPPED",
     "UNDECIDED",
     "UnregisteredUnitError",
+    "apply_guards",
     "artifact_path",
     "backtest",
     "check_baseline",
@@ -56,10 +63,12 @@ __all__ = [
     "get_procedure",
     "infer",
     "load_bundle",
+    "load_policy",
     "make_bundle",
     "make_generator",
     "make_sample_bundle",
     "predict",
+    "read_policy_spec",
     "read_result",
     "register_procedure",
     "register_units",
