@@ -258,11 +258,14 @@ def test_newer_bundle_stops(tmp_path: Path, table_dataset: Path) -> None:
     ----------
     None
     """
-    # 版 5 は読めない. 版 4 は items が要る
+    # 版 6 は読めない. 版 5 は dataset を持てない. 版 4 は items が要る
     path = table_bundle(tmp_path, table_dataset)
     original = read_info(path)
+    rewrite(path, {**original, "format_version": 6})
+    with pytest.raises(ValueError, match="format_version 6 .*読めません"):
+        load_bundle(path)
     rewrite(path, {**original, "format_version": 5})
-    with pytest.raises(ValueError, match="format_version 5 .*読めません"):
+    with pytest.raises(ValueError, match="dataset を持てません"):
         load_bundle(path)
     rewrite(path, {**original, "format_version": 4})
     with pytest.raises(ValueError, match="items"):

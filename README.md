@@ -112,13 +112,15 @@ make_bundle("bundles/embed", spec, "outputs/dataset", weights, form="vector")
 result = infer("bundles/embed", "new_rows.csv")
 write_result(result, "results/embed")   # 配列は artifacts/000000.npy など, 表の artifact の列から指す
 
-# 拡散のモデル. 手順の名前, 回数, 乱数の種を一式に書く (同じ入力と種なら同じ出力)
+# 拡散のモデル. 手順の名前, 回数, 乱数の種を一式に書く. 条件の無い生成は
+# データセットの代わりに None を渡し (雑音だけの一式. 版 5), 件数と種で推論する
 make_bundle(
-    "bundles/gen", spec, "outputs/dataset", weights, form="vector",
-    role="generate", output_options={"shape": [16]},
+    "bundles/gen", spec, None, weights, form="vector",
+    output_options={"shape": [16]},
     inputs={"x": {"source": "state"}, "t": {"source": "time"}},
     procedure={"name": "ddim", "steps": 50, "seed": 0},
 )
+result = infer("bundles/gen", {"count": 8, "seed": 1})   # 同じ件数と種なら同じ出力
 ```
 
 繰り返しの手順 (`ddim`, `euler`, `greedy`, `sample`) と学習済みの重みの置き方は, DESIGN の「繰り返しの手順」「学習済みの重みの置き方」. 研究の自作の部品を使う一式は, 一式を読む前に `ml_inference.register_units(["my_lab.units"])` で部品を登録する (ML-Provide なら起動の `--units` か `ML_PROVIDE_UNITS`. DESIGN の「自作の部品」).

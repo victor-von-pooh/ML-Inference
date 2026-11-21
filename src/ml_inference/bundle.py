@@ -16,17 +16,19 @@ from ml_modelcontrol import build_model, dump_spec, load_spec
 
 from ml_inference.conclude import check_rules, plain
 from ml_inference.items import ITEM_FORMS, PREPARE_KINDS, check_items
-from ml_inference.procedures import get_procedure, option_names
+from ml_inference.procedures import PROCEDURES, get_procedure, option_names
 from ml_inference.units import check_units
 from ml_inference.weights import (
     PLACES, layers_weights, place_weights, lookup_pretrained, node_keys,
     pin_spec, state_hash, unchecked_notes
 )
 
-# 推論の一式の形の版 (版 4 は版 2 のデータセットの一式だけ. 版 1 の
-# データセットの一式は版 3 で書く)
-BUNDLE_FORMAT_VERSION = 4
+# 推論の一式の形の版 (読める最も新しい版. 版 1 のデータセットの一式は
+# 版 3, 版 2 のデータセットの一式は版 4, 雑音だけの一式は版 5 で書く)
+BUNDLE_FORMAT_VERSION = 5
 COLUMN_BUNDLE_VERSION = 3
+ITEMS_BUNDLE_VERSION = 4
+NOISE_BUNDLE_VERSION = 5
 
 # inference.yaml の一番上の項目
 TOP_KEYS = (
@@ -71,8 +73,12 @@ ORIGIN_TYPES = ("process", "annotation", "measurement", "synthetic",
 # 入力の中身の出どころ (state と time は繰り返しの手順の中身と時刻)
 INPUT_SOURCES = ("features", "items", "state", "time")
 
-# 一式を作るときに確かめる見本の件数
+# 一式を作るときに確かめる見本の件数 (雑音だけの一式は作る件数)
 SAMPLE_ROWS = 8
+NOISE_SAMPLE_ROWS = 2
+
+# 雑音だけの一式の入力の出どころ
+NOISE_SOURCES = ("state", "time")
 
 # 読める ML-Found の run.json の版
 RUN_FORMAT_VERSION = 1
@@ -157,11 +163,15 @@ class Bundle:
         Returns
         ----------
         kind: str
-            table, timeseries, image, text, pointcloud
+            table, timeseries, image, text, pointcloud, items (版 2 の
+            データセットの一式), noise (雑音だけの一式)
         """
-        # 版 2 のデータセットの一式はファイルの組
+        # 版 2 のデータセットの一式はファイルの組, 雑音だけの一式は雑音
         if self.from_items:
             kind = "items"
+            return kind
+        if self.from_noise:
+            kind = "noise"
             return kind
         kind = str(self.dataset.info.get("kind", "table"))
 
@@ -185,6 +195,25 @@ class Bundle:
         items = self.info.get("items") is not None
 
         return items
+
+    @property
+    def from_noise(self) -> bool:
+        """
+        データセットを持たない雑音だけの一式かを返す関数
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        ----------
+        noise: bool
+            dataset が null の一式 (版 5) なら True
+        """
+        # 版 5 の dataset の有無
+        noise = self.info.get("dataset") is None
+
+        return noise
 
     @property
     def mask_values(self) -> Optional[list[int]]:
@@ -356,10 +385,11 @@ class Bundle:
         plan: dict
             入力の名前ごとの source と prepend (定義の inputs の順)
         """
-        # 書かれていない入力は, データの種類から選ぶ
+        # 書かれていない入力は, データの種類から選ぶ (雑音だけの一式は
+        # 手順の中身)
         written = self.info.get("inputs") or {}
         default = "features" if self.kind in ("table", "timeseries") else (
-            "items"
+            "state" if self.from_noise else "items"
         )
         plan = {}
         for name in self.spec["inputs"]:
@@ -621,8 +651,10 @@ def check_info(info: Any) -> list[str]:
             errors.append(
                 "model.target_scale は center と scale の数にしてください"
             )
-    if not info.get("dataset"):
+    if info.get("dataset") is None and version != NOISE_BUNDLE_VERSION:
         errors.append("dataset (データセットの説明の場所) が要ります")
+    elif info.get("dataset") is not None and not info.get("dataset"):
+        errors.append("dataset (データセットの説明の場所) が空です")
 
     # 入力ごとの出どころ
     inputs = info.get("inputs") or {}
@@ -651,6 +683,70 @@ def check_info(info: Any) -> list[str]:
         if isinstance(version, int) and version < 4:
             errors.append(f"版 {version} の一式は items を持てません")
         errors.extend(check_items(info["items"]))
+    if version == NOISE_BUNDLE_VERSION:
+        errors.extend(check_noise(info))
+
+    return errors
+
+
+def check_noise(info: dict) -> list[str]:
+    """
+    雑音だけの一式 (版 5) の形を確かめる関数
+
+    Parameters
+    ----------
+    info: dict
+        inference.yaml の中身
+
+    Returns
+    ----------
+    errors: list[str]
+        誤りの一覧 (無ければ空)
+    """
+    # データセットと items を持たず, 雑音から始まる手順だけ
+    errors = []
+    if info.get("dataset") is not None:
+        errors.append(
+            f"版 {NOISE_BUNDLE_VERSION} の一式は dataset を持てません "
+            "(雑音だけの一式だけを書く版)"
+        )
+    if info.get("items") is not None:
+        errors.append(f"版 {NOISE_BUNDLE_VERSION} の一式は items を持てません")
+    procedure = info.get("procedure")
+    name = procedure.get("name") if isinstance(procedure, dict) else None
+    if name is None:
+        errors.append("雑音だけの一式には procedure (雑音から始まる手順) が"
+                      "要ります")
+    elif str(name) in PROCEDURES and PROCEDURES[str(name)].start != "noise":
+        errors.append(
+            f"雑音だけの一式の手順 {name} は雑音から始まる手順にしてください"
+        )
+
+    # 入力は手順の中身と時刻だけ (書かない入力は中身)
+    inputs = info.get("inputs") if isinstance(info.get("inputs"), dict) else {}
+    others = [
+        str(name) for name, item in inputs.items()
+        if isinstance(item, dict)
+        and item.get("source", "state") not in NOISE_SOURCES
+    ]
+    if others:
+        errors.append(
+            f"雑音だけの一式の入力 {', '.join(others)} は source を "
+            f"{', '.join(NOISE_SOURCES)} にしてください (データの入力は"
+            "持てません)"
+        )
+    if (info.get("conclusion") or {}) or info.get("decision"):
+        errors.append("雑音だけの一式は結論の決め方と意思決定の既定値を"
+                      "持てません")
+    if (info.get("model") or {}).get("target_scale") is not None:
+        errors.append("雑音だけの一式は model.target_scale を持てません")
+    held = [k for k in ("check", "uncertainty", "target")
+            if info.get(k) is not None]
+    if held:
+        errors.append(
+            f"雑音だけの一式の {', '.join(held)} は null にしてください "
+            "(比べる正解が無いため)"
+        )
 
     return errors
 
@@ -976,8 +1072,12 @@ def load_bundle(path: Union[str, Path]) -> Bundle:
     # と前処理 (データセットの説明とレシピ)
     spec = load_spec(inside(root, str(info["model"]["spec"])))
     check_units(spec)
-    data_dir = inside(root, str(info["dataset"]))
-    dataset = read_dataset(data_dir, frames=False)
+    if info.get("dataset") is None:
+        # 雑音だけの一式は説明とレシピが空のデータセット
+        dataset = Dataset(path=root, info={}, frames={}, recipe={})
+    else:
+        data_dir = inside(root, str(info["dataset"]))
+        dataset = read_dataset(data_dir, frames=False)
     unknown = [
         name for name in (info.get("inputs") or {})
         if name not in spec["inputs"]
@@ -1056,16 +1156,16 @@ def check_items_bundle(bundle: Bundle) -> None:
             "版 2 と 3 のデータセットの一式には items が要り, 版 1 のデータ"
             "セットの一式は items を持てません"
         )
-    if items is None and info.get("format_version") == BUNDLE_FORMAT_VERSION:
+    if items is None and info.get("format_version") == ITEMS_BUNDLE_VERSION:
         raise ValueError(
-            f"版 {BUNDLE_FORMAT_VERSION} の一式には items (版 2 のデータ"
+            f"版 {ITEMS_BUNDLE_VERSION} の一式には items (版 2 のデータ"
             "セットの 1 件の扱い) が要ります"
         )
     if items is None:
         return
-    if info.get("format_version") != BUNDLE_FORMAT_VERSION:
+    if info.get("format_version") != ITEMS_BUNDLE_VERSION:
         raise ValueError(
-            f"items を持つ一式は版 {BUNDLE_FORMAT_VERSION} にしてください"
+            f"items を持つ一式は版 {ITEMS_BUNDLE_VERSION} にしてください"
         )
     if bundle.form not in ITEM_FORMS:
         raise ValueError(
@@ -1260,7 +1360,7 @@ def bundle_notes(
 
 def make_bundle(
     path: Union[str, Path], spec: Union[str, Path, dict],
-    dataset: Union[str, Path], weights: Union[str, Path],
+    dataset: Union[str, Path, None], weights: Union[str, Path],
     inputs: Optional[dict] = None, output: Optional[str] = None,
     kind: Optional[str] = None,
     target_scale: Union[dict, str, None] = None,
@@ -1280,9 +1380,10 @@ def make_bundle(
         作るディレクトリ
     spec: Union[str, Path, dict]
         モデルの定義 (ML-ModelControl の形) かそのファイル
-    dataset: Union[str, Path]
+    dataset: Union[str, Path, None]
         ML-EDA で書き出したデータセットのディレクトリ (版 1 か, 版 2 の
-        ファイルの組)
+        ファイルの組). None は雑音だけの一式 (データセットを持たず, 件数
+        と種で推論する. 版 5)
     weights: Union[str, Path]
         重み (state_dict) のファイルか, ML-Found の実験のディレクトリ
         (final_model.pt を使い, 実験の状態を記録する)
@@ -1308,10 +1409,10 @@ def make_bundle(
         既にある一式を置き換えるか
     role: Optional[str] = None
         受け持ち (predict, generate, rank, group, effect. 省略すると
-        predict)
+        predict. 雑音だけの一式は generate)
     form: Optional[str] = None
         出力の形 (class, value, distribution, mask, point_cloud, vector,
-        text, image. 省略するとタスクから)
+        text, image. 省略するとタスクから. 雑音だけの一式は要る)
     output_options: Optional[dict] = None
         出力の形ごとの欄 (distribution の quantiles, 雑音から始まる手順の
         shape, mask の classes)
@@ -1359,13 +1460,26 @@ def make_bundle(
         raise ValueError(f"重み {source} がありません")
     if isinstance(spec, (str, Path)) and not Path(spec).expanduser().is_file():
         raise ValueError(f"モデルの定義 {spec} はファイルではありません")
-    data_dir = Path(dataset).expanduser().resolve()
-    if not data_dir.is_dir():
-        raise ValueError(f"データセット {data_dir} はディレクトリではありません")
     spec_dict = load_spec(spec)
     check_units(spec_dict)
-    full = read_dataset(data_dir, frames=True)
     item_info = None
+    data_dir = None
+    if dataset is None:
+        # 雑音だけの一式 (データセットを持たず, 説明とレシピが空)
+        full: Union[Dataset, ItemDataset] = Dataset(
+            path=final, info={}, frames={}, recipe={}
+        )
+        kinds, inputs = noise_fields(
+            spec_dict, inputs, role, form, output_options, target,
+            procedure, target_scale, items
+        )
+    else:
+        data_dir = Path(dataset).expanduser().resolve()
+        if not data_dir.is_dir():
+            raise ValueError(
+                f"データセット {data_dir} はディレクトリではありません"
+            )
+        full = read_dataset(data_dir, frames=True)
     if isinstance(full, ItemDataset):
         if target_scale is not None:
             raise ValueError("版 2 のデータセットの一式に target_scale は"
@@ -1373,7 +1487,7 @@ def make_bundle(
         kinds, item_info = item_fields(
             full, role, form, output_options, target, items
         )
-    else:
+    elif data_dir is not None:
         if items is not None:
             raise ValueError("items は版 2 のデータセットの一式だけに使え"
                              "ます")
@@ -1411,11 +1525,13 @@ def make_bundle(
     writing = final.with_name(f".{final.name}.writing")
     if writing.exists():
         shutil.rmtree(writing)
-    (writing / "dataset").mkdir(parents=True)
+    writing.mkdir(parents=True)
     try:
         dump_spec(spec_dict, writing / "model_spec.yaml")
-        shutil.copy(data_dir / "dataset.yaml", writing / "dataset")
-        if item_info is None:
+        if data_dir is not None:
+            (writing / "dataset").mkdir()
+            shutil.copy(data_dir / "dataset.yaml", writing / "dataset")
+        if data_dir is not None and item_info is None:
             recipe_name = str(full.info.get("recipe", "recipe.yaml"))
             if Path(recipe_name).name != recipe_name:
                 raise ValueError(f"レシピの名前 {recipe_name} がファイルの"
@@ -1427,8 +1543,7 @@ def make_bundle(
         elif copy_weights:
             shutil.copy(source, writing / "final_model.pt")
         info = {
-            "format_version": COLUMN_BUNDLE_VERSION if item_info is None
-            else BUNDLE_FORMAT_VERSION,
+            "format_version": bundle_version(data_dir, item_info),
             "name": name or final.name,
             "created_at": dt.datetime.now().astimezone().isoformat(),
             **kinds,
@@ -1442,7 +1557,7 @@ def make_bundle(
                 "pretrained": records,
             },
             "inputs": inputs or {},
-            "dataset": "dataset",
+            "dataset": None if data_dir is None else "dataset",
             "run": run,
             "conclusion": plain(conclusion or {}),
             "decision": plain(decision) if decision else None,
@@ -1480,6 +1595,10 @@ def make_bundle(
         if bundle.from_items:
             check_item_sample(bundle, full)
             measure_items(bundle, full, run, info)
+        elif bundle.from_noise:
+            check_noise_sample(bundle)
+            info["check"] = None
+            info["uncertainty"] = None
         elif bundle.column_output:
             check_sample(bundle, full)
             measure_column(bundle, full, run, info)
@@ -1499,6 +1618,185 @@ def make_bundle(
     writing.rename(final)
 
     return info
+
+
+def bundle_version(
+    data_dir: Optional[Path], item_info: Optional[dict]
+) -> int:
+    """
+    書く一式の形の版を決める関数
+
+    Parameters
+    ----------
+    data_dir: Optional[Path]
+        データセットのディレクトリ (雑音だけの一式は None)
+    item_info: Optional[dict]
+        版 2 のデータセットの 1 件の扱い (版 1 のデータセットは None)
+
+    Returns
+    ----------
+    version: int
+        雑音だけの一式は 5, 版 2 のデータセットの一式は 4, 他は 3
+    """
+    # 読む側が知る古い版で書けるものは古い版で
+    if data_dir is None:
+        version = NOISE_BUNDLE_VERSION
+    elif item_info is not None:
+        version = ITEMS_BUNDLE_VERSION
+    else:
+        version = COLUMN_BUNDLE_VERSION
+
+    return version
+
+
+def noise_fields(
+    spec: dict, inputs: Optional[dict], role: Optional[str],
+    form: Optional[str], options: Optional[dict], target: Optional[dict],
+    procedure: Optional[dict], target_scale: Union[dict, str, None],
+    items: Optional[dict]
+) -> tuple[dict, dict]:
+    """
+    雑音だけの一式の受け持ち, 出力の形, 正解の項目と入力を決める関数
+
+    Parameters
+    ----------
+    spec: dict
+        モデルの定義
+    inputs: Optional[dict]
+        モデルの入力ごとの出どころ (入力が 1 つなら省略可)
+    role: Optional[str]
+        受け持ち (省略すると generate)
+    form: Optional[str]
+        出力の形
+    options: Optional[dict]
+        出力の形ごとの欄 (shape が要る)
+    target: Optional[dict]
+        正解の種類と出どころ (使えない. 正解は null)
+    procedure: Optional[dict]
+        繰り返しの手順
+    target_scale: Union[dict, str, None]
+        目的の値の標準化 (使えない)
+    items: Optional[dict]
+        版 2 のデータセットの 1 件の扱い (使えない)
+
+    Returns
+    ----------
+    fields: dict
+        role, output, target
+    inputs: dict
+        入力ごとの出どころ (省いた 1 つの入力は state)
+
+    Raises
+    ----------
+    ValueError
+        データセットの要る項目を渡した場合と, 手順か出力の形が無い場合
+    """
+    # データセットの要る項目は使えない
+    if target_scale is not None or items is not None or target is not None:
+        raise ValueError(
+            "雑音だけの一式 (データセット無し) に target_scale, items, "
+            "target は使えません"
+        )
+    if not procedure:
+        raise ValueError(
+            "雑音だけの一式 (データセット無し) には雑音から始まる手順 "
+            "(procedure) が要ります"
+        )
+    if form is None:
+        raise ValueError(
+            "雑音だけの一式 (データセット無し) では出力の形 (form) を選んで"
+            "ください"
+        )
+
+    # 出力の形 (受け持ちは省くと生成する. 正解は無し)
+    output = {"form": form, **plain(dict(options or {}))}
+    if "form" in (options or {}):
+        raise ValueError("output_options に form は書けません (form で選ぶ)")
+    fields = {
+        "role": role or "generate",
+        "output": output,
+        "target": None,
+    }
+    errors = check_kinds(fields)
+    if errors:
+        raise ValueError("出力の形の誤り: " + " / ".join(errors))
+
+    # 入力が 1 つで省いたら手順の中身
+    plan = dict(inputs or {})
+    if not plan and len(spec["inputs"]) == 1:
+        plan = {next(iter(spec["inputs"])): {"source": "state"}}
+
+    return fields, plan
+
+
+def check_noise_sample(bundle: Bundle) -> None:
+    """
+    雑音だけの一式の手順で数件を作り, 出力の形を確かめる関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        作っている一式
+
+    Returns
+    ----------
+    None
+
+    Raises
+    ----------
+    ValueError
+        手順を動かせない場合と, 出力の形が合わない場合
+    """
+    # 予測の関数はこのモジュールを読むので, 使うときに読み込む
+    from ml_inference.predict import shape_inputs
+
+    # 種は手順の種で数件
+    tensors = shape_inputs(bundle, {}, NOISE_SAMPLE_ROWS)
+    sample_inference(bundle, tensors)
+
+
+def sample_inference(bundle: Bundle, tensors: list) -> None:
+    """
+    見本の入力で推論して読み, 失敗を分かりやすい誤りにする関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        作っている一式
+    tensors: list
+        モデルの入力の順のテンソル
+
+    Returns
+    ----------
+    None
+
+    Raises
+    ----------
+    ValueError
+        推論か出力の読み方に失敗した場合
+    """
+    # 予測の関数はこのモジュールを読むので, 使うときに読み込む
+    from ml_inference.predict import decode, run_model
+
+    # 形の誤りは分かりやすい文に (つなぎ方の誤りの文はそのまま. 長い誤り
+    # の文は始めだけ)
+    try:
+        outputs = run_model(bundle, tensors, 64, "cpu")
+        decode(bundle, outputs)
+    except ValueError:
+        raise
+    except Exception as error:
+        text = str(error)
+        text = text if len(text) <= 300 else text[:300] + " …"
+        hint = (
+            "重みが定義と合いません. 学習に使った定義と重みの組を選んで"
+            "ください" if "state_dict" in text else
+            "入力のつなぎ方 (inputs) と定義の入力の形を確かめてください"
+        )
+        raise ValueError(
+            f"見本の推論に失敗しました ({type(error).__name__}: {text}). "
+            f"{hint}"
+        ) from error
 
 
 def measure_column(
@@ -1695,33 +1993,14 @@ def check_sample(bundle: Bundle, dataset: Dataset) -> None:
         モデルに見本を渡せない場合と, 出力の形がタスクに合わない場合
     """
     # 予測の関数はこのモジュールを読むので, 使うときに読み込む
-    from ml_inference.predict import decode, run_model, shape_inputs
+    from ml_inference.predict import shape_inputs
 
     # 前処理を済ませた学習用の最初の数件 (分割の名前は train を優先)
     split = "train" if "train" in dataset.frames else next(
         iter(dataset.frames)
     )
     sources = split_sources(bundle, dataset, split, 0, SAMPLE_ROWS)
-
-    # 形の誤りは分かりやすい文に (つなぎ方の誤りの文はそのまま. 長い誤り
-    # の文は始めだけ)
-    try:
-        outputs = run_model(bundle, shape_inputs(bundle, sources), 64, "cpu")
-        decode(bundle, outputs)
-    except ValueError:
-        raise
-    except Exception as error:
-        text = str(error)
-        text = text if len(text) <= 300 else text[:300] + " …"
-        hint = (
-            "重みが定義と合いません. 学習に使った定義と重みの組を選んで"
-            "ください" if "state_dict" in text else
-            "入力のつなぎ方 (inputs) と定義の入力の形を確かめてください"
-        )
-        raise ValueError(
-            f"見本の推論に失敗しました ({type(error).__name__}: {text}). "
-            f"{hint}"
-        ) from error
+    sample_inference(bundle, shape_inputs(bundle, sources))
 
 
 def check_against_run(
