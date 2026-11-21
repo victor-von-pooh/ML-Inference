@@ -1238,7 +1238,9 @@ def loose_steps(
 
 
 class FailingBuild:
-    def __call__(self, spec: dict, seed: int = 0) -> Any:
+    def __call__(
+        self, spec: dict, seed: int = 0, load_weights: bool = True
+    ) -> Any:
         """
         ネットワークの無いときのように組み立てに失敗する関数
 
@@ -1248,6 +1250,8 @@ class FailingBuild:
             定義
         seed: int = 0
             乱数の種
+        load_weights: bool = True
+            外部の重みを読むか
 
         Returns
         ----------
