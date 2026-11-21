@@ -175,6 +175,96 @@ def lookup_pretrained(
     return infos, notes
 
 
+def unchecked_notes(spec: dict) -> list[str]:
+    """
+    ライセンスを確かめずに一式に写す学習済みの重みの注意を返す関数
+
+    部分モデルの中の学習済みの部品と, ノードの weights の hub か unit から
+    読んだ外部の重みは, 置き方を決めずに学習した重みとして一式に写るため
+
+    Parameters
+    ----------
+    spec: dict
+        モデルの定義
+
+    Returns
+    ----------
+    notes: list[str]
+        注意の文 (部分モデルの中と外部の重みで 1 文ずつ. 無ければ空)
+    """
+    # 本体と部分モデルのノード (部分モデルの中は「部分モデル/ノード」)
+    graphs = [("", spec)]
+    subgraphs = spec.get("subgraphs")
+    if isinstance(subgraphs, dict):
+        graphs += [(f"{name}/", graph) for name, graph in subgraphs.items()]
+    inner = []
+    external = []
+    for prefix, graph in graphs:
+        nodes = graph.get("nodes") if isinstance(graph, dict) else None
+        for node, item in (nodes if isinstance(nodes, dict) else {}).items():
+            if not isinstance(item, dict):
+                continue
+            weights = item.get("weights")
+            if isinstance(weights, dict) and (
+                "hub" in weights or "unit" in weights
+            ):
+                external.append(f"{prefix}{node}")
+            if prefix and inner_pretrained(item):
+                inner.append(f"{prefix}{node}")
+
+    # 確かめていない重みのノードを挙げた注意
+    notes = []
+    if inner:
+        notes.append(
+            f"部分モデルの中のノード {', '.join(inner)} の学習済みの重みは"
+            "ライセンスを確かめずに一式の重みに含めました. 元の重みの"
+            "ライセンスを確かめてから一式を渡してください"
+        )
+    if external:
+        notes.append(
+            f"ノード {', '.join(external)} が weights の hub か unit から"
+            "読んだ外部の重みはライセンスを確かめずに一式の重みに含めました."
+            " 元の重みのライセンスを確かめてから一式を渡してください"
+        )
+
+    return notes
+
+
+def inner_pretrained(item: dict) -> bool:
+    """
+    部分モデルの中のノードが学習済みの重みを読む部品かを返す関数
+
+    Parameters
+    ----------
+    item: dict
+        ノードの定義
+
+    Returns
+    ----------
+    loads: bool
+        pretrained_info が None でない場合と, 読めなかった場合は True
+        (入っている ML-ModelControl に pretrained_info が無い場合と,
+        部分モデルの部品は False)
+    """
+    # ネットワークを使わずに, 重みを読む部品かだけを見る
+    unit = item.get("unit")
+    if not unit or str(unit).startswith(SUBGRAPH_PREFIX):
+        return False
+    try:
+        from ml_modelcontrol import pretrained_info
+    except ImportError:
+        return False
+    try:
+        info = pretrained_info(
+            unit, dict(item.get("params") or {}), fetch=False
+        )
+    except Exception:
+        return True
+    loads = info is not None
+
+    return loads
+
+
 def pin_spec(spec: dict, infos: dict) -> dict:
     """
     写せない重みの版を固定した定義を返す関数

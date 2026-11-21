@@ -909,11 +909,12 @@ def test_pretrained_info_is_read_lazily(
 
 
 def test_subgraph_node_skips_pretrained_info(
-    tmp_path: Path, table_dataset: Path
+    tmp_path: Path, table_dataset: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """
-    部分モデルを部品にしたノードを pretrained_info に渡さず, 誤った
-    ライセンスの注意を出さないことを確かめる関数
+    部分モデルを部品にしたノードを pretrained_info に渡さず, 部分モデルの
+    中の学習済みの部品と weights の hub から読む重みに注意を残すことを
+    確かめる関数
 
     Parameters
     ----------
@@ -921,6 +922,8 @@ def test_subgraph_node_skips_pretrained_info(
         一時ディレクトリ
     table_dataset: Path
         データセット
+    monkeypatch: pytest.MonkeyPatch
+        差し替え
 
     Returns
     ----------
@@ -953,6 +956,52 @@ def test_subgraph_node_skips_pretrained_info(
     info = make_bundle(tmp_path / "nested", spec, table_dataset, weights)
     assert info["model"]["pretrained"] == []
     assert not any("ライセンス" in n for n in info["notes"])
+
+    # 部分モデルの中の学習済みの部品は, 記録せずに注意を 1 文
+    monkeypatch.setattr(
+        ml_modelcontrol, "pretrained_info", LinearInfo(), raising=False
+    )
+    info = make_bundle(tmp_path / "inner", spec, table_dataset, weights)
+    assert info["model"]["pretrained"] == []
+    inner = [n for n in info["notes"] if "部分モデルの中のノード" in n]
+    assert len(inner) == 1 and "head/fc" in inner[0]
+
+    # weights の hub から読む外部の重みも注意 (組み立てでは読まない)
+    flat = linear_spec(width, 3)
+    flat["format_version"] = 2
+    flat["nodes"]["head"]["weights"] = {"hub": "org/demo", "file": "w.pt"}
+    plain = save_weights(linear_spec(width, 3), tmp_path / "plain.pt")
+    monkeypatch.undo()
+    info = make_bundle(tmp_path / "hub", flat, table_dataset, plain)
+    external = [n for n in info["notes"] if "hub か unit" in n]
+    assert len(external) == 1 and "ノード head " in external[0]
+
+
+class LinearInfo:
+    def __call__(
+        self, unit: str, params: dict, fetch: bool = True
+    ) -> Any:
+        """
+        全結合を学習済みの部品とみなす pretrained_info の代わりの関数
+
+        Parameters
+        ----------
+        unit: str
+            部品の名前
+        params: dict
+            引数
+        fetch: bool = True
+            ネットワークを使うか
+
+        Returns
+        ----------
+        info: Any
+            全結合は再配布できない情報, 他は None
+        """
+        # 全結合だけ学習済み
+        info = license_info(False) if unit == "nn.Linear" else None
+
+        return info
 
 
 class FakeInfo:

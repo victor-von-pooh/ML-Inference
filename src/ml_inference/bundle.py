@@ -20,7 +20,7 @@ from ml_inference.procedures import get_procedure, option_names
 from ml_inference.units import check_units
 from ml_inference.weights import (
     PLACES, layers_weights, place_weights, lookup_pretrained, node_keys,
-    pin_spec, state_hash
+    pin_spec, state_hash, unchecked_notes
 )
 
 # 推論の一式の形の版 (版 4 は版 2 のデータセットの一式だけ. 版 1 の
@@ -1384,8 +1384,10 @@ def make_bundle(
             target
         )
 
-    # 学習済みの重みを読むノードの置き方 (無ければ丸ごとの写し)
+    # 学習済みの重みを読むノードの置き方 (無ければ丸ごとの写し) と,
+    # ライセンスを確かめずに写す重みの注意
     infos, weight_notes = lookup_pretrained(spec_dict, pretrained)
+    weight_notes.extend(unchecked_notes(spec_dict))
     records: list = []
     kept = None
     if infos:
