@@ -43,7 +43,9 @@ def decode(item: dict) -> Any:
     return value
 
 
-def assert_same(result: dict, expected: dict) -> None:
+def assert_same(
+    result: dict, expected: dict, exact: bool = True
+) -> None:
     """
     守りの結果が ML-Found の結果と同じことを確かめる関数
 
@@ -53,6 +55,9 @@ def assert_same(result: dict, expected: dict) -> None:
         ML-Inference の結果
     expected: dict
         ML-Found の結果 (期待の結果のファイルの形)
+    exact: bool = True
+        box の行動の値を完全に比べるか. モデルを動かした結果は計算の
+        仕組み (OS や CPU) で最後の桁が変わるので, 相対の 1e-5 で比べる
 
     Returns
     ----------
@@ -66,9 +71,11 @@ def assert_same(result: dict, expected: dict) -> None:
         assert isinstance(result["action"], np.ndarray)
         assert result["action"].dtype == np.float32
         assert list(result["action"].shape) == action["shape"]
-        assert result["action"].astype(np.float64).reshape(-1).tolist() == (
-            action["values"]
-        )
+        values = result["action"].astype(np.float64).reshape(-1)
+        if exact:
+            assert values.tolist() == action["values"]
+            return
+        assert np.allclose(values, action["values"], rtol=1e-5, atol=0)
         return
     assert result["action"] == action
     assert type(result["action"]) is type(action)
@@ -138,7 +145,7 @@ def test_act_matches_ml_found(name: str) -> None:
     policy = load_policy(POLICIES / name)
     for case in EXPECTED[name]:
         result = policy.act(decode(case["observation"]))
-        assert_same(result, case["result"])
+        assert_same(result, case["result"], exact=False)
 
 
 def test_cartpole_statuses() -> None:
