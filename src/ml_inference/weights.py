@@ -69,6 +69,30 @@ def state_hash(state: dict, keys: list[str]) -> str:
     return digest
 
 
+def layers_weights(spec: dict, node: str) -> bool:
+    """
+    定義の一番上のノードが外部の重み (weights) を重ねるかを返す関数
+
+    Parameters
+    ----------
+    spec: dict
+        モデルの定義
+    node: str
+        ノードの名前
+
+    Returns
+    ----------
+    layered: bool
+        ノードが weights を持つか (出どころの重みの上に重ねて読むので,
+        出どころから読み直した重みと違う)
+    """
+    # 一番上のノードの weights の有無
+    item = (spec.get("nodes") or {}).get(node)
+    layered = isinstance(item, dict) and bool(item.get("weights"))
+
+    return layered
+
+
 def lookup_pretrained(
     spec: dict, given: Optional[dict]
 ) -> tuple[dict, list[str]]:
@@ -188,7 +212,7 @@ def pin_spec(spec: dict, infos: dict) -> dict:
 
 def placement_notes(
     node: str, info: dict, place: str, copy_weights: bool, unchanged: bool,
-    readable: bool
+    readable: bool, layered: bool
 ) -> list[str]:
     """
     学習済みの重みの置き方の理由の注意を返す関数
@@ -207,6 +231,8 @@ def placement_notes(
         学習で変わっていないか
     readable: bool
         ライセンスと版の識別子を読めたか
+    layered: bool
+        定義のノードが外部の重み (weights) を重ねるか
 
     Returns
     ----------
@@ -225,6 +251,13 @@ def placement_notes(
             f"{info.get('license')}) は再配布できないので一式に写さず, "
             f"出どころ {name} の版 {info.get('pinned_revision')} から読み"
             "ます (読んだ重みは hash で確かめます)"
+        )
+    elif layered:
+        notes.append(
+            f"ノード {node} の学習済みの重み ({status}) は再配布できるか"
+            "分からないか, できませんが, 定義で外部の重み (weights) を"
+            "重ねたので出どころの重みと違い, 一式の重みに含めました. 元の"
+            "重みのライセンスを確かめてから一式を渡してください"
         )
     elif not readable:
         notes.append(
@@ -245,7 +278,7 @@ def placement_notes(
 
 
 def place_weights(
-    infos: dict, state: dict, fresh: dict, copy_weights: bool
+    infos: dict, state: dict, fresh: dict, copy_weights: bool, spec: dict
 ) -> tuple[list[dict], dict, list[str]]:
     """
     学習済みの重みを写すか出どころから読むかを決める関数
@@ -261,6 +294,8 @@ def place_weights(
         の重み)
     copy_weights: bool
         重みを一式に写すか (写さない場合は除かない)
+    spec: dict
+        モデルの定義 (外部の重みを重ねるノードは出どころから読まない)
 
     Returns
     ----------
@@ -286,14 +321,16 @@ def place_weights(
         readable = info.get("license") is not None and bool(
             info.get("pinned_revision")
         )
+        layered = layers_weights(spec, node)
         place = "source" if (
             copy_weights and not redistributable and unchanged and readable
+            and not layered
         ) else "bundle"
         if place == "source":
             for key in keys:
                 kept.pop(key)
         notes.extend(placement_notes(node, info, place, copy_weights,
-                                     unchanged, readable))
+                                     unchanged, readable, layered))
         record: dict[str, Any] = {"node": node}
         record.update({k: info.get(k) for k in INFO_KEYS})
         record["redistributable"] = redistributable

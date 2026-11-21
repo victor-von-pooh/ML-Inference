@@ -27,6 +27,7 @@ from ml_inference.procedures import (
     get_procedure, make_generator, option_names, register_procedure,
     run_procedure, start_noise
 )
+from ml_inference.weights import state_hash
 
 # 出どころの重みを作る乱数の種 (入れ替わった出どころを試すため変える)
 SOURCE = {"seed": 1}
@@ -789,6 +790,81 @@ def test_pretrained_weights_placement(
     with pytest.raises(ValueError, match="ノードにありません"):
         make_bundle(tmp_path / "bad", spec, table_dataset, weights,
                     pretrained={"other": license_info(False)})
+
+
+def test_layered_pretrained_node(
+    tmp_path: Path, table_dataset: Path, table_csv: Path
+) -> None:
+    """
+    外部の重みを重ねた学習済みのノードを一式の重みに含め, そのノードを
+    出どころから読む以前の一式を誤りにすることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    table_dataset: Path
+        データセット
+    table_csv: Path
+        元の CSV
+
+    Returns
+    ----------
+    None
+    """
+    # 出どころの部品の上に外部の重みを重ねる定義
+    SOURCE["seed"] = 1
+    width = len(load_dataset(table_dataset).features)
+    spec = pretrained_spec(width)
+    spec["format_version"] = 2
+    spec["nodes"]["base"]["weights"] = {"path": "over.pt"}
+    defs = tmp_path / "defs"
+    defs.mkdir()
+    over = nn.Linear(width, 3)
+    torch.save({f"fc.{k}": v for k, v in over.state_dict().items()},
+               defs / "over.pt")
+    spec_file = defs / "model.yaml"
+    spec_file.write_text(yaml.safe_dump(spec), encoding="utf-8")
+    weights = tmp_path / "w.pt"
+    torch.save(build_model(spec_file, seed=0).state_dict(), weights)
+
+    # 写せない重みでも, 重ねたので出どころと違い一式の重みに含める
+    path = tmp_path / "layered"
+    info = make_bundle(path, spec_file, table_dataset, weights,
+                       pretrained={"base": license_info(False)})
+    assert info["model"]["pretrained"][0]["place"] == "bundle"
+    assert any("外部の重み (weights) を重ねた" in n for n in info["notes"])
+    assert len(torch.load(path / "final_model.pt", weights_only=True)) == 2
+    model = build_model(spec_file, seed=0)
+    model.eval()
+    x = load_bundle(path).dataset.transform(
+        pd.read_csv(table_csv)
+    ).to_numpy(dtype=np.float32)
+    with torch.no_grad():
+        expected = model(torch.from_numpy(x)).softmax(dim=1).numpy()
+    result = predict(path, table_csv)
+    got = result[[f"p:{c}" for c in load_bundle(path).classes]].to_numpy()
+    assert np.allclose(got, expected, atol=1e-6)
+
+    # 重ねたノードを出どころから読む以前の一式 (記録の hash は重ねた重み)
+    plain_spec = pretrained_spec(width)
+    plain = tmp_path / "plain.pt"
+    torch.save(build_model(plain_spec, seed=0).state_dict(), plain)
+    old = tmp_path / "old"
+    make_bundle(old, plain_spec, table_dataset, plain,
+                pretrained={"base": license_info(False)})
+    written = yaml.safe_load((old / "model_spec.yaml").read_text("utf-8"))
+    written["format_version"] = 2
+    written["nodes"]["base"]["weights"] = {"path": "over.pt"}
+    (old / "model_spec.yaml").write_text(yaml.safe_dump(written), "utf-8")
+    info = read_info(old)
+    layered_state = torch.load(weights, weights_only=True)
+    info["model"]["pretrained"][0]["sha256"] = state_hash(
+        layered_state, sorted(layered_state)
+    )
+    rewrite(old, info)
+    with pytest.raises(ValueError, match="一式を作り直して"):
+        predict(old, table_csv)
 
 
 def test_pretrained_info_is_read_lazily(
