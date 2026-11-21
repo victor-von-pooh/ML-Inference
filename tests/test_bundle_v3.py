@@ -493,12 +493,17 @@ def test_array_decoders() -> None:
     images = DECODERS["image"](stub, np.ones((2, 3, 4, 4)))["output"]
     assert images[0].shape == (3, 4, 4)
 
-    # 文は位置ごとに最も大きい番号を空白でつなぐ
-    stub = SimpleNamespace(form="text", output_kind="logits")
+    # 文は位置ごとに最も大きい番号を空白でつなぐ (語彙が無ければ文も番号)
+    stub = SimpleNamespace(
+        form="text", output_kind="logits", procedure=None,
+        dataset=SimpleNamespace(recipe={})
+    )
     tokens = np.zeros((1, 2, 4))
     tokens[0, 0, 3] = 1.0
     tokens[0, 1, 1] = 1.0
-    assert DECODERS["text"](stub, tokens)["prediction"] == ["3 1"]
+    decoded = DECODERS["text"](stub, tokens)
+    assert decoded["tokens"] == ["3 1"]
+    assert decoded["prediction"] == ["3 1"]
 
 
 def test_generation_bundle_with_procedure(
@@ -627,17 +632,21 @@ def test_text_generation_bundle(tmp_path: Path) -> None:
         )
         frame = pd.DataFrame({"text": ["良い品", "悪い"]})
         first = predict(path, frame)
-        lengths = [len(text.split()) for text in first["prediction"]]
+        lengths = [len(text.split()) for text in first["tokens"]]
         assert lengths == [7, 7]
-        again = predict(path, frame)["prediction"].tolist()
-        assert again == first["prediction"].tolist()
+        again = predict(path, frame)["tokens"].tolist()
+        assert again == first["tokens"].tolist()
         results[name] = first
     # 渡した文の番号が先頭に残る
     bundle = load_bundle(tmp_path / "greedy")
     head = " ".join(
         str(int(v)) for v in bundle.dataset.transform_item("良い品")
     )
-    assert results["greedy"].loc[0, "prediction"].startswith(head)
+    assert results["greedy"].loc[0, "tokens"].startswith(head)
+
+    # 文はレシピの文字の語彙で戻し, 渡した文で始まる
+    assert results["greedy"].loc[0, "prediction"].startswith("良い品")
+    assert results["greedy"].loc[1, "prediction"].startswith("悪い")
 
 
 def pretrained_spec(width: int) -> dict:
