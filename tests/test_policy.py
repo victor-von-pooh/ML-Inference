@@ -36,7 +36,8 @@ def decode(item: dict) -> Any:
     """
     # 有限でない値の文字を数に戻して形を付ける
     if item["kind"] == "raw":
-        return item["value"]
+        value = item["value"]
+        return value
     values = np.array([float(number) for number in item["values"]])
     value = values.reshape(item["shape"]).tolist()
 
@@ -187,6 +188,8 @@ def test_box_ignores_unused_weights() -> None:
     assert statuses == {"ok", "clipped", "fallback"}
     policy = load_policy(POLICIES / "box")
     assert "log_std" not in policy.model.state_dict()
+    assert policy.unused_keys == ["log_std", "value.bias", "value.weight"]
+    assert load_policy(POLICIES / "cartpole").unused_keys == []
 
 
 def test_apply_guards_matches_ml_found() -> None:
@@ -315,6 +318,37 @@ def test_rejects_changed_weights(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="extra.weight"):
         load_policy(POLICIES / "cartpole", model)
 
+    # 一式の重みと形の違う層を持つモデル
+    model = build_model(load_spec(POLICIES / "box" / "model_spec.yaml"))
+    with pytest.raises(ValueError, match="形がモデルと合いません"):
+        load_policy(POLICIES / "cartpole", model)
+
+
+@pytest.mark.parametrize("name", ["policy.json", "policy.pt"])
+def test_rejects_links_outside(tmp_path: Path, name: str) -> None:
+    """
+    一式の外を指すリンクの policy.json と policy.pt を読まないことを
+    確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時の場所
+    name: str
+        リンクにするファイルの名前
+
+    Returns
+    ----------
+    None
+    """
+    # ファイルを一式の外に移し, 一式の中にリンクを置く
+    directory = copy_policy("cartpole", tmp_path)
+    outside = tmp_path / name
+    shutil.move(directory / name, outside)
+    (directory / name).symlink_to(outside)
+    with pytest.raises(ValueError, match="一式の外"):
+        load_policy(directory)
+
 
 @pytest.mark.parametrize("change, message", [
     ({"format_version": POLICY_FORMAT_VERSION + 1}, "新しい"),
@@ -326,7 +360,8 @@ def test_rejects_changed_weights(tmp_path: Path) -> None:
     (
         {"metadata": {"model": {"spec": "../cartpole/model_spec.yaml"}}},
         "一式の外"
-    )
+    ),
+    ({"metadata": {"model": {"spec": "."}}}, "ファイルではありません")
 ])
 def test_rejects_bad_spec(tmp_path: Path, change: dict, message: str) -> None:
     """

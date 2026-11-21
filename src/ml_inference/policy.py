@@ -533,10 +533,16 @@ def read_policy_spec(path: Union[str, Path]) -> dict[str, Any]:
     ----------
     spec: dict[str, Any]
         policy.json の中身
+
+    Raises
+    ----------
+    ValueError
+        policy.json が一式の外を指す場合と, 版か形が違う場合
     """
-    # NaN と Infinity は JSON の外なので拒んで読み, 版と形を確認
+    # 一式の外を指すリンクは読まず, NaN と Infinity は JSON の外なので
+    # 拒んで読み, 版と形を確認
     spec = json.loads(
-        (Path(path) / SPEC_FILE).read_text(encoding="utf-8"),
+        inside(Path(path), SPEC_FILE).read_text(encoding="utf-8"),
         parse_constant=reject_constant
     )
     check_policy_spec(spec)
@@ -805,10 +811,15 @@ def apply_guards(
 
 
 class GuardedPolicy:
-    def __init__(self, model: nn.Module, spec: dict):
-        # cpu の推論のモードのモデルと, policy.json の中身を保存
+    def __init__(
+        self, model: nn.Module, spec: dict,
+        unused_keys: Optional[list[str]] = None
+    ):
+        # cpu の推論のモードのモデル, policy.json の中身, 一式の重みのうち
+        # モデルに無く読まなかったキー (log_std, 価値の関数など) を保存
         self.model = model.cpu().eval()
         self.spec = spec
+        self.unused_keys = list(unused_keys or [])
 
     def act(self, observation: Any) -> dict[str, Any]:
         """
@@ -894,7 +905,8 @@ def policy_model(directory: Path, spec: dict) -> nn.Module:
     Raises
     ----------
     ValueError
-        定義の場所が無いか一式の外を指す, 入力か出力が 1 つでない場合
+        定義の場所が無い, 一式の外を指す, ファイルでない, 入力か出力が
+        1 つでない場合
     """
     # 組み立て方は一式に写したモデルの定義だけ (クラスの名前からは
     # コードを読み込まない)
@@ -908,7 +920,12 @@ def policy_model(directory: Path, spec: dict) -> nn.Module:
             "model に渡してください (クラスの名前からはコードを読み込み"
             "ません)"
         )
-    definition = load_spec(inside(directory, relative))
+    location = inside(directory, relative)
+    if not location.is_file():
+        raise ValueError(
+            f"metadata.model.spec の {relative} はファイルではありません"
+        )
+    definition = load_spec(location)
 
     # 観測の 1 つの入力から行動の 1 つの出力
     inputs = definition.get("inputs") or {}
@@ -944,17 +961,19 @@ def load_policy(
     Returns
     ----------
     policy: GuardedPolicy
-        act(observation) で行動を返す方策 (cpu で動かす)
+        act(observation) で行動を返す方策 (cpu で動かす). unused_keys に
+        一式の重みのうち読まなかったキー
 
     Raises
     ----------
     ValueError
-        一式の形が違う, 重みの sha256 が違う, 重みがモデルと合わない場合
+        一式の形が違う, 一式の外を指す, 重みの sha256 が違う, 重みが
+        モデルと合わない (足りないか形が違う) 場合
     """
     # 版と形と, 重みのファイルの sha256 を確かめてから読み込み
     directory = Path(path)
     spec = read_policy_spec(directory)
-    weights = directory / spec["weights"]
+    weights = inside(directory, spec["weights"])
     if file_sha256(weights) != spec["weights_sha256"]:
         raise ValueError(
             f"{spec['weights']} の sha256 が policy.json と違います "
@@ -967,13 +986,19 @@ def load_policy(
     if model is None:
         model = policy_model(directory, spec)
     model = model.cpu()
-    loaded = model.load_state_dict(state, strict=False)
+    try:
+        loaded = model.load_state_dict(state, strict=False)
+    except RuntimeError as error:
+        raise ValueError(
+            f"{spec['weights']} の重みの形がモデルと合いません ({error}). "
+            "書き出したときと同じ組み立てのモデルを使ってください"
+        ) from error
     if loaded.missing_keys:
         raise ValueError(
             f"{spec['weights']} にモデルの重み "
             f"{', '.join(loaded.missing_keys)} がありません. 書き出した"
             "ときと同じ組み立てのモデルを使ってください"
         )
-    policy = GuardedPolicy(model, spec)
+    policy = GuardedPolicy(model, spec, sorted(loaded.unexpected_keys))
 
     return policy
