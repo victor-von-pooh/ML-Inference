@@ -443,3 +443,28 @@ def test_rejects_nan_in_json(tmp_path: Path) -> None:
     path.write_text(text, encoding="utf-8")
     with pytest.raises(ValueError, match="NaN"):
         read_policy_spec(directory)
+
+
+def test_huge_integer_falls_back() -> None:
+    """
+    float にできない桁の大きな整数の観測と出力は, 誤りにせずに外れたときの
+    動きにすることを確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 観測 (JSON の大きな整数のリテラルを読んだ値) と, apply_guards の出力
+    huge = 10 ** 400
+    policy = load_policy(POLICIES / "cartpole")
+    result = policy.act([1, 1.0, 0, huge])
+    assert result["action"] is None and result["status"] == "handover"
+    assert result["reasons"][0].startswith("観測を数の配列にできない")
+    spec = read_policy_spec(POLICIES / "cartpole")
+    result = apply_guards(spec, [0.0, 0.0, 0.0, 0.0], [0.0, huge])
+    assert result["status"] == "handover"
+    assert result["reasons"][0].startswith("モデルの出力を数にできない")
