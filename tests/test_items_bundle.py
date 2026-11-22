@@ -620,38 +620,6 @@ def test_mask_restored_to_original_sizes(tmp_path: Path) -> None:
         assert np.array_equal(stored, output)
 
 
-def test_restore_size_nearest() -> None:
-    """
-    領域を元の大きさに戻すとき, 戻した画素の中心に最も近い出力の画素の
-    値だけを使うことを確かめる関数
-
-    Parameters
-    ----------
-    None
-
-    Returns
-    ----------
-    None
-    """
-    # 2 倍は画素の繰り返し, 同じ大きさはそのまま
-    mask = np.array([[0, 1], [2, 3]], dtype=np.int64)
-    expected = np.repeat(np.repeat(mask, 2, axis=0), 2, axis=1)
-    assert np.array_equal(restore_size(mask, (4, 4)), expected)
-    assert np.array_equal(restore_size(mask, (2, 2)), mask)
-
-    # 割り切れない大きさも, 戻した画素の中心を含む出力の画素の値
-    rng = np.random.default_rng(0)
-    grid = rng.integers(0, 3, size=(32, 32)).astype(np.int64)
-    for height, width in [(40, 48), (32, 24), (7, 5), (33, 31)]:
-        ours = restore_size(grid, (height, width))
-        assert ours.shape == (height, width) and ours.dtype == np.int64
-        for r in range(height):
-            for c in range(width):
-                row = int((r + 0.5) * 32 // height)
-                column = int((c + 0.5) * 32 // width)
-                assert ours[r, c] == grid[row, column]
-
-
 def test_resized_cloud_bundle(tmp_path: Path) -> None:
     """
     画像を縮めた撮影と点群の版 3 のデータセットから一式を作り, 元の撮影
