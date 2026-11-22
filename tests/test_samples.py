@@ -94,7 +94,13 @@ def test_make_sample_bundle(tmp_path: Path) -> None:
         )
         assert info["name"] == f"見本 {kind}"
         bundle = load_bundle(tmp_path / kind)
-        assert bundle.dataset.info["source"]["path"] == str(source)
+        # 元のデータは場所 (手元の場所を残す版 1 の書き出し) か名前だけ
+        # (手元の場所を残さない版 1 の書き出し)
+        described = bundle.dataset.info["source"]
+        if "path" in described:
+            assert described["path"] == str(source)
+        else:
+            assert described["name"] == source.name
         result = infer(bundle, frames[kind].head(20))
         assert (result["frame"]["status"] == "ok").sum() > 0
 
