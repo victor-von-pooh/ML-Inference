@@ -1,9 +1,9 @@
 from pathlib import Path
 import tempfile
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import numpy as np
-from ml_eda import ItemDataset, normalize_capture, read_capture
+from ml_eda import ItemDataset, load_items, normalize_capture, read_capture
 
 # 入力の 1 件の扱い方と, 扱える入力の項目の種類
 PREPARE_KINDS = {
@@ -13,8 +13,9 @@ PREPARE_KINDS = {
 }
 PREPARES = tuple(PREPARE_KINDS)
 
-# 点を選ぶ扱い方
+# 点を選ぶ扱い方と, その入力の項目の種類 (選ぶ点の数が要る)
 POINT_PREPARES = ("capture_points", "points")
+POINT_KINDS = tuple(PREPARE_KINDS[p] for p in POINT_PREPARES)
 
 # 版 2 のデータセットから作れる出力の形 (正解の種類と同じ)
 ITEM_FORMS = ("mask", "point_cloud")
@@ -173,11 +174,44 @@ def mask_classes(entry: dict) -> tuple[list[int], list[str]]:
     return classes
 
 
-def resolve_items(
+def item_form(dataset: ItemDataset) -> str:
+    """
+    版 2 のデータセットから一式を作れるかを確かめ, 出力の形を返す関数
+
+    Parameters
+    ----------
+    dataset: ItemDataset
+        版 2 のデータセット
+
+    Returns
+    ----------
+    form: str
+        出力の形 (正解の種類と同じ mask か point_cloud)
+
+    Raises
+    ----------
+    ValueError
+        予測するの領域か点群のデータセットでない場合
+    """
+    # 作れるのは予測するで, 正解の種類が領域か点群のものだけ
+    form = (dataset.info.get("target") or {}).get("kind")
+    if dataset.info.get("role") != "predict" or form not in ITEM_FORMS:
+        raise ValueError(
+            f"版 2 のデータセットから一式を作れるのは, 予測する (role: "
+            f"predict) で正解の種類が {', '.join(ITEM_FORMS)} のものだけ"
+            f"です (今は role: {dataset.info.get('role')}, 正解の種類: "
+            f"{form})"
+        )
+
+    return form
+
+
+def item_defaults(
     dataset: ItemDataset, form: str, given: Optional[dict]
 ) -> tuple[dict, Optional[list[str]]]:
     """
-    版 2 のデータセットと渡した欄から, 一式の items を決める関数
+    版 2 のデータセットと渡した欄から, 一式の items の省いた欄を埋める
+    関数 (扱い方の設定は確かめない)
 
     Parameters
     ----------
@@ -186,18 +220,17 @@ def resolve_items(
     form: str
         出力の形 (mask か point_cloud)
     given: Optional[dict]
-        make_bundle に渡した items (省いた欄はデータセットから)
+        渡した items (省いた欄はデータセットから)
 
     Returns
     ----------
-    resolved: tuple[dict, Optional[list[str]]]
+    filled: tuple[dict, Optional[list[str]]]
         items と, 領域のクラスの名前 (領域でなければ None)
 
     Raises
     ----------
     ValueError
-        項目が無い場合, 扱い方と項目の種類が合わない場合, 欄に誤りが
-        ある場合
+        項目が無い場合と, 扱い方と項目の種類が合わない場合
     """
     # 入力と正解の項目
     given = dict(given or {})
@@ -250,6 +283,40 @@ def resolve_items(
         "values": values if form == "mask" else None,
         "restore": restore,
     }
+    filled = (items, names)
+
+    return filled
+
+
+def resolve_items(
+    dataset: ItemDataset, form: str, given: Optional[dict]
+) -> tuple[dict, Optional[list[str]]]:
+    """
+    版 2 のデータセットと渡した欄から, 一式の items を決める関数
+
+    Parameters
+    ----------
+    dataset: ItemDataset
+        版 2 のデータセット
+    form: str
+        出力の形 (mask か point_cloud)
+    given: Optional[dict]
+        make_bundle に渡した items (省いた欄はデータセットから)
+
+    Returns
+    ----------
+    resolved: tuple[dict, Optional[list[str]]]
+        items と, 領域のクラスの名前 (領域でなければ None)
+
+    Raises
+    ----------
+    ValueError
+        項目が無い場合, 扱い方と項目の種類が合わない場合, 欄に誤りが
+        ある場合
+    """
+    # 省いた欄を埋めてから, 設定まで確かめる
+    given = dict(given or {})
+    items, names = item_defaults(dataset, form, given)
     unknown = [k for k in given if k not in ITEM_KEYS]
     errors = check_items(items) + (
         [f"items に知らない欄があります: {', '.join(map(str, unknown))}"]
@@ -260,6 +327,127 @@ def resolve_items(
     resolved = (items, names)
 
     return resolved
+
+
+def entry_rows(info: dict) -> list[dict]:
+    """
+    版 2 のデータセットの説明の項目を, 書き出した順の行にする関数
+
+    Parameters
+    ----------
+    info: dict
+        dataset.yaml の中身 (load_items で確かめたもの)
+
+    Returns
+    ----------
+    rows: list[dict]
+        name, kind, role, shape, points (点を選ぶ数が要るか), steps
+        (書き出しでかけた中身の手順. 版 2 と手順の無い項目は空) の並び
+    """
+    # 手順は辞書の並びだけ
+    rows = []
+    for name, entry in info["entries"].items():
+        kind = entry.get("kind")
+        steps = entry.get("steps")
+        steps = ([step for step in steps if isinstance(step, dict)]
+                 if isinstance(steps, list) else [])
+        rows.append({
+            "name": str(name), "kind": kind, "role": entry.get("role"),
+            "shape": entry.get("shape"), "points": kind in POINT_KINDS,
+            "steps": steps,
+        })
+
+    return rows
+
+
+def target_classes(info: dict) -> list[dict]:
+    """
+    正解の領域の項目の, データセットに書いた値と名前の並びを返す関数
+
+    Parameters
+    ----------
+    info: dict
+        dataset.yaml の中身
+
+    Returns
+    ----------
+    classes: list[dict]
+        value と name (名前の無い値は None) の並び. 領域でなければ空
+    """
+    # 正解の最初の項目の classes (無ければ values だけ)
+    target = info.get("target") or {}
+    names = target.get("entries") or []
+    if target.get("kind") != "mask" or not names:
+        return []
+    entry = info["entries"].get(names[0]) or {}
+    if entry.get("classes"):
+        classes = [
+            {"value": item.get("value"), "name": item.get("name")}
+            for item in entry["classes"]
+        ]
+    else:
+        classes = [{"value": value, "name": None}
+                   for value in entry.get("values") or []]
+
+    return classes
+
+
+def describe_items(path: Union[str, Path]) -> dict:
+    """
+    版 2 と 3 のデータセット (ファイルの組) を読み, 一式を作る前の説明と
+    items の既定を返す関数
+
+    Parameters
+    ----------
+    path: Union[str, Path]
+        データセットのディレクトリ (dataset.yaml を持つ)
+
+    Returns
+    ----------
+    description: dict
+        format_version, name, role, target (kind, entries, origin),
+        entries (項目の行), splits (分割ごとの件数), classes (正解の領域
+        の値と名前), normalized (撮影の正規化があるか), items (make_bundle
+        が省いた欄に使う items の既定. 決められなければ None), problem
+        (items を決められない理由. 決められれば None)
+
+    Raises
+    ----------
+    ValueError
+        dataset.yaml が無い場合と, 版 2 と 3 のデータセットとして読めない
+        場合 (ML-EDA の load_items の誤りをそのまま)
+    """
+    # 読めるかと版の確認は ML-EDA の読み込み
+    dataset = load_items(Path(path).expanduser())
+    info = dataset.info
+    target = info.get("target") or {}
+    description = {
+        "format_version": info.get("format_version"),
+        "name": info.get("name"), "role": info.get("role"),
+        "target": {
+            "kind": target.get("kind"),
+            "entries": list(target.get("entries") or []),
+            "origin": target.get("origin"),
+        },
+        "entries": entry_rows(info),
+        "splits": {
+            name: (split or {}).get("items")
+            for name, split in (info.get("splits") or {}).items()
+        },
+        "classes": target_classes(info),
+        "normalized": bool(info.get("normalization")),
+        "items": None, "problem": None,
+    }
+
+    # items の既定 (点の数は学習と同じ値を書くので空のまま)
+    try:
+        description["items"] = item_defaults(
+            dataset, item_form(dataset), None
+        )[0]
+    except ValueError as error:
+        description["problem"] = str(error)
+
+    return description
 
 
 def defined_points(shape: Any) -> Optional[int]:
