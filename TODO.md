@@ -65,7 +65,7 @@
 - 何を: 既製のモデルの一式で, ライセンスを読めないときも `ready.license.alert` に警告を付ける
 - なぜ: 今はライセンスを読めないと `ready.license.alert` が `null` になり警告が付かず, ML-Provide が画面で補っているため
 - 終わりの条件: ライセンスを読めない既製のモデルの一式の `ready.license.alert` に警告が入る. テストがある
-- つながり: ML-Provide (画面の警告)
+- つながり: ML-Provide の docs/DESIGN.md (既製のモデルの一式の画面のライセンスの警告)
 
 ## 条件待ち
 
