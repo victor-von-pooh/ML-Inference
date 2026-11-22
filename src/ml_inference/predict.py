@@ -1618,12 +1618,15 @@ def uncertainty_summary(uncertainty: Optional[dict]) -> Optional[dict]:
     summary: Optional[dict]
         split, rows, kind, measured_at, coverage, ece, restorable
         (作ったときの記録に戻せるか), horizon と steps_measured (段ごとの
-        外れ方を測った段の数と, 測れた最も先の段). 記録が無ければ None
+        外れ方を測った段の数と, 測れた最も先の段), groups (外れ方を種類
+        ごとに測った列と種類の数. 測っていなければ None). 記録が無ければ
+        None
     """
     # 画面に出す値だけ (分位点と区間ごとの表は大きいので除く)
     if not uncertainty:
         return None
     calibration = uncertainty.get("calibration") or {}
+    groups = uncertainty.get("groups") or {}
     summary = {
         "split": uncertainty.get("split"),
         "rows": uncertainty.get("rows"),
@@ -1637,6 +1640,10 @@ def uncertainty_summary(uncertainty: Optional[dict]) -> Optional[dict]:
             (int(k) for k in (uncertainty.get("steps") or {})
              if k != "rows"), default=0
         ),
+        "groups": {
+            "column": groups.get("column"),
+            "count": len(groups.get("values") or {}),
+        } if groups else None,
     }
 
     return summary

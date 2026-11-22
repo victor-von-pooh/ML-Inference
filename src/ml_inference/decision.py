@@ -409,12 +409,79 @@ def residual_samples(bundle: Bundle) -> tuple[str, np.ndarray]:
     return samples
 
 
+def group_key(value: Any) -> Optional[str]:
+    """
+    行の種類の値を, 外れ方の記録の名前にそろえる関数
+
+    Parameters
+    ----------
+    value: Any
+        分ける列の値
+
+    Returns
+    ----------
+    key: Optional[str]
+        記録の名前 (整数の小数は整数の文字. 欠けた値は None)
+    """
+    # 空欄で小数に読まれた整数 (1.0) も 1 にそろえる
+    if value is None or (not isinstance(value, str) and pd.isna(value)):
+        return None
+    if isinstance(value, (float, np.floating)) and float(value).is_integer():
+        value = int(value)
+    key = str(value)
+
+    return key
+
+
+def group_quantiles(
+    bundle: Bundle, frame: pd.DataFrame, rows: np.ndarray
+) -> dict:
+    """
+    行の種類ごとに測った外れ方を, その種類の行に当てる関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+    frame: pd.DataFrame
+        予測の表
+    rows: np.ndarray
+        (行の数, 99) の分位点 (書き換える)
+
+    Returns
+    ----------
+    used: dict
+        column (分ける列. 種類ごとに測っていなければ None), grouped
+        (種類ごとの外れ方を当てた行の数), fallback (記録に無い種類と
+        欠けた値の行の数), absent (予測の表に分ける列が無いか)
+    """
+    # 記録に無い種類と欠けた値の行は全ての行の外れ方のまま
+    groups = (bundle.info.get("uncertainty") or {}).get("groups") or {}
+    column = groups.get("column")
+    used = {"column": column, "grouped": 0, "fallback": 0, "absent": False}
+    if not column:
+        return used
+    if column not in frame.columns:
+        used["absent"] = True
+        return used
+    values = groups.get("values") or {}
+    for position, value in enumerate(frame[column].tolist()):
+        key = group_key(value)
+        if key in values:
+            rows[position] = np.asarray(values[key], dtype=float)
+            used["grouped"] += 1
+        else:
+            used["fallback"] += 1
+
+    return used
+
+
 def row_quantiles(
     bundle: Bundle, frame: pd.DataFrame, quantiles: np.ndarray
-) -> tuple[np.ndarray, bool]:
+) -> tuple[np.ndarray, bool, dict]:
     """
-    行ごとの誤りの分位点を返す関数 (何段も先の予測の行は, 測ってあれば
-    その段の外れ方)
+    行ごとの誤りの分位点を返す関数 (行の種類ごとに測ってあればその種類の
+    外れ方. 何段も先の予測の行は, 測ってあればその段の外れ方)
 
     Parameters
     ----------
@@ -427,16 +494,20 @@ def row_quantiles(
 
     Returns
     ----------
-    result: tuple[np.ndarray, bool]
-        (行の数, 99) の分位点と, 段ごとの外れ方を使った行があるか
+    result: tuple[np.ndarray, bool, dict]
+        (行の数, 99) の分位点と, 段ごとの外れ方を使った行があるかと,
+        種類ごとの外れ方の当て方 (group_quantiles の結果)
     """
-    # 1 段目は全ての行で測った記録のまま (段ごとの 1 段目は予測を始めた
-    # 時刻の行だけで少ない). 測った段より先は, 測った中で最も先の段
+    # 種類ごとの外れ方の後に, 2 段目より先の行は段ごとの外れ方 (段ごとの
+    # 記録は種類で分けない). 1 段目は全ての行で測った記録のまま (段ごとの
+    # 1 段目は予測を始めた時刻の行だけで少ない). 測った段より先は, 測った
+    # 中で最も先の段
     rows = np.tile(quantiles, (len(frame), 1))
+    grouped = group_quantiles(bundle, frame, rows)
     steps = (bundle.info.get("uncertainty") or {}).get("steps") or {}
     measured = sorted(int(k) for k in steps if k != "rows")
     if not measured or "step" not in frame.columns:
-        return rows, False
+        return rows, False, grouped
     step = pd.to_numeric(frame["step"], errors="coerce").to_numpy()
     used = False
     for number in np.unique(step[np.isfinite(step)]).astype(int):
@@ -447,9 +518,46 @@ def row_quantiles(
             continue
         rows[step == number] = np.asarray(steps[str(near[-1])], dtype=float)
         used = True
-    result = (rows, used)
+    result = (rows, used, grouped)
 
     return result
+
+
+def group_notes(grouped: dict) -> list[str]:
+    """
+    行の種類ごとの外れ方の当て方を, 前提の文にする関数
+
+    Parameters
+    ----------
+    grouped: dict
+        group_quantiles の結果
+
+    Returns
+    ----------
+    notes: list[str]
+        前提の文 (種類ごとに測っていなければ空)
+    """
+    # 当てた種類の行と, 全ての行の外れ方に戻した行
+    column = grouped.get("column")
+    notes: list[str] = []
+    if not column:
+        return notes
+    if grouped.get("absent"):
+        notes.append(
+            f"外れ方は {column} ごとに測ってあるが, 予測の表に {column} の"
+            "列が無いので, 全ての行で 1 つの外れ方を当てた"
+        )
+        return notes
+    notes.append(
+        f"外れ方は {column} ごとに測ったものを当てた "
+        f"({grouped.get('grouped', 0):,} 行"
+        + (f". 記録に無い {column} と欠けた値の "
+           f"{grouped['fallback']:,} 行は全ての行の外れ方"
+           if grouped.get("fallback") else "")
+        + ")"
+    )
+
+    return notes
 
 
 def max_step(uncertainty: dict) -> int:
@@ -615,7 +723,7 @@ def decide_quantity(
     step = float(decision.get("step", 1))
     tau = under / np.maximum(under + over, 1e-12)
     index = np.clip(np.round(tau * 100).astype(int), 1, 99) - 1
-    grid, by_step = row_quantiles(bundle, frame, quantiles)
+    grid, by_step, grouped = row_quantiles(bundle, frame, quantiles)
     possible = outcomes(prediction, kind, grid)
     goal = possible[np.arange(len(frame)), index]
     action = best_amount(goal, stock, step, possible, under, over)
@@ -643,6 +751,7 @@ def decide_quantity(
         "tau_max": float(tau[ok].max()) if ok.any() else None,
         "kind": kind,
         "by_step": by_step,
+        "by_group": grouped,
     }
     result = (columns, summary)
 
@@ -1022,13 +1131,17 @@ def caveats(
             "過去の値が欠品などで抑えられていたなら, 学習した需要と外れ方"
             "は小さめで, 量も少なめ"
         )
+        notes.extend(group_notes(summary.get("by_group") or {}))
         if "step" in prediction.columns and (
             pd.to_numeric(prediction["step"], errors="coerce") > 1
         ).any():
             notes.append(
                 "2 段目より先の予測には, 段ごとに測った外れ方を当てた ("
                 f"{max_step(uncertainty)} 段まで. それより先は最も先の段の"
-                "外れ方)"
+                "外れ方"
+                + (". 段ごとの外れ方は種類で分けない"
+                   if (summary.get("by_group") or {}).get("grouped") else "")
+                + ")"
                 if summary.get("by_step") else
                 "2 段目より先の予測にも 1 つ先の外れ方を当てている (先の段"
                 "ほど外れ方は大きく, 量は少なめ. 実績で段ごとの外れ方を"

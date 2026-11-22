@@ -14,6 +14,7 @@ from ml_inference import (
     decide, describe_bundle, forecast, load_bundle, make_bundle, predict,
     remeasure, restore_uncertainty
 )
+from ml_inference.decision import group_key
 from ml_inference.remeasure import history_length
 
 
@@ -145,6 +146,96 @@ def test_remeasure_classification(tmp_path: Path) -> None:
     notes = decide(bundle, predict(bundle, pd.DataFrame({"x": x})),
                    triage)["notes"]
     assert any("400 行で測り直した値" in note for note in notes)
+
+
+def test_remeasure_groups(tmp_path: Path) -> None:
+    """
+    店ごとに外れ方を測り直すと, 量の判断が店ごとの外れ方を使い, 文に
+    そう添えることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 店 A は ±5 %, 店 B は ±40 % の誤り. 店 C は 10 行だけ
+    path = regression_bundle(tmp_path)
+    rng = np.random.default_rng(7)
+    x = rng.uniform(1, 10, 410)
+    store = np.array(["A"] * 200 + ["B"] * 200 + ["C"] * 10, dtype=object)
+    spread = np.where(store == "A", 0.05, 0.4)
+    y = 10 * x * rng.uniform(1 - spread, 1 + spread)
+    recent = pd.DataFrame({"x": x, "store": store, "y": y})
+    result = remeasure(path, recent, groups="store")
+    groups = result["uncertainty"]["groups"]
+    assert groups["column"] == "store" and groups["few"] == 1
+    assert set(groups["values"]) == {"A", "B"}
+    assert groups["rows"] == {"A": 200, "B": 200}
+    assert len(groups["values"]["A"]) == 99
+    assert any("store ごとの外れ方を 2 種類" in s for s in result["sentences"])
+    assert describe_bundle(path)["uncertainty"]["groups"] == {
+        "column": "store", "count": 2
+    }
+
+    # 9 : 1 の量は, 店 B が予測から大きく上に, 店 A は予測の近く
+    bundle = load_bundle(path)
+    fresh = pd.DataFrame({"x": [5.0, 5.0, 5.0, 5.0],
+                          "store": ["A", "B", "C", np.nan]})
+    decision = {"type": "quantity", "under_cost": 9, "over_cost": 1}
+    made = decide(bundle, predict(bundle, fresh), decision)
+    level = made["frame"]["level"].to_numpy()
+    prediction = made["frame"]["prediction"].to_numpy(float)
+    assert level[0] < prediction[0] * 1.1 < level[1]
+    assert level[2] == level[3] and level[0] < level[2] < level[1]
+    assert any("store ごとに測ったものを当てた (2 行. 記録に無い store と"
+               "欠けた値の 2 行" in note for note in made["notes"])
+
+    # 予測の表に分ける列が無ければ, 全ての行の外れ方と添える
+    plain = decide(bundle, predict(bundle, fresh[["x"]]), decision)
+    assert len(set(plain["frame"]["level"])) == 1
+    assert any("store の列が無い" in note for note in plain["notes"])
+
+    # 分けずに測り直すと種類ごとの記録は残らない
+    remeasure(path, recent)
+    assert "groups" not in load_bundle(path).info["uncertainty"]
+    assert describe_bundle(path)["uncertainty"]["groups"] is None
+
+    # 無い列, 目的の列, 20 行以上の種類の無い列, 分類の一式は誤り
+    with pytest.raises(ValueError, match="groups の列"):
+        remeasure(path, recent, groups="shop", write=False)
+    with pytest.raises(ValueError, match="groups の列"):
+        remeasure(path, recent, groups="y", write=False)
+    recent["id"] = np.arange(410)
+    with pytest.raises(ValueError, match="20 行以上のものが無い"):
+        remeasure(path, recent, groups="id", write=False)
+    (tmp_path / "class").mkdir()
+    label = classifier_bundle(tmp_path / "class")
+    with pytest.raises(ValueError, match="回帰と予測の一式だけ"):
+        remeasure(label, pd.DataFrame({"x": x, "store": store,
+                                       "label": ["yes"] * 410}),
+                  groups="store", write=False)
+
+
+def test_group_key() -> None:
+    """
+    種類の値を記録の名前にそろえることを確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 整数の小数は整数に, 欠けた値は None
+    assert group_key(1.0) == "1" and group_key(np.int64(3)) == "3"
+    assert group_key(1.5) == "1.5" and group_key("A") == "A"
+    assert group_key(np.nan) is None and group_key(None) is None
 
 
 def walk_bundle(tmp_path: Path) -> tuple[Path, pd.DataFrame]:

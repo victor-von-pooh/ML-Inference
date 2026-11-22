@@ -9,11 +9,12 @@ import yaml
 from ml_eda import Data
 
 from ml_inference.bundle import Bundle, load_bundle
-from ml_inference.decision import amount_text, label_text
+from ml_inference.decision import amount_text, group_key, label_text
 from ml_inference.forecast import forecast
 from ml_inference.predict import lag_settings, predict, read_source
 from ml_inference.uncertainty import (
-    adjusted_levels, class_calibration, interval, residual_quantiles
+    adjusted_levels, class_calibration, interval, residual_quantiles,
+    residual_values
 )
 
 # 測り直すのに要る行の数の下限
@@ -167,6 +168,125 @@ def class_remeasure(
     result = (before, {"calibration": calibration, "calibration_of": of})
 
     return result
+
+
+def measure_groups(
+    part: pd.DataFrame, column: str, prediction: np.ndarray,
+    answers: np.ndarray, kind: str
+) -> dict:
+    """
+    回帰の外れ方を, 分ける列の値 (行の種類) ごとに測る関数
+
+    Parameters
+    ----------
+    part: pd.DataFrame
+        測る行の予測の表 (予測と目的の値がそろった行)
+    column: str
+        分ける列
+    prediction: np.ndarray
+        予測
+    answers: np.ndarray
+        実際の値
+    kind: str
+        全ての行で選んだ外れ方の形 (種類ごとも同じ形)
+
+    Returns
+    ----------
+    groups: dict
+        column, values (種類ごとの誤りの 1 % から 99 % の分位点), rows
+        (種類ごとの行の数), few (行が少なく測らなかった種類の数)
+
+    Raises
+    ----------
+    ValueError
+        測れる種類が無い場合
+    """
+    # 20 行以上の種類だけ測る (少ない種類は全ての行の外れ方)
+    keys = pd.Series([group_key(v) for v in part[column].tolist()])
+    values: dict[str, list[float]] = {}
+    rows: dict[str, int] = {}
+    few = 0
+    for key in sorted(k for k in keys.dropna().unique()):
+        inside = (keys == key).to_numpy()
+        if inside.sum() < REMEASURE_MIN_ROWS:
+            few += 1
+            continue
+        values[key] = residual_values(
+            prediction[inside], answers[inside], kind
+        )
+        rows[key] = int(inside.sum())
+    if not values:
+        raise ValueError(
+            f"{column} の種類に {REMEASURE_MIN_ROWS} 行以上のものが無いので,"
+            " 種類ごとの外れ方を測れません"
+        )
+    groups = {"column": column, "values": values, "rows": rows, "few": few}
+
+    return groups
+
+
+def width_text(values: list[float], kind: str) -> str:
+    """
+    誤りの分位点の 80 % の幅を日本語にする関数
+
+    Parameters
+    ----------
+    values: list[float]
+        誤りの 1 % から 99 % の分位点
+    kind: str
+        relative か absolute
+
+    Returns
+    ----------
+    text: str
+        比は「a 倍から b 倍」, 差は「-a から +b」
+    """
+    # 10 % と 90 % の点
+    lower, upper = values[9], values[89]
+    if kind == "relative":
+        text = f"{np.exp(lower):.2f} 倍から {np.exp(upper):.2f} 倍"
+    else:
+        text = (
+            f"{'+' if lower >= 0 else '-'}{amount_text(abs(lower))} から "
+            f"{'+' if upper >= 0 else '-'}{amount_text(abs(upper))}"
+        )
+
+    return text
+
+
+def group_sentence(groups: dict, kind: str) -> str:
+    """
+    種類ごとの外れ方を日本語の文にする関数
+
+    Parameters
+    ----------
+    groups: dict
+        measure_groups の結果
+    kind: str
+        外れ方の形
+
+    Returns
+    ----------
+    sentence: str
+        文 (80 % の幅の最も狭い種類と広い種類)
+    """
+    # 80 % の幅 (10 % と 90 % の点の離れ) で並べる
+    widths = {
+        key: values[89] - values[9] for key, values in groups["values"].items()
+    }
+    narrow = min(widths, key=widths.get)
+    wide = max(widths, key=widths.get)
+    sentence = (
+        f"{groups['column']} ごとの外れ方を {len(widths)} 種類で測った ("
+        f"80 % の幅の最も狭い {narrow} は "
+        f"{width_text(groups['values'][narrow], kind)}, 最も広い {wide} は "
+        f"{width_text(groups['values'][wide], kind)}"
+        + (f". {REMEASURE_MIN_ROWS} 行より少ない {groups['few']} 種類は全ての"
+           "行の外れ方" if groups["few"] else "")
+        + ")"
+    )
+
+    return sentence
 
 
 def history_length(bundle: Bundle) -> int:
@@ -447,6 +567,8 @@ def remeasure_sentences(
         sentences.append(
             f"測り直した外れ方の 80 % の幅は, {width} ({rows:,} 行で測った)"
         )
+        if uncertainty.get("groups"):
+            sentences.append(group_sentence(uncertainty["groups"], kind))
         steps = uncertainty.get("steps")
         if steps:
             sentences.append(step_sentence(uncertainty))
@@ -501,7 +623,7 @@ def remeasure(
     source: Union[str, Path, pd.DataFrame, Data],
     options: Optional[dict] = None, count: Optional[Any] = None,
     write: bool = True, horizon: Optional[int] = None,
-    time: Optional[str] = None
+    time: Optional[str] = None, groups: Optional[str] = None
 ) -> dict:
     """
     目的の列が分かる新しい実績で, 一式の予測の外れ方を測り直す関数
@@ -525,6 +647,9 @@ def remeasure(
         ながら何段も先まで予測し, 段ごとの誤りの分位点を steps に残す)
     time: Optional[str] = None
         horizon で予測を始める時刻の列 (省略は前処理の時刻でずらす列)
+    groups: Optional[str] = None
+        外れ方を種類ごとに分けて測る列 (店や品など. 回帰と予測の一式
+        だけ. 量の判断はその種類の行に種類ごとの外れ方を当てる)
 
     Returns
     ----------
@@ -540,7 +665,8 @@ def remeasure(
     ValueError
         目的の列が無い場合, 印の数が行の数と違う場合, 測れる行が少ない
         場合, 一式のクラスに合うラベルの行が少ない場合, horizon が使え
-        ない場合
+        ない場合, groups の列が無いか分類の一式か目的の列の場合, 20 行
+        以上の種類が無い場合
     """
     # 予測と, 測る行
     if not isinstance(bundle, Bundle):
@@ -552,6 +678,14 @@ def remeasure(
     target = str(bundle.dataset.info.get("target"))
     old = dict(bundle.info.get("uncertainty") or {})
     part = table[keep]
+    if groups is not None:
+        if bundle.task == "classification":
+            raise ValueError("種類ごとの外れ方 (groups) は回帰と予測の一式"
+                             "だけです")
+        if groups == target or groups not in table.columns:
+            raise ValueError(
+                f"groups の列 {groups} が渡した実績に無いか, 目的の列です"
+            )
 
     # 回帰は誤りの分位点, 分類は確率の当たり具合
     uncertainty: dict[str, Any] = {"split": "recent"}
@@ -566,6 +700,12 @@ def remeasure(
             answers[finite].to_numpy(float)
         )
         rows = int(finite.sum())
+        if groups is not None:
+            measured["groups"] = measure_groups(
+                part[finite.to_numpy()], groups,
+                prediction[finite].to_numpy(float),
+                answers[finite].to_numpy(float), measured["kind"]
+            )
     else:
         before, measured = class_remeasure(bundle, old, part, target)
         rows = int(sum(b["rows"] for b in measured["calibration"]["bins"]))

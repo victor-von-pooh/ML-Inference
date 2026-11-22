@@ -241,7 +241,7 @@ now = current_from_baseline(frame, rule, target="sales")   # 行ごとの今の�
 
 損得の値は数か, 予測の表の列の名前. 文は「書いた損得と外れ方の記録が正しいとすれば」の前提を先に述べるので, 実際の差は `backtest` で確かめる. 値段を変える判断は扱わない (DESIGN の「意思決定」).
 
-新しい実績が貯まったら, その実績で外れ方を測り直して一式に書き戻す (`restore_uncertainty` で戻せる. 何段も先の量には `horizon` で段ごとの外れ方も測る. DESIGN の「外れ方の測り直し」).
+新しい実績が貯まったら, その実績で外れ方を測り直して一式に書き戻す (`restore_uncertainty` で戻せる. 何段も先の量には `horizon` で段ごとの外れ方も, 店や品ごとに外れ方が違うなら `groups` で行の種類ごとの外れ方も測る. DESIGN の「外れ方の測り直し」).
 
 ```python
 from ml_inference import remeasure

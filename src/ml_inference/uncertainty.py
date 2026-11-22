@@ -128,6 +128,37 @@ def coverage_spread(
     return spread
 
 
+def residual_values(
+    prediction: np.ndarray, answers: np.ndarray, kind: str
+) -> list[float]:
+    """
+    決めた形で, 誤りの 1 % から 99 % の分位点を求める関数
+
+    Parameters
+    ----------
+    prediction: np.ndarray
+        予測
+    answers: np.ndarray
+        実際の値
+    kind: str
+        relative (比の対数) か absolute (差)
+
+    Returns
+    ----------
+    values: list[float]
+        行の少ない場合の補正をした分位点
+    """
+    # 比は対数, 差はそのまま
+    errors = np.log(answers / prediction) if kind == "relative" else (
+        answers - prediction
+    )
+    values = [
+        float(v) for v in np.percentile(errors, adjusted_levels(len(errors)))
+    ]
+
+    return values
+
+
 def residual_quantiles(
     prediction: np.ndarray, answers: np.ndarray
 ) -> dict:
