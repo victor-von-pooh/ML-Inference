@@ -2,6 +2,7 @@ import ast
 from pathlib import Path
 
 import ml_eda
+import ml_modelcontrol
 
 # ライブラリのコードの場所 (テストのコードは対象の外)
 SOURCE_DIR = Path(__file__).resolve().parents[1] / "src" / "ml_inference"
@@ -9,6 +10,7 @@ SOURCE_DIR = Path(__file__).resolve().parents[1] / "src" / "ml_inference"
 # 他の段階のライブラリと, その公開の名前
 PUBLIC = {
     "ml_eda": set(ml_eda.__all__),
+    "ml_modelcontrol": set(ml_modelcontrol.__all__),
 }
 
 
@@ -62,8 +64,8 @@ def private_names(tree: ast.AST) -> set[str]:
 
 def test_only_public_names() -> None:
     """
-    ライブラリのコードが ML-EDA の公開の名前 (__all__) だけを使うことを
-    確かめる関数
+    ライブラリのコードが ML-EDA と ML-ModelControl の公開の名前
+    (__all__) だけを使うことを確かめる関数
 
     Parameters
     ----------
@@ -104,11 +106,14 @@ def test_private_names_found() -> None:
         "from ml_eda.pipeline import DATASET_FORMAT_VERSION\n"
         "ml_eda.load_items(x)\n"
         "ml_eda.media.read_image(x)\n"
+        "from ml_modelcontrol import build_model\n"
+        "from ml_modelcontrol.spec import load_spec\n"
     )
     names = private_names(ast.parse(code))
     assert names == {
         "ml_eda.items.PLACEMENTS", "ml_eda.pipeline.DATASET_FORMAT_VERSION",
         "ml_eda.media.read_image", "ml_eda.media",
+        "ml_modelcontrol.spec.load_spec",
     }
 
     # 別名を付ける import は, 公開の名前だけを使う場合も誤り
