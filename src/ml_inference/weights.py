@@ -168,7 +168,8 @@ def lookup_pretrained(
     Raises
     ----------
     ValueError
-        渡した情報のノードが定義に無い場合
+        渡した情報のノードが定義に無い場合と, 同じ部分モデルの同じノードに
+        違う情報を渡した場合
     """
     # 渡した情報 (画面が読んだもの, テスト) はそのまま
     nodes = node_items(spec)
@@ -187,6 +188,7 @@ def lookup_pretrained(
                 f"pretrained の {', '.join(unknown)} はモデルの定義のノードに"
                 "ありません"
             )
+        check_shared(nodes, given)
         infos = {
             str(node): dict(given[node]) for node in nodes
             if given.get(node) is not None
@@ -222,6 +224,44 @@ def lookup_pretrained(
     notes = []
 
     return infos, notes
+
+
+def check_shared(nodes: dict, given: dict) -> None:
+    """
+    同じ部分モデルの同じノードに渡した情報がそろうかを確かめる関数
+
+    版の固定は部分モデルの定義を書き換え, その部分モデルを使う全ての
+    ノードに当たるため
+
+    Parameters
+    ----------
+    nodes: dict
+        node_items の返す, ノードの名前ごとの定義と重ねるか
+    given: dict
+        ノードの名前ごとの渡した情報
+
+    Returns
+    ----------
+    None
+
+    Raises
+    ----------
+    ValueError
+        同じ定義のノードに違う情報を渡した場合
+    """
+    # 同じ定義 (部分モデルの中の同じノード) ごとの渡した情報
+    seen: dict[int, tuple[str, Any]] = {}
+    for node, (item, _) in nodes.items():
+        if node not in given:
+            continue
+        first = seen.setdefault(id(item), (node, given[node]))
+        if first[1] != given[node]:
+            raise ValueError(
+                f"pretrained の {first[0]} と {node} は同じ部分モデルの同じ"
+                "ノードですが, 違う情報が渡されました. 部分モデルの定義は"
+                "使うノードで共有する (版の固定も全てに当たる) ので, 同じ"
+                "情報を渡してください"
+            )
 
 
 def unchecked_notes(
