@@ -19,8 +19,8 @@ from ml_inference.policy import (
 )
 from ml_inference.predict import OK, SKIPPED, describe_bundle, predict
 from ml_inference.procedures import (
-    PROCEDURES, get_procedure, make_generator, register_procedure,
-    run_procedure, start_noise
+    PROCEDURES, get_procedure, make_generator, procedure_options,
+    register_procedure, run_procedure, start_noise
 )
 from ml_inference.ready import READY_LIBRARIES
 from ml_inference.remeasure import remeasure, restore_uncertainty
@@ -72,6 +72,7 @@ __all__ = [
     "make_ready_bundle",
     "make_sample_bundle",
     "predict",
+    "procedure_options",
     "read_policy_spec",
     "read_result",
     "register_procedure",
