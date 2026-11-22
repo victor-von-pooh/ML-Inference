@@ -16,7 +16,9 @@ from ml_eda import (
 from ml_modelcontrol import build_model, dump_spec, load_spec
 
 from ml_inference.conclude import check_rules, plain
-from ml_inference.items import ITEM_FORMS, PREPARE_KINDS, check_items
+from ml_inference.items import (
+    ITEM_FORMS, PREPARE_KINDS, check_items, check_point_count
+)
 from ml_inference.procedures import PROCEDURES, get_procedure, option_names
 from ml_inference.units import check_units
 from ml_inference.weights import (
@@ -1488,6 +1490,7 @@ def make_bundle(
         kinds, item_info = item_fields(
             full, role, form, output_options, target, items
         )
+        check_point_count(spec_dict, inputs, item_info)
     elif data_dir is not None:
         if items is not None:
             raise ValueError("items は版 2 のデータセットの一式だけに使え"
