@@ -253,7 +253,9 @@ now = current_from_baseline(frame, rule, target="sales")   # 行ごとの今の�
 
 損得の値は数か, 予測の表の列の名前. 文は「書いた損得と外れ方の記録が正しいとすれば」の前提を先に述べるので, 実際の差は `backtest` で確かめる. 値段を変える判断は扱わない (DESIGN の「意思決定」).
 
-新しい実績が貯まったら, その実績で外れ方を測り直して一式に書き戻す (`restore_uncertainty` で戻せる. 何段も先の量には `horizon` で段ごとの外れ方も, 店や品ごとに外れ方が違うなら `groups` で行の種類ごとの外れ方も測る. DESIGN の「外れ方の測り直し」).
+選ぶと振り分けの型は確率を額面どおりに使う. 分類の確率がずれている (説明の `uncertainty.ece` が大きい) 一式は, 作るときに検証用の分割で確率を補正できる (`make_bundle(..., calibrate="platt")` か `"isotonic"`). 補正の前と後のずれは `calibrate.before` と `calibrate.after` に残り, 予測と意思決定は補正した確率を使う (DESIGN の「確率の補正」).
+
+新しい実績が貯まったら, その実績で外れ方を測り直して一式に書き戻す (`restore_uncertainty` で戻せる. 何段も先の量には `horizon` で段ごとの外れ方も, 店や品ごとに外れ方が違うなら `groups` で行の種類ごとの外れ方も測る. 確率の補正は当て直さない (当て直すには一式を作り直す). DESIGN の「外れ方の測り直し」).
 
 ```python
 from ml_inference import remeasure

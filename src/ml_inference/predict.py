@@ -9,6 +9,7 @@ from ml_eda import (
 )
 
 from ml_inference.bundle import Bundle, load_bundle
+from ml_inference.calibrate import apply_calibration
 from ml_inference.items import (
     captured, prepare_item, restore_size, work_directory
 )
@@ -1125,6 +1126,11 @@ def decode_class(bundle: Bundle, outputs: np.ndarray) -> dict:
             f"分類の出力の形 {tuple(outputs.shape)} がクラスの数 "
             f"{len(classes)} と合いません"
         )
+    # 一式の確率の補正 (予測したクラスも補正した確率から)
+    if bundle.info.get("calibrate"):
+        probability = apply_calibration(
+            bundle.info["calibrate"], classes, probability
+        )
     best = probability.argmax(axis=1) if count else np.zeros(0, dtype=int)
     columns = {
         "prediction": [classes[i] for i in best],
@@ -1649,6 +1655,36 @@ def uncertainty_summary(uncertainty: Optional[dict]) -> Optional[dict]:
     return summary
 
 
+def calibrate_summary(calibrate: Optional[dict]) -> Optional[dict]:
+    """
+    確率の補正の記録から, 当てはめた値を除いた要約を返す関数
+
+    Parameters
+    ----------
+    calibrate: Optional[dict]
+        一式の calibrate
+
+    Returns
+    ----------
+    summary: Optional[dict]
+        method, split, rows, before と after (補正の前と後のずれ ece と
+        test_ece).
+        補正していなければ None
+    """
+    # 当てはめた値 (isotonic の点の並び) は大きいので除く
+    if not calibrate:
+        return None
+    summary = {
+        "method": calibrate.get("method"),
+        "split": calibrate.get("split"),
+        "rows": calibrate.get("rows"),
+        "before": dict(calibrate.get("before") or {}),
+        "after": dict(calibrate.get("after") or {}),
+    }
+
+    return summary
+
+
 def describe_bundle(bundle: Union[str, Path, Bundle]) -> dict:
     """
     推論の一式の説明を JSON にできる辞書で返す関数
@@ -1705,6 +1741,7 @@ def describe_bundle(bundle: Union[str, Path, Bundle]) -> dict:
         ),
         "check": info.get("check"),
         "uncertainty": uncertainty_summary(info.get("uncertainty")),
+        "calibrate": calibrate_summary(info.get("calibrate")),
         "notes": list(info.get("notes") or []),
         "format_version": info.get("format_version"),
         "role": bundle.role,
