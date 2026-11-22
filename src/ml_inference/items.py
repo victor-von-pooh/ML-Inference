@@ -262,6 +262,82 @@ def resolve_items(
     return resolved
 
 
+def defined_points(shape: Any) -> Optional[int]:
+    """
+    モデルの定義の入力の形から, 1 件の点の数を読む関数
+
+    1 件の点群は (点の数, 3) なので, 件の軸の後ろの 2 つの軸のうち, 3 の
+    軸を座標の軸 (後ろを先に見る. 前なら座標が前の並び), 他方を点の数の
+    軸とする
+
+    Parameters
+    ----------
+    shape: Any
+        定義の入力の shape (件の軸を含む)
+
+    Returns
+    ----------
+    points: Optional[int]
+        点の数 (軸を決められない場合と, 可変 (None) の場合は None)
+    """
+    # 件の軸と, 点の数と座標の 2 つの軸の形だけを読む
+    if not isinstance(shape, (list, tuple)) or len(shape) != 3:
+        return None
+    first, second = shape[1], shape[2]
+    if second == 3:
+        size = first
+    elif first == 3:
+        size = second
+    else:
+        return None
+    points = size if isinstance(size, int) and size > 0 else None
+
+    return points
+
+
+def check_point_count(spec: dict, inputs: Optional[dict], items: dict) -> None:
+    """
+    点を選ぶ一式で, 定義の入力の点の数と items.options.points を比べる
+    関数
+
+    Parameters
+    ----------
+    spec: dict
+        モデルの定義 (ML-ModelControl の形)
+    inputs: Optional[dict]
+        モデルの入力ごとの source (書いていない入力は items)
+    items: dict
+        一式の 1 件の扱い
+
+    Returns
+    ----------
+    None
+
+    Raises
+    ----------
+    ValueError
+        items を渡す入力の点の数が items.options.points と違う場合
+    """
+    # 点を選ぶ扱い方で, items を渡す入力だけを比べる
+    if items.get("prepare") not in POINT_PREPARES:
+        return
+    chosen = int((items.get("options") or {})["points"])
+    written = inputs or {}
+    for name, defined in (spec.get("inputs") or {}).items():
+        source = (written.get(name) or {}).get("source", "items")
+        if source != "items" or not isinstance(defined, dict):
+            continue
+        points = defined_points(defined.get("shape"))
+        if points is not None and points != chosen:
+            raise ValueError(
+                f"モデルの定義の入力 {name} の点の数は {points} (shape "
+                f"{defined.get('shape')}) ですが, 一式の点の数 "
+                f"items.options.points は {chosen} です. 学習のスクリプト"
+                "が選んだ点の数が正しい方に合わせ, items.options.points "
+                f"か定義の inputs.{name}.shape を直してください"
+            )
+
+
 def backproject(capture: dict) -> np.ndarray:
     """
     撮影の深度を, 撮影の世界の座標の点に戻す関数

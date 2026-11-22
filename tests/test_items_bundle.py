@@ -13,7 +13,7 @@ from ml_inference import (
     artifact_path, describe_bundle, infer, load_bundle, make_bundle, predict,
     read_result, write_result
 )
-from ml_inference.items import restore_size
+from ml_inference.items import defined_points, restore_size
 
 # 画像と深度の読み書き (任意の依存. 無い環境では飛ばす)
 Image = pytest.importorskip("PIL.Image")
@@ -452,6 +452,62 @@ def test_cloud_bundle(tmp_path: Path, clouds: dict) -> None:
     back = read_result(tmp_path / "result")
     assert back["form"] == "point_cloud"
     assert (tmp_path / "result" / "artifacts" / "000000.npy").is_file()
+
+
+def test_cloud_points_checked(tmp_path: Path, clouds: dict) -> None:
+    """
+    点の数が定義の入力の形と違う一式は, 作る時点で止まることを確かめる
+    関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    clouds: dict
+        合成のデータセット
+
+    Returns
+    ----------
+    None
+    """
+    # 定義は 64 個の点, 一式は 32 個の点
+    spec = cloud_spec(32)
+    run = fake_run(tmp_path / "run", spec, "valid/chamfer", 0.0)
+    options = {"points": 32, "target_points": 128, "seed": 1}
+    with pytest.raises(ValueError, match="点の数は 64 .* 32 です"):
+        make_bundle(tmp_path / "bundle", spec, clouds["dataset"], run,
+                    items={"options": options})
+    assert not (tmp_path / "bundle").exists()
+
+
+@pytest.mark.parametrize("shape, points", [
+    ([2, 512, 3], 512),
+    ([2, 3, 512], 512),
+    ([2, None, 3], None),
+    ([2, 3, None], None),
+    ([2, 3, 3], 3),
+    ([2, 1536], None),
+    ([2, 512, 6], None),
+    (None, None),
+])
+def test_defined_points(shape: list, points: int) -> None:
+    """
+    定義の入力の形から, 座標の軸の前後に依らず点の数を読み, 可変の軸と
+    決められない形は比べないことを確かめる関数
+
+    Parameters
+    ----------
+    shape: list
+        定義の入力の形
+    points: int
+        読むはずの点の数
+
+    Returns
+    ----------
+    None
+    """
+    # 座標の軸 (3) の他方が点の数
+    assert defined_points(shape) == points
 
 
 def test_resized_mask_bundle(tmp_path: Path) -> None:
