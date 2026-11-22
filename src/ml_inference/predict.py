@@ -1667,7 +1667,8 @@ def calibrate_summary(calibrate: Optional[dict]) -> Optional[dict]:
     Returns
     ----------
     summary: Optional[dict]
-        method, split, rows, before (補正の前のずれ ece と test_ece).
+        method, split, rows, before と after (補正の前と後のずれ ece と
+        test_ece).
         補正していなければ None
     """
     # 当てはめた値 (isotonic の点の並び) は大きいので除く
@@ -1678,6 +1679,7 @@ def calibrate_summary(calibrate: Optional[dict]) -> Optional[dict]:
         "split": calibrate.get("split"),
         "rows": calibrate.get("rows"),
         "before": dict(calibrate.get("before") or {}),
+        "after": dict(calibrate.get("after") or {}),
     }
 
     return summary

@@ -2309,9 +2309,9 @@ def measure_column(
     )
 
     if calibrate is not None:
-        fitted = fit_column_calibration(bundle, dataset, calibrate)
-        bundle.info["calibrate"] = fitted
-        info["calibrate"] = fitted
+        info["calibrate"] = fit_column_calibration(
+            bundle, dataset, calibrate
+        )
 
     # 意思決定のための外れ方 (失敗しても作るのは止めない)
     try:

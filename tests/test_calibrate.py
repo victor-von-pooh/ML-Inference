@@ -12,7 +12,9 @@ from ml_modelcontrol import build_model
 from ml_inference import (
     decide, describe_bundle, load_bundle, make_bundle, predict
 )
-from ml_inference.calibrate import fit_isotonic, fit_platt
+from ml_inference.calibrate import (
+    calibrated, fit_calibration, fit_isotonic, fit_platt
+)
 
 
 def write_classes(
@@ -108,6 +110,9 @@ def test_binary_calibration(tmp_path: Path, method: str) -> None:
         fitted["before"]["test_ece"] - 0.03
     )
     assert "calibrate" not in plain
+    assert fitted["after"]["test_ece"] == pytest.approx(
+        info["uncertainty"]["test_ece"]
+    )
 
     # 読み直した一式の予測も補正した確率 (端の確率が真ん中に寄る)
     frame = pd.DataFrame({"x": [-2.0, 0.0, 2.0]})
@@ -125,7 +130,11 @@ def test_binary_calibration(tmp_path: Path, method: str) -> None:
               "false_alarm_cost": 1}
     notes = decide(tmp_path / "fixed", predict(tmp_path / "fixed", frame),
                    triage)["notes"]
-    assert any("補正した" in note and "補正の前" in note for note in notes)
+    name = "Platt 法" if method == "platt" else "isotonic 回帰"
+    assert any(
+        name in note and "ECE" in note and "補正の前" in note
+        and "補正の後" in note for note in notes
+    )
     notes = decide(tmp_path / "plain", predict(tmp_path / "plain", frame),
                    triage)["notes"]
     assert not any("補正" in note for note in notes)
@@ -250,3 +259,64 @@ def test_fitting() -> None:
     assert np.all(np.diff(fitted["x"]) >= 0)
     assert np.all(np.diff(fitted["y"]) >= 0)
     assert 0 <= min(fitted["y"]) and max(fitted["y"]) <= 1
+
+
+def test_isotonic_ties() -> None:
+    """
+    同じ確率の行が多い場合も, isotonic 回帰の結果が行の順に依らず, 同じ
+    確率に 1 つの値を当てることを確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 3 つの確率だけの行 (同じ確率に当たりと外れが混ざる)
+    rng = np.random.default_rng(0)
+    probability = rng.choice([0.2, 0.5, 0.8], size=3000)
+    hit = rng.uniform(size=3000) < probability
+    fitted = fit_isotonic(probability, hit)
+    assert fitted["x"] == [0.2, 0.5, 0.8]
+    for value in (0.2, 0.5, 0.8):
+        inside = probability == value
+        got = calibrated(fitted, "isotonic", np.array([value]))[0]
+        assert got == pytest.approx(hit[inside].mean())
+
+    # 行を並べ替えても同じ
+    order = rng.permutation(3000)
+    again = fit_isotonic(probability[order], hit[order])
+    assert again == fitted
+
+
+def test_fit_refuses() -> None:
+    """
+    出ないクラスがある場合と, Platt 法の傾きが 0 以下になる場合に止まる
+    ことを確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 2 クラスで 1 クラスだけ, 3 クラスで 1 つ出ないクラス
+    rng = np.random.default_rng(0)
+    p = rng.uniform(size=200)
+    binary = np.stack([1 - p, p], axis=1)
+    with pytest.raises(ValueError, match="クラス no の行が無い"):
+        fit_calibration("platt", ["no", "yes"], binary, np.ones(200))
+    three = rng.dirichlet(np.ones(3), size=200)
+    with pytest.raises(ValueError, match="クラス c の行が無い"):
+        fit_calibration("isotonic", ["a", "b", "c"], three,
+                        rng.integers(0, 2, size=200))
+
+    # 確率と当たりが逆向き
+    hit = rng.uniform(size=200) < 1 - p
+    with pytest.raises(ValueError, match="傾き a が 0 以下"):
+        fit_calibration("platt", ["no", "yes"], binary, hit.astype(int))
+    fit_calibration("isotonic", ["no", "yes"], binary, hit.astype(int))

@@ -10,7 +10,7 @@ EPSILON = 1e-6
 PLATT_STEPS = 100
 
 # calibrate の欄
-CALIBRATE_KEYS = ("method", "split", "rows", "classes", "before")
+CALIBRATE_KEYS = ("method", "split", "rows", "classes", "before", "after")
 
 
 def sigmoid(values: np.ndarray) -> np.ndarray:
@@ -117,8 +117,9 @@ def fit_isotonic(probability: np.ndarray, hit: np.ndarray) -> dict:
     """
     確率の順を保つ階段の補正 (isotonic) を当てはめる関数
 
-    確率の小さい順に, 当たった割合が下がる隣どうしを 1 つの塊にまとめる
-    (pool adjacent violators). 塊ごとの確率の範囲の両端と当たった割合を
+    同じ確率の行を 1 つにまとめてから, 確率の小さい順に, 当たった割合が
+    下がる隣どうしを行の数で重み付けて 1 つの塊にまとめる (pool adjacent
+    violators). 塊ごとの確率の範囲の両端と当たった割合を
     残し, 間は直線でつなぐ. 範囲の外は端の値
 
     Parameters
@@ -133,25 +134,30 @@ def fit_isotonic(probability: np.ndarray, hit: np.ndarray) -> dict:
     params: dict
         x (補正の前の確率の並び) と y (補正した確率の並び)
     """
+    # 同じ確率の行を先に 1 つにまとめる (同じ確率に当たった割合の違う塊
+    # が並ぶと, 補間が行の順で変わるため)
+    xs, inverse = np.unique(probability.astype(np.float64),
+                            return_inverse=True)
+    counts = np.bincount(inverse, minlength=len(xs)).astype(np.float64)
+    hits = np.bincount(inverse, weights=hit.astype(np.float64),
+                       minlength=len(xs))
+
     # 小さい順の塊 (確率の下端, 上端, 当たりの数, 行の数)
-    order = np.argsort(probability, kind="stable")
-    xs = probability[order].astype(np.float64)
-    ys = hit[order].astype(np.float64)
     blocks: list[list[float]] = []
-    for x, y in zip(xs, ys):
-        blocks.append([x, x, y, 1.0])
+    for x, y, n in zip(xs, hits, counts):
+        blocks.append([float(x), float(x), float(y), float(n)])
         while len(blocks) > 1 and (
             blocks[-2][2] / blocks[-2][3] >= blocks[-1][2] / blocks[-1][3]
         ):
-            low, _, hits, count = blocks.pop(-2)
-            blocks[-1] = [low, blocks[-1][1], blocks[-1][2] + hits,
+            low, _, merged, count = blocks.pop(-2)
+            blocks[-1] = [low, blocks[-1][1], blocks[-1][2] + merged,
                           blocks[-1][3] + count]
 
     # 塊の両端の点 (幅の無い塊は 1 つ)
     x_points: list[float] = []
     y_points: list[float] = []
-    for low, high, hits, count in blocks:
-        rate = hits / count
+    for low, high, total, count in blocks:
+        rate = total / count
         for x in ((low,) if low == high else (low, high)):
             x_points.append(float(x))
             y_points.append(float(rate))
@@ -220,15 +226,40 @@ def fit_calibration(
     ----------
     fitted: dict
         クラスの名前ごとの当てはめた値
+
+    Raises
+    ----------
+    ValueError
+        分割に出ないクラスがある場合と, Platt の傾き a が 0 以下になった
+        場合 (確率の順が逆になるため)
     """
+    # 全てのクラスが出ること (出ないクラスは「そのクラスか」を当てはめら
+    # れない)
+    answers = answers.astype(int)
+    missing = [str(classes[i]) for i in range(len(classes))
+               if not (answers == i).any()]
+    if missing:
+        raise ValueError(
+            f"検証用の分割にクラス {', '.join(missing)} の行が無いので, 確率"
+            "を補正できません (全てのクラスの行が要ります)"
+        )
+
     # 補正するクラスの番号
     fit = fit_platt if method == "platt" else fit_isotonic
-    answers = answers.astype(int)
     indices = [1] if len(classes) == 2 else range(len(classes))
     fitted = {
         str(classes[index]): fit(probability[:, index], answers == index)
         for index in indices
     }
+    flipped = [name for name, params in fitted.items()
+               if method == "platt" and params["a"] <= 0]
+    if flipped:
+        raise ValueError(
+            f"クラス {', '.join(flipped)} の Platt 法の傾き a が 0 以下に"
+            "なりました (補正すると確率の高い順が逆になる). モデルの確率が"
+            "当たりと逆向きか, 検証用の分割の行が少なすぎます. 補正せずに"
+            "作るか, isotonic 回帰 (calibrate=\"isotonic\") を選んでください"
+        )
 
     return fitted
 
