@@ -1,6 +1,6 @@
 # ML-Inference
 
-「機械学習を全て GUI 上で行う」うちの「推論」の段階のライブラリ. 学習したモデルで新しいデータを推論し, 予測から結論と意思決定の材料を出す. 画面のアプリ [ML-Provide](https://github.com/victor-von-pooh/ML-Provide) が使う.
+「機械学習を全て GUI 上で行う」うちの「推論」の段階のライブラリ. 学習したモデルで新しいデータを推論し, 予測から結論と意思決定の材料を出す. 画面のアプリは [ML-Provide](https://github.com/victor-von-pooh/ML-Provide).
 
 ## できること
 
@@ -13,6 +13,13 @@
 - **見本の一式**: 表か文のデータから小さなモデルをその場で学習し, 画面で操作を試すための一式を作る
 
 前処理は [ML-EDA](https://github.com/victor-von-pooh/ML-EDA), モデルの組み立ては [ML-ModelControl](https://github.com/victor-von-pooh/ML-ModelControl) を使い, [ML-Found](https://github.com/victor-von-pooh/ML-Found) で学習した重みを読む.
+
+## どのアプリから使われるか
+
+| 相手 | 使うもの |
+| --- | --- |
+| ML-Provide (推論) | 推論の一式の作成と確かめ, 予測, 結論, 意思決定, 先の予測と列の効き, 方策の一式. 自作の繰り返しの手順 (`register_procedure`, `PROCEDURES`) と自作の部品 (`register_units`) の登録. 問題の設定 (ML-Quest) の損得と今のやり方は, 画面が引数で渡す |
+| ML-Found の学習のスクリプト (ML-Quest の骨組みを含む) | 学習の後に `make_bundle` で実験のディレクトリの中に一式を作る |
 
 ## 導入
 
