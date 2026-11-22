@@ -269,6 +269,32 @@ def transform_rows(
     return result, failed
 
 
+def trained_shape(bundle: Bundle) -> Optional[tuple]:
+    """
+    学習のデータセットの 1 件の中身の形を返す関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+
+    Returns
+    ----------
+    shape: Optional[tuple]
+        1 件の形 (件のある分割の説明に形が無ければ None)
+    """
+    # 件のある最初の分割の形から件数を除いたもの
+    splits = bundle.dataset.info.get("splits") or {}
+    shape = next((
+        tuple(int(v) for v in split["shape"][1:])
+        for split in splits.values()
+        if isinstance(split, dict) and split.get("rows")
+        and split.get("shape")
+    ), None)
+
+    return shape
+
+
 def items_of(
     bundle: Bundle, data: Data
 ) -> tuple[Optional[np.ndarray], list[str]]:
@@ -289,10 +315,12 @@ def items_of(
     reasons: list[str]
         行ごとの予測できない理由 (予測できる行は空の文字)
     """
-    # 読めない件と形の違う件は理由を付けて飛ばす
+    # 読めない件と, 学習の形 (分からなければ他の件の形) と違う件は理由を
+    # 付けて飛ばす
     arrays: list = []
     reasons = []
-    shape = None
+    trained = trained_shape(bundle)
+    shape = trained
     for index in range(len(data.frame)):
         try:
             item = data.load_item(index)
@@ -307,14 +335,18 @@ def items_of(
             continue
         if shape is not None and array.shape != shape:
             arrays.append(None)
-            reasons.append(f"形が {array.shape} で, 他の件の {shape} と違います")
+            reasons.append(
+                f"形が {array.shape} で, 学習の {shape} と違います"
+                if trained is not None else
+                f"形が {array.shape} で, 他の件の {shape} と違います"
+            )
             continue
         shape = array.shape
         arrays.append(array)
         reasons.append("")
-    if shape is None:
+    first = next((a for a in arrays if a is not None), None)
+    if first is None:
         return None, reasons
-    first = next(a for a in arrays if a is not None)
     blank = np.zeros(shape, dtype=first.dtype)
     items = np.stack([blank if a is None else a for a in arrays])
 

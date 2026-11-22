@@ -138,6 +138,61 @@ def test_audio(tmp_path: Path) -> None:
     names = result["path"].map(lambda value: Path(value).name)
     assert list(names) == ["a.wav", "b.wav", "c.wav"]
     assert list(result["status"]) == ["ok", "ok", "skipped"]
-    ok = result[result["status"] == "ok"]
-    assert np.allclose(ok[["p:high", "p:low"]].sum(axis=1), 1.0)
-    assert set(ok["prediction"]) <= {"low", "high"}
+    assert result["reason"][2]
+
+    # 新しい音声の確率は, 変換した配列をモデルに通した値
+    fresh_x = torch.from_numpy(np.stack([
+        dataset.transform_item(fresh / name) for name in ("a.wav", "b.wav")
+    ]))
+    with torch.no_grad():
+        expected = model(fresh_x).softmax(dim=1).numpy()
+    got = result[["p:high", "p:low"]].to_numpy()[:2]
+    assert np.allclose(got, expected, atol=1e-5)
+    assert set(result["prediction"][:2]) <= {"low", "high"}
+
+
+def test_audio_shape(tmp_path: Path) -> None:
+    """
+    中身の手順の無い音声の一式で, 学習と長さかチャンネルの違う件を理由を
+    付けて飛ばすことを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 同じ周波数と長さの音声だけで, 手順の無い一式
+    root = tmp_path / "sounds"
+    for index in range(4):
+        write_wave(root / "low" / f"l{index}.wav",
+                   tone(200, SECONDS, RATE), RATE)
+        write_wave(root / "high" / f"h{index}.wav",
+                   tone(1500, SECONDS, RATE), RATE)
+    recipe = {
+        "format_version": 1, "target": "label", "task": "classification",
+        "item_steps": [],
+        "split": {"method": "stratified", "valid": 0.25, "seed": 0},
+    }
+    export_dataset(load_data(root), recipe, tmp_path / "ds")
+    spec = flat_spec([1, int(RATE * SECONDS)], 2)
+    weights = save_weights(spec, tmp_path / "w.pt")
+    make_bundle(tmp_path / "bundle", spec, tmp_path / "ds", weights)
+
+    # 先頭が長い件でも, 学習の形と比べて飛ばす (周波数の違う件は長さが違う)
+    fresh = tmp_path / "fresh"
+    write_wave(fresh / "a.wav", tone(200, 2 * SECONDS, RATE), RATE)
+    write_wave(fresh / "b.wav", tone(200, SECONDS, RATE), RATE)
+    write_wave(fresh / "c.wav", tone(200, SECONDS, 2 * RATE), 2 * RATE)
+    write_wave(fresh / "d.wav", tone(200, SECONDS, RATE, 2), RATE)
+    result = predict(tmp_path / "bundle", fresh)
+    assert list(result["status"]) == ["skipped", "ok", "skipped", "skipped"]
+    for row in (0, 2, 3):
+        assert "学習の (1, 800) と違います" in result["reason"][row]
+
+    # 1 つのファイルだけでも同じ
+    single = predict(tmp_path / "bundle", fresh / "a.wav")
+    assert list(single["status"]) == ["skipped"]
