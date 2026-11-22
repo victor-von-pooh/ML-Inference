@@ -4,6 +4,7 @@ import numpy as np
 from ml_eda import Dataset
 
 from ml_inference.bundle import Bundle, split_sources
+from ml_inference.calibrate import fit_calibration
 from ml_inference.predict import (
     decode, inverse_target, run_model, shape_inputs
 )
@@ -304,6 +305,65 @@ def class_calibration(
     result = (calibration(columns["confidence"].astype(float), hit), None)
 
     return result
+
+
+def fit_column_calibration(
+    bundle: Bundle, dataset: Dataset, method: str
+) -> dict[str, Any]:
+    """
+    分類の一式の確率の補正を, 検証用の分割で当てはめる関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        作っている一式 (まだ補正を持たないもの)
+    dataset: Dataset
+        分割の表を持つデータセット
+    method: str
+        補正の選び方 (platt か isotonic)
+
+    Returns
+    ----------
+    calibrate: dict[str, Any]
+        一式の calibrate (method, split, rows, classes (クラスごとの当て
+        はめた値), before (補正の前の検証用のずれ ece とテスト用のずれ
+        test_ece. テスト用の分割が無ければ test_ece は None))
+
+    Raises
+    ----------
+    ValueError
+        目的の列か検証用の分割が無い場合
+    """
+    # 当てはめるのは検証用の分割だけ (学習用は学習に使ったので確率が
+    # 当たりすぎて見える)
+    frames = dataset.frames or {}
+    if not dataset.target or "valid" not in frames or len(
+        frames["valid"]
+    ) == 0:
+        raise ValueError(
+            "確率の補正には, 目的の列のある検証用の分割 (valid) が要ります"
+        )
+    rows = min(len(dataset.arrays("valid")[1]), UNCERTAINTY_ROWS)
+    columns, answers = split_outputs(bundle, dataset, "valid", rows)
+    classes = bundle.classes
+    probability = np.stack(
+        [columns[f"p:{name}"].astype(float) for name in classes], axis=1
+    )
+    before: dict[str, Any] = {
+        "ece": class_calibration(bundle, columns, answers)[0]["ece"],
+        "test_ece": None,
+    }
+    if "test" in frames and len(frames["test"]) > 0:
+        count = min(len(dataset.arrays("test")[1]), UNCERTAINTY_ROWS)
+        got, truth = split_outputs(bundle, dataset, "test", count)
+        before["test_ece"] = class_calibration(bundle, got, truth)[0]["ece"]
+    calibrate = {
+        "method": method, "split": "valid", "rows": int(rows),
+        "classes": fit_calibration(method, classes, probability, answers),
+        "before": before,
+    }
+
+    return calibrate
 
 
 def measure_uncertainty(

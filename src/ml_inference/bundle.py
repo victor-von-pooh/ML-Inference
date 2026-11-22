@@ -15,6 +15,7 @@ from ml_eda import (
 )
 from ml_modelcontrol import build_model, dump_spec, load_spec
 
+from ml_inference.calibrate import CALIBRATE_METHODS, check_calibrate
 from ml_inference.conclude import check_rules, plain
 from ml_inference.items import (
     ITEM_FORMS, PREPARE_KINDS, check_items, check_point_count
@@ -42,7 +43,8 @@ READY_BUNDLE_VERSION = 6
 TOP_KEYS = (
     "format_version", "name", "created_at", "role", "output", "target",
     "procedure", "model", "inputs", "dataset", "run", "conclusion",
-    "decision", "check", "uncertainty", "notes", "items", "ready"
+    "decision", "check", "uncertainty", "notes", "items", "ready",
+    "calibrate"
 )
 
 # 出力の扱い方
@@ -1249,6 +1251,13 @@ def load_bundle(path: Union[str, Path]) -> Bundle:
         )
     check_items_bundle(bundle)
     check_ready_spec(bundle)
+    if info.get("calibrate") is not None:
+        classes = bundle.classes if (
+            bundle.form == "class" and not bundle.from_ready
+        ) else None
+        errors = check_calibrate(info["calibrate"], classes)
+        if errors:
+            raise ValueError("inference.yaml の誤り: " + " / ".join(errors))
     names = set(spec["nodes"])
     for record in info["model"].get("pretrained") or []:
         if record["node"] not in names:
@@ -1538,7 +1547,8 @@ def make_bundle(
     overwrite: bool = False, role: Optional[str] = None,
     form: Optional[str] = None, output_options: Optional[dict] = None,
     target: Optional[dict] = None, procedure: Optional[dict] = None,
-    pretrained: Optional[dict] = None, items: Optional[dict] = None
+    pretrained: Optional[dict] = None, items: Optional[dict] = None,
+    calibrate: Optional[str] = None
 ) -> dict:
     """
     推論の一式を作り, 見本を推論できることを確かめる関数
@@ -1597,6 +1607,9 @@ def make_bundle(
         版 2 のデータセットの 1 件の扱い (input, target, prepare,
         options, values, restore. 省いた欄はデータセットから. 点を選ぶ
         扱い方は options.points が要る)
+    calibrate: Optional[str] = None
+        分類の確率の補正の選び方 (platt か isotonic. 検証用の分割で当て
+        はめる). 省くと補正しない
 
     Returns
     ----------
@@ -1618,6 +1631,13 @@ def make_bundle(
             raise FileExistsError(f"{final} は既にあります")
         if not (final / "inference.yaml").is_file():
             raise FileExistsError(f"{final} は推論の一式ではないので置き換えません")
+
+    # 確率の補正の選び方
+    if calibrate is not None and calibrate not in CALIBRATE_METHODS:
+        raise ValueError(
+            f"calibrate は {', '.join(CALIBRATE_METHODS)} のどれかにして"
+            f"ください (今は {calibrate})"
+        )
 
     # 重みの場所と, 実験のディレクトリなら記録する状態
     source = Path(weights).expanduser().resolve()
@@ -1740,6 +1760,13 @@ def make_bundle(
             encoding="utf-8"
         )
         bundle = load_bundle(writing)
+        if calibrate is not None and not (
+            bundle.column_output and bundle.form == "class"
+        ):
+            raise ValueError(
+                "確率の補正 (calibrate) は, 版 1 のデータセットの分類の一式"
+                f"だけに使えます (今は出力の形 {bundle.form})"
+            )
         # 結論と意思決定の決め方は重い推論の前に確かめる (列の出力だけ)
         if conclusion or decision:
             bundle.require_column("結論の決め方と意思決定")
@@ -1771,7 +1798,7 @@ def make_bundle(
             info["uncertainty"] = None
         elif bundle.column_output:
             check_sample(bundle, full)
-            measure_column(bundle, full, run, info)
+            measure_column(bundle, full, run, info, calibrate)
         else:
             check_sample(bundle, full)
             info["check"] = None
@@ -2232,7 +2259,8 @@ def sample_inference(bundle: Bundle, tensors: list) -> None:
 
 
 def measure_column(
-    bundle: Bundle, dataset: Dataset, run: Optional[dict], info: dict
+    bundle: Bundle, dataset: Dataset, run: Optional[dict], info: dict,
+    calibrate: Optional[str] = None
 ) -> None:
     """
     列の出力の一式の, 記録との比べと外れ方を測る関数
@@ -2248,13 +2276,22 @@ def measure_column(
     run: Optional[dict]
         実験の状態 (run_summary の結果)
     info: dict
-        書き足す inference.yaml の中身 (check, uncertainty, notes)
+        書き足す inference.yaml の中身 (check, uncertainty, notes.
+        補正すれば calibrate)
+    calibrate: Optional[str] = None
+        確率の補正の選び方 (省くと補正しない)
 
     Returns
     ----------
     None
+
+    Raises
+    ----------
+    ValueError
+        補正するのに, 検証用の分割と目的の列が無い場合
     """
-    # 記録との比べは注意のためなので, 失敗しても作るのは止めない
+    # 記録との比べは注意のためなので, 失敗しても作るのは止めない (記録は
+    # 補正の前のモデルの指標なので, 補正の前に比べる)
     try:
         info["check"] = check_against_run(bundle, dataset, run)
     except Exception as error:
@@ -2265,9 +2302,18 @@ def measure_column(
     if info["check"] and info["check"]["matches"] is False:
         info["notes"].append(check_note(info["check"]))
 
-    # 意思決定のための外れ方 (失敗しても作るのは止めない)
-    from ml_inference.uncertainty import measure_uncertainty
+    # 確率の補正 (頼まれたものなので, できなければ止める). 外れ方は補正
+    # した確率で測る
+    from ml_inference.uncertainty import (
+        fit_column_calibration, measure_uncertainty
+    )
 
+    if calibrate is not None:
+        fitted = fit_column_calibration(bundle, dataset, calibrate)
+        bundle.info["calibrate"] = fitted
+        info["calibrate"] = fitted
+
+    # 意思決定のための外れ方 (失敗しても作るのは止めない)
     try:
         info["uncertainty"] = measure_uncertainty(bundle, dataset)
     except Exception as error:

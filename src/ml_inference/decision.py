@@ -48,6 +48,9 @@ DECISION_COLUMNS = (
 # 分割の日本語の名前
 SPLIT_NAMES = {"train": "学習用", "valid": "検証用", "test": "テスト用"}
 
+# 確率の補正の選び方の呼び名
+CALIBRATE_NAMES = {"platt": "Platt", "isotonic": "isotonic"}
+
 # たどり直しの差の幅を求める選び直しの回数と乱数のシード
 BOOTSTRAP = 500
 BOOTSTRAP_SEED = 0
@@ -1200,6 +1203,18 @@ def caveats(
             + (f". 渡した実績の {uncertainty.get('rows', 0):,} 行で測り"
                "直した値"
                if uncertainty.get("split") == "recent" else "")
+        )
+    calibrate = bundle.info.get("calibrate")
+    if calibrate:
+        earlier = (calibrate.get("before") or {}).get("test_ece")
+        method = str(calibrate.get("method"))
+        notes.append(
+            f"確率は{SPLIT_NAMES.get(calibrate.get('split'), '検証用')}の"
+            f"分割の {calibrate.get('rows', 0):,} 行で補正した ("
+            f"{CALIBRATE_NAMES.get(method, method)}"
+            + (f". 補正の前のテスト用の分割のずれは平均 {earlier * 100:.1f}"
+               " ポイント" if earlier is not None else "")
+            + ")"
         )
     if is_uplift(decision):
         goal = (
