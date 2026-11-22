@@ -14,7 +14,7 @@ from ml_inference import (
     decide, describe_bundle, forecast, load_bundle, make_bundle, predict,
     remeasure, restore_uncertainty
 )
-from ml_inference.decision import group_key
+from ml_inference.decision import group_key, row_quantiles
 from ml_inference.remeasure import history_length
 
 
@@ -162,23 +162,24 @@ def test_remeasure_groups(tmp_path: Path) -> None:
     ----------
     None
     """
-    # 店 A は ±5 %, 店 B は ±40 % の誤り. 店 C は 10 行だけ
+    # 店 A は ±5 %, 店 B と D は ±40 % の誤り. 店 C は 10 行, D は 40 行
     path = regression_bundle(tmp_path)
     rng = np.random.default_rng(7)
-    x = rng.uniform(1, 10, 410)
-    store = np.array(["A"] * 200 + ["B"] * 200 + ["C"] * 10, dtype=object)
+    x = rng.uniform(1, 10, 450)
+    store = np.array(["A"] * 200 + ["B"] * 200 + ["C"] * 10 + ["D"] * 40,
+                     dtype=object)
     spread = np.where(store == "A", 0.05, 0.4)
     y = 10 * x * rng.uniform(1 - spread, 1 + spread)
     recent = pd.DataFrame({"x": x, "store": store, "y": y})
     result = remeasure(path, recent, groups="store")
     groups = result["uncertainty"]["groups"]
     assert groups["column"] == "store" and groups["few"] == 1
-    assert set(groups["values"]) == {"A", "B"}
-    assert groups["rows"] == {"A": 200, "B": 200}
+    assert set(groups["values"]) == {"A", "B", "D"}
+    assert groups["rows"] == {"A": 200, "B": 200, "D": 40}
     assert len(groups["values"]["A"]) == 99
-    assert any("store ごとの外れ方を 2 種類" in s for s in result["sentences"])
+    assert any("store ごとの外れ方を 3 種類" in s for s in result["sentences"])
     assert describe_bundle(path)["uncertainty"]["groups"] == {
-        "column": "store", "count": 2
+        "column": "store", "count": 3
     }
 
     # 9 : 1 の量は, 店 B が予測から大きく上に, 店 A は予測の近く
@@ -193,6 +194,23 @@ def test_remeasure_groups(tmp_path: Path) -> None:
     assert level[2] == level[3] and level[0] < level[2] < level[1]
     assert any("store ごとに測ったものを当てた (2 行. 記録に無い store と"
                "欠けた値の 2 行" in note for note in made["notes"])
+    assert not any("粗い" in note and "store" in note
+                   for note in made["notes"])
+
+    # 100 行より少なく測った種類を当てると, 粗いと添える
+    coarse = decide(bundle, predict(bundle, fresh.assign(store="D")),
+                    decision)
+    assert any("store の D (40 行) の外れ方は 100 行より少ない" in note
+               for note in coarse["notes"])
+
+    # 分位点が 99 個の数でない種類は, 全ての行の外れ方に戻して添える
+    broken = load_bundle(path)
+    broken.info["uncertainty"]["groups"]["values"]["B"] = [1.0, 2.0]
+    repaired = decide(broken, predict(broken, fresh), decision)
+    level_b = repaired["frame"]["level"].to_numpy()
+    assert level_b[1] == level[2] and level_b[0] == level[0]
+    assert any("store の B の外れ方の記録は 99 個" in note
+               for note in repaired["notes"])
 
     # 予測の表に分ける列が無ければ, 全ての行の外れ方と添える
     plain = decide(bundle, predict(bundle, fresh[["x"]]), decision)
@@ -209,14 +227,14 @@ def test_remeasure_groups(tmp_path: Path) -> None:
         remeasure(path, recent, groups="shop", write=False)
     with pytest.raises(ValueError, match="groups の列"):
         remeasure(path, recent, groups="y", write=False)
-    recent["id"] = np.arange(410)
+    recent["id"] = np.arange(450)
     with pytest.raises(ValueError, match="20 行以上のものが無い"):
         remeasure(path, recent, groups="id", write=False)
     (tmp_path / "class").mkdir()
     label = classifier_bundle(tmp_path / "class")
     with pytest.raises(ValueError, match="回帰と予測の一式だけ"):
         remeasure(label, pd.DataFrame({"x": x, "store": store,
-                                       "label": ["yes"] * 410}),
+                                       "label": ["yes"] * 450}),
                   groups="store", write=False)
 
 
@@ -331,6 +349,26 @@ def test_remeasure_steps(tmp_path: Path) -> None:
     assert "決められる行がありません" in empty["sentences"][0]
     skipped = rows.head(3).assign(status="skipped")
     assert "決められる行" in decide(bundle, skipped, decision)["sentences"][0]
+
+    # 店ごとの外れ方と段ごとの外れ方を一緒に測ると, 1 段目の行は店ごと,
+    # 2 段目より先は段ごと (店で分けない)
+    both = remeasure(path, frame, count=count, horizon=5, groups="s")
+    assert set(both["uncertainty"]["groups"]["values"]) == {"a", "b"}
+    assert set(both["uncertainty"]["steps"]) == set(steps)
+    bundle = load_bundle(path)
+    mixed = decide(bundle, rows, decision)
+    assert mixed["summary"]["by_step"] is True
+    assert mixed["summary"]["by_group"]["grouped"] == len(rows)
+    record = bundle.info["uncertainty"]
+    grid, _, _ = row_quantiles(
+        bundle, rows, np.asarray(record[record["kind"]])
+    )
+    for row in range(len(rows)):
+        want = record["groups"]["values"][rows["s"][row]] if (
+            rows["step"][row] == 1
+        ) else record["steps"][str(int(rows["step"][row]))]
+        assert np.allclose(grid[row], want)
+    assert any("段ごとの外れ方は種類で分けない" in n for n in mixed["notes"])
 
     # 使えない場合
     with pytest.raises(ValueError, match="2 以上"):

@@ -55,6 +55,9 @@ BOOTSTRAP_SEED = 0
 # まとまりごとに選び直すのに要るまとまりの数の下限 (少ないと幅が狭く出る)
 MIN_GROUPS = 20
 
+# 外れ方を粗いと添える, 測った行の数の境
+COARSE_ROWS = 100
+
 
 def check_amount(
     decision: dict, name: str, columns: Optional[list[str]],
@@ -453,23 +456,42 @@ def group_quantiles(
     used: dict
         column (分ける列. 種類ごとに測っていなければ None), grouped
         (種類ごとの外れ方を当てた行の数), fallback (記録に無い種類と
-        欠けた値の行の数), absent (予測の表に分ける列が無いか)
+        欠けた値の行の数), absent (予測の表に分ける列が無いか), broken
+        (分位点が 99 個の数でない種類の名前), few (当てた種類のうち
+        100 行より少ない行で測った種類の名前から行の数)
     """
-    # 記録に無い種類と欠けた値の行は全ての行の外れ方のまま
+    # 記録に無い種類, 欠けた値, 記録の壊れた種類の行は全ての行の外れ方の
+    # まま
     groups = (bundle.info.get("uncertainty") or {}).get("groups") or {}
     column = groups.get("column")
-    used = {"column": column, "grouped": 0, "fallback": 0, "absent": False}
+    used: dict[str, Any] = {
+        "column": column, "grouped": 0, "fallback": 0, "absent": False,
+        "broken": [], "few": {},
+    }
     if not column:
         return used
     if column not in frame.columns:
         used["absent"] = True
         return used
-    values = groups.get("values") or {}
+    values: dict[str, np.ndarray] = {}
+    for key, recorded in (groups.get("values") or {}).items():
+        try:
+            array = np.asarray(recorded, dtype=float)
+        except (TypeError, ValueError):
+            array = np.empty(0)
+        if array.shape == (rows.shape[1],) and np.isfinite(array).all():
+            values[str(key)] = array
+        else:
+            used["broken"].append(str(key))
+    counts = groups.get("rows") or {}
     for position, value in enumerate(frame[column].tolist()):
         key = group_key(value)
         if key in values:
-            rows[position] = np.asarray(values[key], dtype=float)
+            rows[position] = values[key]
             used["grouped"] += 1
+            measured = counts.get(key)
+            if isinstance(measured, int) and measured < COARSE_ROWS:
+                used["few"][key] = measured
         else:
             used["fallback"] += 1
 
@@ -556,6 +578,22 @@ def group_notes(grouped: dict) -> list[str]:
            if grouped.get("fallback") else "")
         + ")"
     )
+    if grouped.get("broken"):
+        notes.append(
+            f"{column} の {', '.join(sorted(grouped['broken']))} の外れ方の"
+            "記録は 99 個の分位点の数でないので使わず, 全ての行の外れ方を"
+            "当てた"
+        )
+    if grouped.get("few"):
+        few = ", ".join(
+            f"{key} ({count} 行)" for key, count in sorted(
+                grouped["few"].items()
+            )
+        )
+        notes.append(
+            f"{column} の {few} の外れ方は {COARSE_ROWS} 行より少ない行で"
+            "測ったので粗い"
+        )
 
     return notes
 
