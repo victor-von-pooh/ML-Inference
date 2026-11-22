@@ -13,6 +13,7 @@ from ml_inference.conclude import (
 from ml_inference.decision import backtest, check_decision, decide
 from ml_inference.explain import explain, explain_rows
 from ml_inference.forecast import forecast
+from ml_inference.items import POINT_KINDS, describe_items
 from ml_inference.policy import (
     POLICY_FORMAT_VERSION, GuardedPolicy, apply_guards, load_policy,
     read_policy_spec
@@ -43,6 +44,7 @@ __all__ = [
     "NO_PREDICTION",
     "GuardedPolicy",
     "OK",
+    "POINT_KINDS",
     "POLICY_FORMAT_VERSION",
     "PROCEDURES",
     "READY_LIBRARIES",
@@ -61,6 +63,7 @@ __all__ = [
     "current_from_baseline",
     "decide",
     "describe_bundle",
+    "describe_items",
     "explain",
     "explain_rows",
     "forecast",

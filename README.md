@@ -19,7 +19,7 @@
 
 | 相手 | 使うもの |
 | --- | --- |
-| ML-Provide (推論) | 推論の一式の作成と確かめ, 予測, 結論, 意思決定, 先の予測と列の効き, 方策の一式. 自作の繰り返しの手順 (`register_procedure`, `PROCEDURES`) と自作の部品 (`register_units`) の登録. 問題の設定 (ML-Quest) の損得と今のやり方は, 画面が引数で渡す |
+| ML-Provide (推論) | 推論の一式の作成と確かめ, 版 2 のデータセットの説明 (`describe_items`), 予測, 結論, 意思決定, 先の予測と列の効き, 方策の一式. 自作の繰り返しの手順 (`register_procedure`, `PROCEDURES`) と自作の部品 (`register_units`) の登録. 問題の設定 (ML-Quest) の損得と今のやり方は, 画面が引数で渡す |
 | ML-Found の学習のスクリプト (ML-Quest の骨組みを含む) | 学習の後に `make_bundle` で実験のディレクトリの中に一式を作る |
 
 ## 導入
@@ -154,6 +154,8 @@ make_bundle(
 result = infer("bundles/shape", "new_captures/")
 write_result(result, "results/shape")   # 点群は artifacts/000000.npy など
 ```
+
+一式を作る前にデータセットの項目と `items` の既定を見るには `describe_items("outputs/clouds")` (作れないデータセットは `problem` に理由が入る). 点を選ぶ入力の項目の種類は `POINT_KINDS`.
 
 一式を作るときに, 検証用の分割の IoU (領域) か Chamfer 距離 (点群) を求め, 実験の監視した指標 (`valid/iou`, `valid/chamfer`) と比べる (DESIGN の「版 2 のデータセットの一式」).
 

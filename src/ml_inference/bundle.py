@@ -2646,17 +2646,10 @@ def item_fields(
         種類と違う場合
     """
     # 作れるのは予測するで, 正解の種類が領域か点群のものだけ
-    from ml_inference.items import resolve_items
+    from ml_inference.items import item_form, resolve_items
 
     described = dataset.info.get("target") or {}
-    kind = described.get("kind")
-    if dataset.info.get("role") != "predict" or kind not in ITEM_FORMS:
-        raise ValueError(
-            f"版 2 のデータセットから一式を作れるのは, 予測する (role: "
-            f"predict) で正解の種類が {', '.join(ITEM_FORMS)} のものだけ"
-            f"です (今は role: {dataset.info.get('role')}, 正解の種類: "
-            f"{kind})"
-        )
+    kind = item_form(dataset)
     form = form or kind
     if form != kind:
         raise ValueError(
