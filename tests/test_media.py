@@ -3,7 +3,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-from conftest import save_weights
+from conftest import flat_spec, save_weights
 from ml_eda import export_dataset, load_data, load_dataset
 from ml_modelcontrol import build_model
 
@@ -11,40 +11,6 @@ from ml_inference import make_bundle, predict
 
 # 画像の読み書き (任意の依存. 無い環境では画像のテストを飛ばす)
 Image = pytest.importorskip("PIL.Image")
-
-
-def flat_spec(shape: list[int], classes: int) -> dict:
-    """
-    中身を平らにして全結合の 1 層で分類するモデルの定義を返す関数
-
-    Parameters
-    ----------
-    shape: list[int]
-        1 件の中身の形
-    classes: int
-        クラスの数
-
-    Returns
-    ----------
-    spec: dict
-        ML-ModelControl の定義
-    """
-    # 平らにしてから全結合
-    width = int(np.prod(shape))
-    spec = {
-        "format_version": 1,
-        "inputs": {"x": {"shape": [2, *shape]}},
-        "nodes": {
-            "flat": {"unit": "nn.Flatten", "inputs": "x"},
-            "head": {"unit": "nn.Linear",
-                     "params": {"in_features": width,
-                                "out_features": classes},
-                     "inputs": "flat"},
-        },
-        "outputs": {"logits": "head"},
-    }
-
-    return spec
 
 
 def test_images(tmp_path: Path) -> None:

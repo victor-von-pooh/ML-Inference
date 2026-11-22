@@ -163,8 +163,8 @@ class Bundle:
         Returns
         ----------
         kind: str
-            table, timeseries, image, text, pointcloud, items (版 2 の
-            データセットの一式), noise (雑音だけの一式)
+            table, timeseries, image, text, pointcloud, audio, items
+            (版 2 のデータセットの一式), noise (雑音だけの一式)
         """
         # 版 2 のデータセットの一式はファイルの組, 雑音だけの一式は雑音
         if self.from_items:

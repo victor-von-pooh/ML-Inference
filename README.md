@@ -79,7 +79,7 @@ experiment.logger.info(f"推論の一式の検証用の評価: {info['check']}")
 
 ### 推論して結論を出す
 
-推論するデータは, 学習のときと同じ列を持つファイル (目的の列は有っても無くてもよい), 表 (`DataFrame`), 画像や点群のディレクトリ.
+推論するデータは, 学習のときと同じ列を持つファイル (目的の列は有っても無くてもよい), 表 (`DataFrame`), 画像, 点群, 音声のファイルかディレクトリ.
 
 ```python
 from ml_inference import infer, write_result
