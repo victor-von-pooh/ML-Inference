@@ -9,9 +9,10 @@ import warnings
 import numpy as np
 import torch
 import yaml
-from ml_eda import Dataset, ItemDataset, load_dataset, load_items
-from ml_eda.items import PLACEMENTS
-from ml_eda.pipeline import DATASET_FORMAT_VERSION, ITEMS_FORMAT_VERSIONS
+from ml_eda import (
+    DATASET_FORMAT_VERSION, ITEMS_FORMAT_VERSIONS, PLACEMENTS, Dataset,
+    ItemDataset, load_dataset, load_items
+)
 from ml_modelcontrol import build_model, dump_spec, load_spec
 
 from ml_inference.conclude import check_rules, plain
