@@ -70,6 +70,13 @@ def torchvision_weights(model: str, weights: str) -> dict:
             f"{', '.join(choices.__members__)})"
         )
     chosen = choices[weights]
+    method = getattr(getattr(chosen.transforms(), "interpolation", None),
+                     "value", None)
+    if method not in INTERPOLATIONS:
+        raise ValueError(
+            f"{model} の {chosen.name} の前処理の補い方 {method} は扱えません"
+            f" (扱えるもの: {', '.join(INTERPOLATIONS)})"
+        )
 
     # 画像の分類の前処理 (大きさ, 切り出し, 正規化) と種類の名前
     transform = chosen.transforms()
@@ -130,6 +137,14 @@ def check_ready(ready: Any) -> list[str]:
     for key in ("library", "model", "weights"):
         if not isinstance(ready.get(key), str) or not ready.get(key):
             errors.append(f"ready.{key} に名前の文字が要ります")
+    if isinstance(ready.get("library"), str) and (
+        ready["library"] not in READY_LIBRARIES
+    ):
+        errors.append(
+            f"ready.library の {ready['library']} は既製のモデルの出どころ"
+            f"にありません (出どころ: {', '.join(READY_LIBRARIES)})"
+        )
+    errors.extend(check_file(ready))
     if ready.get("input") not in READY_INPUTS:
         errors.append(
             f"ready.input は {', '.join(READY_INPUTS)} にしてください"
@@ -139,6 +154,37 @@ def check_ready(ready: Any) -> list[str]:
         ready["license"], dict
     ):
         errors.append("ready.license が辞書ではありません")
+
+    return errors
+
+
+def check_file(ready: dict) -> list[str]:
+    """
+    出どころの重みの URL とファイルの名前の形を確かめる関数
+
+    Parameters
+    ----------
+    ready: dict
+        inference.yaml の ready
+
+    Returns
+    ----------
+    errors: list[str]
+        誤りの一覧 (無ければ空)
+    """
+    # ファイルの名前は区切りと .. を含まない名前だけ (置き場の外を指さない)
+    errors = []
+    url = ready.get("url")
+    if url is not None and not isinstance(url, str):
+        errors.append("ready.url は文字にしてください")
+    file = ready.get("file")
+    if file is not None and (
+        not isinstance(file, str) or not file or file in (".", "..")
+        or "/" in file or "\\" in file or Path(file).name != file
+    ):
+        errors.append(
+            "ready.file は区切りと .. を含まないファイルの名前にしてください"
+        )
 
     return errors
 
@@ -297,8 +343,8 @@ def weights_file(ready: dict) -> Path:
         のファイルの名前の場所
     """
     # torchvision は初回に取りに行き, ここに置いて次から読む
-    path = Path(torch.hub.get_dir()) / "checkpoints" / str(
-        ready.get("file") or ""
-    )
+    path = Path(torch.hub.get_dir()) / "checkpoints" / Path(
+        str(ready.get("file") or "")
+    ).name
 
     return path

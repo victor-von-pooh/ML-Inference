@@ -159,7 +159,7 @@ write_result(result, "results/shape")   # 点群は artifacts/000000.npy など
 
 ### 学習しない既製のモデル (一式の版 6)
 
-ライブラリの学習済みの重みを学習せずにそのまま使う一式も作れる. 今は torchvision の画像の分類 (ML-ModelControl の追加の依存 `torchvision` で入れる). 種類の名前の表と前処理 (大きさ, 切り出し, 正規化) は重みの説明から一式に書き, 重みは写さずに名前 (版) と hash で固定する. 重みは初回に取りに行くか, 利用者が PyTorch の置き場 (`torch.hub.get_dir()` の `checkpoints`) に置く.
+ライブラリの学習済みの重みを学習せずにそのまま使う一式も作れる. 今は torchvision の画像の分類 (ML-ModelControl の追加の依存 `torchvision` で入れる). 種類の名前の表と前処理 (大きさ, 切り出し, 正規化) は重みの説明から一式に書き, 重みは写さずに名前 (版) と hash で固定する. 重みは初回に取りに行くか, 利用者が PyTorch の置き場 (`torch.hub.get_dir()` の `checkpoints`) に置く. 置くファイルは信頼できるものだけにする (hash の照合の前に torchvision が読み込むため).
 
 ```python
 from ml_inference import describe_bundle, infer, make_ready_bundle

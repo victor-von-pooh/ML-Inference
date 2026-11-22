@@ -1248,6 +1248,7 @@ def load_bundle(path: Union[str, Path]) -> Bundle:
             f"データセットの一式だけに使えます (今は {bundle.kind})"
         )
     check_items_bundle(bundle)
+    check_ready_spec(bundle)
     names = set(spec["nodes"])
     for record in info["model"].get("pretrained") or []:
         if record["node"] not in names:
@@ -1257,6 +1258,42 @@ def load_bundle(path: Union[str, Path]) -> Bundle:
             )
 
     return bundle
+
+
+def check_ready_spec(bundle: Bundle) -> None:
+    """
+    既製のモデルの一式の ready と定義のノードが合うかを確かめる関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        読んだ一式
+
+    Returns
+    ----------
+    None
+
+    Raises
+    ----------
+    ValueError
+        定義に model のノードが無い場合と, ノードの params の name と
+        weights が ready の model と weights と違う場合
+    """
+    # 記録した出どころと, 組み立てて読む重みを同じに
+    if not bundle.from_ready:
+        return
+    ready = bundle.info["ready"]
+    node = (bundle.spec.get("nodes") or {}).get("model")
+    params = (node.get("params") or {}) if isinstance(node, dict) else {}
+    if not isinstance(node, dict):
+        raise ValueError("既製のモデルの一式の定義に model のノードが"
+                         "ありません")
+    for key, name in (("model", "name"), ("weights", "weights")):
+        if params.get(name) != ready[key]:
+            raise ValueError(
+                f"ready.{key} の {ready[key]} が定義の model のノードの "
+                f"{name} ({params.get(name)}) と違います"
+            )
 
 
 def check_items_bundle(bundle: Bundle) -> None:

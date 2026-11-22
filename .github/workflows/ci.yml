@@ -34,7 +34,8 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
       # CUDA の無い軽い PyTorch を先に入れてから, パッケージとテストの依存を入れる
-      - run: pip install ${{ matrix.torch }} --index-url https://download.pytorch.org/whl/cpu
+      # torchvision は既製のモデルの重みの説明を読むテストのため (重みはネットワークで取らない)
+      - run: pip install ${{ matrix.torch }} torchvision --index-url https://download.pytorch.org/whl/cpu
       - run: pip install -e ".[${{ matrix.extras }}]"
       - run: pytest -q
       # 1 行 79 文字以内 (CODING_STYLE.md. 日本語も 1 文字と数える)

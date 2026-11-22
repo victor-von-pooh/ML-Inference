@@ -304,6 +304,15 @@ def test_ready_bundle_checks(
         ({**info, "format_version": 5}, "版 6 にしてください"),
         ({**info, "output": {"form": "class", "classes": ["a", "a"]}},
          "重ならない"),
+        ({**info, "ready": {**info["ready"], "file": "../evil.pth"}},
+         "ready.file"),
+        ({**info, "ready": {**info["ready"], "url": 1}}, "ready.url"),
+        ({**info, "ready": {**info["ready"], "library": "nothing"}},
+         "ready.library"),
+        ({**info, "ready": {**info["ready"], "weights": "V2"}},
+         "ready.weights の V2"),
+        ({**info, "ready": {**info["ready"], "model": "other"}},
+         "ready.model の other"),
     ]
     for changed, message in cases:
         file.write_text(yaml.safe_dump(changed, allow_unicode=True),
