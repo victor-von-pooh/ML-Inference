@@ -1,3 +1,4 @@
+import copy
 from pathlib import Path
 from typing import Any, Optional, Union
 
@@ -1828,11 +1829,11 @@ def target_of(bundle: Bundle) -> Optional[dict]:
     ----------
     target: Optional[dict]
         kind と origin (版 2 までの一式は kind: column. 分からなければ
-        None)
+        None). 写しなので, 書き換えても一式は変わらない
     """
-    # 版 3 は書いたまま, 版 2 までは列の予測
+    # 版 3 は書いたままの写し, 版 2 までは列の予測
     if "target" in bundle.info:
-        target = bundle.info.get("target")
+        target = copy.deepcopy(bundle.info.get("target"))
         return target
     target = {"kind": "column"}
 
