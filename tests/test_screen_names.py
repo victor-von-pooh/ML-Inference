@@ -101,3 +101,10 @@ def test_read_source_and_target(tmp_path: Path) -> None:
         list(data.frame.columns)
     )
     assert target_of(bundle) == {"kind": "column"}
+
+    # 版 3 の正解は写しで, 書き換えても一式は変わらない
+    bundle.info["target"] = {"kind": "mask",
+                             "origin": {"type": "process", "name": "SAM"}}
+    target = target_of(bundle)
+    target["origin"]["name"] = "別の処理"
+    assert bundle.info["target"]["origin"]["name"] == "SAM"

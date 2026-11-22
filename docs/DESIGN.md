@@ -142,7 +142,7 @@ notes: []                      # 作るときの注意 (戻せない変換, 学�
 - 予測できなかった行 (前処理の後の欠損, 数でない出力) の扱いは形に依らず同じ. 配列の出力は, 1 つでも数でない値があれば予測しなかった行にする (領域のように整数に変える形も, 変える前のモデルの出力で確かめる. `sample` は数でない logits があると引けずに誤りになる)
 - 作るときに `role` と `form` を省くと, タスクから決める (分類は `predict` と `class`, 回帰と予測は `predict` と `value`. タスクが `none` のデータセットは `form` が要る). `class` は分類のデータセット, `value` と `distribution` は回帰か予測のデータセットだけに使える
 - ベクトルの出力の一式 (埋め込みのモデル): `make_bundle(..., form="vector")`. 正解の無いデータセット (タスクが `none`) でも作れる. 見本の推論で (件数, 次元) の形を確かめる
-- `target`: 正解の種類 (`kind`) と出どころ (`origin`). 列の予測では `kind: column`. 出どころは ML-EDA の版 2 の `target.origin` と同じ形 (`type`: `process`, `annotation`, `measurement`, `synthetic`, `unknown`. `name` と `settings`) で, `make_bundle(target=...)` で渡した場合だけ書く (版 1 のデータセットは出どころを持たないため). `type: process` の一式は, 結論の文に「正解は … の出力なので, その処理との一致までしか分からない」を添える (評価と結論で, その処理を超えられないことを示すため). `target_of(bundle)` は一式の `target` を返し (版 2 までの一式は `kind: column`), `origin_sentence(target)` はその文を返す (処理の出力でなければ `None`. 画面が結果の説明に同じ文を出すため)
+- `target`: 正解の種類 (`kind`) と出どころ (`origin`). 列の予測では `kind: column`. 出どころは ML-EDA の版 2 の `target.origin` と同じ形 (`type`: `process`, `annotation`, `measurement`, `synthetic`, `unknown`. `name` と `settings`) で, `make_bundle(target=...)` で渡した場合だけ書く (版 1 のデータセットは出どころを持たないため). `type: process` の一式は, 結論の文に「正解は … の出力なので, その処理との一致までしか分からない」を添える (評価と結論で, その処理を超えられないことを示すため). `target_of(bundle)` は一式の `target` の写しを返し (版 2 までの一式は `kind: column`), `origin_sentence(target)` はその文を返す (処理の出力でなければ `None`. 画面が結果の説明に同じ文を出すため)
 
 #### 版 2 のデータセットの一式 (版 4. `items`)
 

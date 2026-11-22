@@ -19,7 +19,7 @@
 
 | 相手 | 使うもの |
 | --- | --- |
-| ML-Provide (推論) | 推論の一式の作成と確かめ, 版 2 のデータセットの説明 (`describe_items`), 予測と同じデータの読み込み (`read_source`), 結論 (件数だけの結論と文の作り直しを含む), 意思決定, 先の予測と列の効き, 方策の一式. 自作の繰り返しの手順 (`register_procedure`, `PROCEDURES`) と自作の部品 (`register_units`) の登録. 問題の設定 (ML-Quest) の損得と今のやり方は, 画面が引数で渡す |
+| ML-Provide (推論) | 推論の一式の作成と確かめ, 版 2 のデータセットの説明 (`describe_items`), 予測と同じデータの読み込み (`read_source`), 正解の種類と出どころ (`target_of`, `origin_sentence`), 結論 (決め方の項目 `RULE_KEYS`, 件数だけの結論 `conclude_outputs`, まとめからの文 `summary_sentences`), 撮影の深度から点 (`backproject`), 意思決定, 先の予測と列の効き, 方策の一式. 自作の繰り返しの手順 (`register_procedure`, `PROCEDURES`) と自作の部品 (`register_units`) の登録. 問題の設定 (ML-Quest) の損得と今のやり方は, 画面が引数で渡す |
 | ML-Found の学習のスクリプト (ML-Quest の骨組みを含む) | 学習の後に `make_bundle` で実験のディレクトリの中に一式を作る |
 
 ## 導入
