@@ -558,7 +558,7 @@ def restore_size(mask: np.ndarray, size: tuple[int, int]) -> np.ndarray:
         元の画像の大きさの領域の値 (値を混ぜないので, mask の値だけ)
     """
     # 戻した画素の中心に最も近い出力の画素 (ML-EDA の書き出しが領域を
-    # そろえるのと同じ選び方. 公開の名前に無いので同じ式で)
+    # そろえる resize_mask と同じ式. テストが ML-EDA と比べる)
     height, width = int(size[0]), int(size[1])
     rows = np.minimum(
         ((np.arange(height) + 0.5) * mask.shape[0] / height).astype(np.int64),

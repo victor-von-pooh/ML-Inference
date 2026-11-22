@@ -198,6 +198,16 @@ for item in result["columns"]:
 
 列を 1 つずつ行の間で並べ替えて推論し直し, 予測の変わり方の平均を効きとする (表と時系列の一式だけ. DESIGN の「列の効き」).
 
+1 行ごとの理由は `explain_rows` で, 予測の表に列ごとの効き (`effect:<列>`. 正ならその行の値が予測を上げた) と, 効きの大きい 3 列の文 (`reason`) を足して返す.
+
+```python
+from ml_inference import explain_rows
+
+rows = explain_rows("bundles/sales", "new_sales.csv")
+print(rows["frame"]["reason"][0])
+# 例: promo (+210), temperature (-35.2), store (+12.1)
+```
+
 ### 予測から意思決定へ
 
 予測を出して終わりにせず, 次の行動と, その行動の見込みの得と損を出す. 損得と制約はデータからは出てこない課題の値 (例えば, 店なら廃棄の損, 研究なら 1 件の処理時間, 遊びなら続けて遊ぶ時間) なので書いて渡す (画面の ML-Provide は, 問題の設定 (ML-Quest) をつなぐとその値を既定にする).
