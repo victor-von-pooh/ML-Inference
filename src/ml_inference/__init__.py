@@ -11,7 +11,7 @@ from ml_inference.conclude import (
     NO_PREDICTION, UNDECIDED, check_rules, conclude
 )
 from ml_inference.decision import backtest, check_decision, decide
-from ml_inference.explain import explain
+from ml_inference.explain import explain, explain_rows
 from ml_inference.forecast import forecast
 from ml_inference.policy import (
     POLICY_FORMAT_VERSION, GuardedPolicy, apply_guards, load_policy,
@@ -62,6 +62,7 @@ __all__ = [
     "decide",
     "describe_bundle",
     "explain",
+    "explain_rows",
     "forecast",
     "get_procedure",
     "infer",
