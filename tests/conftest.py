@@ -44,6 +44,40 @@ def linear_spec(width: int, outputs: int, name: str = "x") -> dict:
     return spec
 
 
+def flat_spec(shape: list[int], classes: int) -> dict:
+    """
+    中身を平らにして全結合の 1 層で分類するモデルの定義を返す関数
+
+    Parameters
+    ----------
+    shape: list[int]
+        1 件の中身の形
+    classes: int
+        クラスの数
+
+    Returns
+    ----------
+    spec: dict
+        ML-ModelControl の定義
+    """
+    # 平らにしてから全結合
+    width = int(np.prod(shape))
+    spec = {
+        "format_version": 1,
+        "inputs": {"x": {"shape": [2, *shape]}},
+        "nodes": {
+            "flat": {"unit": "nn.Flatten", "inputs": "x"},
+            "head": {"unit": "nn.Linear",
+                     "params": {"in_features": width,
+                                "out_features": classes},
+                     "inputs": "flat"},
+        },
+        "outputs": {"logits": "head"},
+    }
+
+    return spec
+
+
 def save_weights(spec: dict, path: Path, seed: int = 0) -> Path:
     """
     定義から組み立てたモデルの重みを保存する関数
