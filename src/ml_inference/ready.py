@@ -24,6 +24,50 @@ LICENSE_KEYS = (
     "source", "url"
 )
 
+# ライセンスの分類の言い方 (ML-ModelControl の pretrained_info と同じ)
+STATUS_TEXT = {
+    "commercial": "商用で使える",
+    "noncommercial": "商用で使えない",
+    "unknown": "商用で使えるか分からない",
+}
+
+
+def ready_license(info: dict) -> dict:
+    """
+    既製のモデルの一式の ready.license を作る関数
+
+    読めなかった情報 (alert と message が無いもの) にも警告を付け, 画面が
+    補わずに出せるようにする
+
+    Parameters
+    ----------
+    info: dict
+        重みのライセンスの情報 (pretrained_info の形. 読めなかったものは
+        status と source だけ)
+
+    Returns
+    ----------
+    license: dict
+        LICENSE_KEYS の項目. alert は必ず真偽値で, 警告なら message も
+        空でない
+    """
+    # 分類の分からないものは unknown, 警告は商用で使えるもの以外
+    license = {key: info.get(key) for key in LICENSE_KEYS}
+    if license["status"] not in STATUS_TEXT:
+        license["status"] = "unknown"
+    if not isinstance(license["alert"], bool):
+        license["alert"] = license["status"] != "commercial"
+
+    # 警告の説明が無ければ, ライセンスと分類と次の一手
+    if license["alert"] and not license["message"]:
+        license["message"] = (
+            f"ライセンス: {license['license'] or '不明'} "
+            f"({STATUS_TEXT[license['status']]}). 配布元のページで条件を"
+            "確かめる"
+        )
+
+    return license
+
 
 def torchvision_weights(model: str, weights: str) -> dict:
     """

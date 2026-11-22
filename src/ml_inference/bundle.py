@@ -21,7 +21,7 @@ from ml_inference.items import (
 )
 from ml_inference.procedures import PROCEDURES, get_procedure, option_names
 from ml_inference.ready import (
-    LICENSE_KEYS, READY_FORMS, READY_LIBRARIES, check_ready
+    READY_FORMS, READY_LIBRARIES, check_ready, ready_license
 )
 from ml_inference.units import check_units
 from ml_inference.weights import (
@@ -2003,7 +2003,7 @@ def ready_record(
         "preprocess": dict(found["preprocess"]),
         "url": found.get("url"),
         "file": found.get("file"),
-        "license": {k: info.get(k) for k in LICENSE_KEYS},
+        "license": ready_license(info),
     }
     ready["license"]["redistributable"] = record["redistributable"]
     notes = list(notes) + [

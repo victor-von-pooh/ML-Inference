@@ -4,6 +4,7 @@ from typing import Any
 import numpy as np
 import pytest
 import torch
+import ml_modelcontrol
 import yaml
 from ml_modelcontrol import register_unit
 from torch import nn
@@ -191,6 +192,50 @@ def test_ready_bundle_pins_weights(ready_bundle: Path) -> None:
     assert description["ready"]["weights_file"].endswith("tiny-0123abcd.pth")
     assert description["ready"]["weights_cached"] is False
     assert description["pretrained"][0]["sha256"] == record["sha256"]
+
+
+def test_unreadable_license_gets_alert(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    ライセンスを読めない既製のモデルの一式にも警告が付くことを確かめる
+    関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    monkeypatch: pytest.MonkeyPatch
+        出どころと pretrained_info の差し替え
+
+    Returns
+    ----------
+    None
+    """
+    # pretrained_info が誤りになる (ネットワークが無いなど)
+    def broken(unit: str, params: Any = None, fetch: bool = True) -> dict:
+        raise OSError("つながらない")
+
+    monkeypatch.setitem(READY_LIBRARIES, "test", tiny_weights)
+    monkeypatch.setattr(ml_modelcontrol, "pretrained_info", broken)
+    info = make_ready_bundle(tmp_path / "unread", "tiny", "V1",
+                             library="test")
+    license = info["ready"]["license"]
+    assert license["alert"] is True and license["status"] == "unknown"
+    assert license["message"].startswith("ライセンス: 不明")
+    assert "つながらない" in license["source"]
+
+    # 画面が渡した情報に alert が無くても, 商用で使えなければ警告
+    given = {"status": "noncommercial", "license": "cc-by-nc-4.0"}
+    info = make_ready_bundle(tmp_path / "given", "tiny", "V1",
+                             library="test", license=given)
+    license = info["ready"]["license"]
+    assert license["alert"] is True
+    assert "cc-by-nc-4.0 (商用で使えない)" in license["message"]
+    given = {"status": "commercial", "license": "mit"}
+    info = make_ready_bundle(tmp_path / "free", "tiny", "V1",
+                             library="test", license=given)
+    assert info["ready"]["license"]["alert"] is False
 
 
 def test_ready_bundle_predicts_class_names(
