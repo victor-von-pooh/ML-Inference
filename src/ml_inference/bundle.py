@@ -27,7 +27,7 @@ from ml_inference.ready import (
 from ml_inference.units import check_units
 from ml_inference.weights import (
     INFO_KEYS, PLACES, layers_weights, place_weights, lookup_pretrained,
-    node_keys, pin_spec, state_hash, unchecked_notes
+    node_items, node_keys, pin_spec, state_hash, unchecked_notes
 )
 
 # 推論の一式の形の版 (読める最も新しい版. 版 1 のデータセットの一式は
@@ -1258,7 +1258,7 @@ def load_bundle(path: Union[str, Path]) -> Bundle:
         errors = check_calibrate(info["calibrate"], classes)
         if errors:
             raise ValueError("inference.yaml の誤り: " + " / ".join(errors))
-    names = set(spec["nodes"])
+    names = set(node_items(spec))
     for record in info["model"].get("pretrained") or []:
         if record["node"] not in names:
             raise ValueError(
@@ -1601,8 +1601,9 @@ def make_bundle(
     procedure: Optional[dict] = None
         繰り返しの手順 (name, steps, seed, options)
     pretrained: Optional[dict] = None
-        ノードの名前ごとの重みのライセンスの情報 (ML-ModelControl の
-        pretrained_info の形). 省略すると pretrained_info で読む
+        ノードの名前 (部分モデルの中のノードは <外のノード>.<中のノード>)
+        ごとの重みのライセンスの情報 (ML-ModelControl の pretrained_info
+        の形). 省略すると pretrained_info で読む
     items: Optional[dict] = None
         版 2 のデータセットの 1 件の扱い (input, target, prepare,
         options, values, restore. 省いた欄はデータセットから. 点を選ぶ
@@ -1709,7 +1710,10 @@ def make_bundle(
         noted = {
             str(r["node"]) for r in records if not r["redistributable"]
         }
-        weight_notes.extend(unchecked_notes(spec_dict, noted))
+        looked = None if pretrained is None else {
+            str(node) for node in pretrained
+        }
+        weight_notes.extend(unchecked_notes(spec_dict, noted, looked))
 
     # 隣の一時ディレクトリに作り, 確かめてから入れ替える
     writing = final.with_name(f".{final.name}.writing")

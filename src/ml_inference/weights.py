@@ -19,22 +19,23 @@ INFO_KEYS = (
 
 def node_keys(state: dict, node: str) -> list[str]:
     """
-    重みのうち, 定義の一番上のノードのキーを返す関数
+    重みのうち, 定義のノードのキーを返す関数
 
     Parameters
     ----------
     state: dict
         state_dict
     node: str
-        ノードの名前
+        ノードの名前 (部分モデルの中のノードは <外のノード>.<中のノード>)
 
     Returns
     ----------
     keys: list[str]
-        nodes.<ノード>. で始まるキー (並べた順)
+        ノードの重みのキー (並べた順)
     """
-    # ML-ModelControl のモデルのノードの置き場 (nodes の下)
-    prefix = f"nodes.{node}."
+    # ML-ModelControl のモデルのノードの置き場 (nodes の下. 部分モデルの
+    # 中は外のノードの nodes の下)
+    prefix = "nodes." + ".nodes.".join(node.split(".")) + "."
     keys = sorted(k for k in state if k.startswith(prefix))
 
     return keys
@@ -71,26 +72,72 @@ def state_hash(state: dict, keys: list[str]) -> str:
     return digest
 
 
+def node_items(spec: dict) -> dict[str, tuple[dict, bool]]:
+    """
+    定義の一番上と, 本体から辿れる部分モデルの中の全てのノードを返す関数
+
+    Parameters
+    ----------
+    spec: dict
+        モデルの定義
+
+    Returns
+    ----------
+    items: dict[str, tuple[dict, bool]]
+        ノードの名前ごとの, ノードの定義と外部の重み (weights) を重ねるか.
+        部分モデルの中のノードは <外のノード>.<中のノード> (ML-ModelControl
+        の外部の重みの報告と同じ). 外のノードが weights を持つ場合も重ねる
+        とする. どのノードも sub.<名前> で参照しない部分モデルと, 外側の
+        部分モデルを中に含む循環は辿らない
+    """
+    # 本体から sub.<名前> の参照を順に辿る (同じ部分モデルも使うノードごと)
+    subgraphs = spec.get("subgraphs")
+    subgraphs = subgraphs if isinstance(subgraphs, dict) else {}
+    items: dict[str, tuple[dict, bool]] = {}
+    pending = [(spec, "", frozenset(), False)]
+    while pending:
+        graph, prefix, outer, layered = pending.pop(0)
+        nodes = graph.get("nodes") if isinstance(graph, dict) else None
+        for node, item in (nodes if isinstance(nodes, dict) else {}).items():
+            if not isinstance(item, dict):
+                continue
+            path = f"{prefix}{node}"
+            stacked = layered or bool(item.get("weights"))
+            items[path] = (item, stacked)
+            unit = item.get("unit")
+            if not isinstance(unit, str) or not unit.startswith(
+                SUBGRAPH_PREFIX
+            ):
+                continue
+            name = unit[len(SUBGRAPH_PREFIX):]
+            if name in subgraphs and name not in outer:
+                pending.append(
+                    (subgraphs[name], f"{path}.", outer | {name}, stacked)
+                )
+
+    return items
+
+
 def layers_weights(spec: dict, node: str) -> bool:
     """
-    定義の一番上のノードが外部の重み (weights) を重ねるかを返す関数
+    定義のノードが外部の重み (weights) を重ねるかを返す関数
 
     Parameters
     ----------
     spec: dict
         モデルの定義
     node: str
-        ノードの名前
+        ノードの名前 (部分モデルの中のノードは <外のノード>.<中のノード>)
 
     Returns
     ----------
     layered: bool
-        ノードが weights を持つか (出どころの重みの上に重ねて読むので,
-        出どころから読み直した重みと違う)
+        ノードか, 部分モデルの外のノードが weights を持つか (出どころの重み
+        の上に重ねて読むので, 出どころから読み直した重みと違う)
     """
-    # 一番上のノードの weights の有無
-    item = (spec.get("nodes") or {}).get(node)
-    layered = isinstance(item, dict) and bool(item.get("weights"))
+    # 外のノードも含めた weights の有無
+    found = node_items(spec).get(node)
+    layered = found is not None and found[1]
 
     return layered
 
@@ -106,13 +153,15 @@ def lookup_pretrained(
     spec: dict
         モデルの定義
     given: Optional[dict]
-        ノードの名前ごとの pretrained_info の形の情報 (渡せばそれを使い,
-        None なら ML-ModelControl の pretrained_info で読む)
+        ノードの名前 (部分モデルの中のノードは <外のノード>.<中のノード>)
+        ごとの pretrained_info の形の情報 (渡せばそれを使い, None なら
+        ML-ModelControl の pretrained_info で読む)
 
     Returns
     ----------
     infos: dict
-        学習済みの重みを読むノードごとの情報
+        学習済みの重みを読むノードごとの情報 (一番上のノード, 部分モデルの
+        中のノードの順)
     notes: list[str]
         読めなかったことの注意
 
@@ -122,7 +171,7 @@ def lookup_pretrained(
         渡した情報のノードが定義に無い場合
     """
     # 渡した情報 (画面が読んだもの, テスト) はそのまま
-    nodes = spec.get("nodes") or {}
+    nodes = node_items(spec)
     if given is not None:
         unknown = [str(n) for n in given if n not in nodes]
         broken = [
@@ -139,8 +188,8 @@ def lookup_pretrained(
                 "ありません"
             )
         infos = {
-            str(node): dict(info) for node, info in given.items()
-            if info is not None
+            str(node): dict(given[node]) for node in nodes
+            if given.get(node) is not None
         }
         notes: list[str] = []
         return infos, notes
@@ -157,8 +206,8 @@ def lookup_pretrained(
         infos = {}
         return infos, notes
     infos = {}
-    for node, item in nodes.items():
-        unit = item.get("unit") if isinstance(item, dict) else None
+    for node, (item, _) in nodes.items():
+        unit = item.get("unit")
         if not unit or str(unit).startswith(SUBGRAPH_PREFIX):
             continue
         try:
@@ -169,58 +218,59 @@ def lookup_pretrained(
                 "source": f"読めなかった ({type(error).__name__}: {error})",
             }
         if info is not None:
-            infos[str(node)] = info
+            infos[node] = info
     notes = []
 
     return infos, notes
 
 
-def unchecked_notes(spec: dict, noted: set[str]) -> list[str]:
+def unchecked_notes(
+    spec: dict, noted: set[str], looked: Optional[set[str]]
+) -> list[str]:
     """
     ライセンスを確かめずに一式に写す学習済みの重みの注意を返す関数
 
-    部分モデルの中の学習済みの部品と, ノードの weights の hub か unit から
-    読んだ外部の重みは, 置き方を決めずに学習した重みとして一式に写るため
+    ノードの weights の hub か unit から読んだ外部の重みは, 置き方を決めずに
+    学習した重みとして一式に写るため. 情報を渡したときに渡さなかった部分
+    モデルの中の学習済みの部品も, 置き方を決めずに写るため
 
     Parameters
     ----------
     spec: dict
         モデルの定義
     noted: set[str]
-        置き方の注意で既にライセンスを確かめるよう書いた, 一番上のノードの
-        名前 (外部の重みの注意から除く)
+        置き方の注意で既にライセンスを確かめるよう書いたノードの名前
+        (外部の重みの注意から除く)
+    looked: Optional[set[str]]
+        情報を渡したノードの名前 (None なら全てのノードの情報を読んだ)
 
     Returns
     ----------
     notes: list[str]
         注意の文 (部分モデルの中と外部の重みで 1 文ずつ. 無ければ空)
     """
-    # 本体と, 本体から辿れる部分モデルのノード (中は「部分モデル/ノード」)
-    graphs = [("", spec)] + [
-        (f"{name}/", graph) for name, graph in used_subgraphs(spec).items()
-    ]
+    # 本体と, 本体から辿れる部分モデルのノード (中は「外のノード.ノード」)
     inner = []
     external = []
-    for prefix, graph in graphs:
-        nodes = graph.get("nodes") if isinstance(graph, dict) else None
-        for node, item in (nodes if isinstance(nodes, dict) else {}).items():
-            if not isinstance(item, dict):
-                continue
-            weights = item.get("weights")
-            if isinstance(weights, dict) and (
-                "hub" in weights or "unit" in weights
-            ) and f"{prefix}{node}" not in noted:
-                external.append(f"{prefix}{node}")
-            if prefix and inner_pretrained(item):
-                inner.append(f"{prefix}{node}")
+    for node, (item, _) in node_items(spec).items():
+        weights = item.get("weights")
+        if isinstance(weights, dict) and (
+            "hub" in weights or "unit" in weights
+        ) and node not in noted:
+            external.append(node)
+        if looked is not None and "." in node and node not in looked and (
+            inner_pretrained(item)
+        ):
+            inner.append(node)
 
     # 確かめていない重みのノードを挙げた注意
     notes = []
     if inner:
         notes.append(
             f"部分モデルの中のノード {', '.join(inner)} の学習済みの重みは"
-            "ライセンスを確かめずに一式の重みに含めました. 元の重みの"
-            "ライセンスを確かめてから一式を渡してください"
+            "情報を渡されなかったので, ライセンスを確かめずに一式の重みに"
+            "含めました. 元の重みのライセンスを確かめてから一式を渡して"
+            "ください"
         )
     if external:
         notes.append(
@@ -230,43 +280,6 @@ def unchecked_notes(spec: dict, noted: set[str]) -> list[str]:
         )
 
     return notes
-
-
-def used_subgraphs(spec: dict) -> dict:
-    """
-    本体のノードから辿れる部分モデルを返す関数
-
-    Parameters
-    ----------
-    spec: dict
-        モデルの定義
-
-    Returns
-    ----------
-    used: dict
-        部分モデルの名前ごとの定義 (どのノードも sub.<名前> で参照しない
-        部分モデルは除く)
-    """
-    # 本体から sub.<名前> の参照を順に辿る
-    subgraphs = spec.get("subgraphs")
-    subgraphs = subgraphs if isinstance(subgraphs, dict) else {}
-    used: dict = {}
-    pending = [spec]
-    while pending:
-        graph = pending.pop()
-        nodes = graph.get("nodes") if isinstance(graph, dict) else None
-        for item in (nodes if isinstance(nodes, dict) else {}).values():
-            unit = item.get("unit") if isinstance(item, dict) else None
-            if not isinstance(unit, str) or not unit.startswith(
-                SUBGRAPH_PREFIX
-            ):
-                continue
-            name = unit[len(SUBGRAPH_PREFIX):]
-            if name in subgraphs and name not in used:
-                used[name] = subgraphs[name]
-                pending.append(subgraphs[name])
-
-    return used
 
 
 def inner_pretrained(item: dict) -> bool:
@@ -319,14 +332,16 @@ def pin_spec(spec: dict, infos: dict) -> dict:
     ----------
     pinned: dict
         revision の引数を持つ部品で, 写せない重みの版を pinned_revision に
-        替えた定義 (元の定義は変えない)
+        替えた定義 (元の定義は変えない. 部分モデルの中のノードは部分モデル
+        の定義を替えるので, その部分モデルを使う全てのノードに当たる)
     """
     # 写せない重みで, 版の識別子が分かり, 部品が revision を受け取るもの
     # (部品が登録簿に無ければ固定しない)
     pinned = copy.deepcopy(spec)
+    items = node_items(pinned)
     for node, info in infos.items():
         revision = info.get("pinned_revision")
-        item = pinned["nodes"][node]
+        item = items[node][0]
         if info.get("redistributable") or not revision:
             continue
         try:
