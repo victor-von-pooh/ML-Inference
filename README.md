@@ -132,7 +132,7 @@ make_bundle(
 result = infer("bundles/gen", {"count": 8, "seed": 1})   # 同じ件数と種なら同じ出力
 ```
 
-繰り返しの手順 (`ddim`, `euler`, `greedy`, `sample`) と学習済みの重みの置き方は, DESIGN の「繰り返しの手順」「学習済みの重みの置き方」. 研究の自作の部品を使う一式は, 一式を読む前に `ml_inference.register_units(["my_lab.units"])` で部品を登録する (ML-Provide なら起動の `--units` か `ML_PROVIDE_UNITS`. DESIGN の「自作の部品」).
+繰り返しの手順 (`ddim`, `euler`, `greedy`, `sample`) と学習済みの重みの置き方は, DESIGN の「繰り返しの手順」「学習済みの重みの置き方」. 学習済みの重みは, 定義の一番上のノードと部分モデル (`subgraphs`) の中のノードのどちらも, 再配布できるものだけ一式に写し, できないものは出どころから読んで hash で確かめる (外部の重みを重ねたもの, 学習で変わったもの, ライセンスか版を読めなかったものは, 注意を付けて一式に残す. DESIGN の「学習済みの重みの置き方」). 部分モデルの中のノードの情報を `pretrained` で渡すときは `block.inner.fc` のように外のノードの名前とつなぐ. 研究の自作の部品を使う一式は, 一式を読む前に `ml_inference.register_units(["my_lab.units"])` で部品を登録する (ML-Provide なら起動の `--units` か `ML_PROVIDE_UNITS`. DESIGN の「自作の部品」).
 
 ### 領域と点群 (ML-EDA の版 2 と 3 のデータセット. 一式の版 4)
 

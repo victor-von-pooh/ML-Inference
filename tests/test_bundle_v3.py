@@ -29,7 +29,7 @@ from ml_inference.procedures import (
     get_procedure, make_generator, option_names, register_procedure,
     run_procedure, start_noise
 )
-from ml_inference.weights import state_hash
+from ml_inference.weights import node_items, state_hash
 
 # 出どころの重みを作る乱数の種 (入れ替わった出どころを試すため変える)
 SOURCE = {"seed": 1}
@@ -926,13 +926,154 @@ def test_pretrained_info_is_read_lazily(
     assert any("ライセンスか版を読めなかった" in n for n in info["notes"])
 
 
-def test_subgraph_node_skips_pretrained_info(
+def nested_spec(width: int, inner: str = "nn.Linear") -> dict:
+    """
+    部分モデルの中の部分モデルに全結合を持つ定義を返す関数
+
+    Parameters
+    ----------
+    width: int
+        入力の列の数
+    inner: str = "nn.Linear"
+        中の部分モデルの 1 層目の部品の名前
+
+    Returns
+    ----------
+    spec: dict
+        定義 (本体の block が部分モデル outer を, その中の inner が部分
+        モデル head を使う. 使わない部分モデル spare も持つ)
+    """
+    # 1 層目は渡した部品, 2 層目は全結合
+    linear = {"unit": "nn.Linear", "inputs": "x",
+              "params": {"in_features": width, "out_features": 3}}
+    spec = {
+        "format_version": 1,
+        "name": "nested",
+        "inputs": {"x": {"shape": [4, width]}},
+        "nodes": {"block": {"unit": "sub.outer", "inputs": "x"}},
+        "outputs": {"logits": "block"},
+        "subgraphs": {
+            "outer": {
+                "inputs": {"x": {}},
+                "nodes": {"inner": {"unit": "sub.head", "inputs": "x"}},
+                "outputs": {"out": "inner"},
+            },
+            "head": {
+                "inputs": {"x": {}},
+                "nodes": {"fc": {**linear, "unit": inner}, "fc2": {
+                    "unit": "nn.Linear", "inputs": "fc",
+                    "params": {"in_features": 3, "out_features": 3},
+                }},
+                "outputs": {"out": "fc2"},
+            },
+            "spare": {
+                "inputs": {"x": {}},
+                "nodes": {"unused": dict(linear)},
+                "outputs": {"out": "unused"},
+            },
+        },
+    }
+
+    return spec
+
+
+def test_subgraph_pretrained_placement(
+    tmp_path: Path, table_dataset: Path, table_csv: Path
+) -> None:
+    """
+    部分モデルの中の再配布できない学習済みの重みを, 一番上のノードと同じく
+    一式に写さずに出どころから読むことを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    table_dataset: Path
+        データセット
+    table_csv: Path
+        元の CSV
+
+    Returns
+    ----------
+    None
+    """
+    # 部分モデルの中の部分モデルに出どころの部品
+    SOURCE["seed"] = 1
+    width = len(load_dataset(table_dataset).features)
+    spec = nested_spec(width, "test.SourceLinear")
+    weights = tmp_path / "w.pt"
+    torch.save(build_model(spec, seed=0).state_dict(), weights)
+    inner_keys = {"nodes.block.nodes.inner.nodes.fc.fc.weight",
+                  "nodes.block.nodes.inner.nodes.fc.fc.bias"}
+
+    # 写せない重みは除き, 部分モデルの定義の版を固定し, hash を残す
+    path = tmp_path / "sourced"
+    info = make_bundle(path, spec, table_dataset, weights,
+                       pretrained={"block.inner.fc": license_info(False)})
+    record = info["model"]["pretrained"][0]
+    assert record["node"] == "block.inner.fc"
+    assert record["place"] == "source" and record["keys"] == 2
+    assert any("ノード block.inner.fc の学習済みの重み" in n
+               and "一式に写さず" in n for n in info["notes"])
+    kept = set(torch.load(path / "final_model.pt", weights_only=True))
+    assert not kept & inner_keys and len(kept) == 2
+    pinned = yaml.safe_load((path / "model_spec.yaml").read_text("utf-8"))
+    head = pinned["subgraphs"]["head"]["nodes"]["fc"]
+    assert head["params"]["revision"] == "abc123"
+    full = tmp_path / "full"
+    make_bundle(full, spec, table_dataset, weights,
+                pretrained={"block.inner.fc": license_info(True)})
+    assert read_info(full)["model"]["pretrained"][0]["place"] == "bundle"
+    assert inner_keys <= set(
+        torch.load(full / "final_model.pt", weights_only=True)
+    )
+    pd.testing.assert_frame_equal(
+        predict(path, table_csv), predict(full, table_csv)
+    )
+    assert describe_bundle(path)["pretrained"][0]["node"] == "block.inner.fc"
+
+    # 出どころの重みが入れ替わると警告
+    SOURCE["seed"] = 2
+    try:
+        with pytest.warns(UserWarning, match="block.inner.fc の出どころ"):
+            predict(load_bundle(path), table_csv)
+    finally:
+        SOURCE["seed"] = 1
+
+    # 外のノードが外部の重みを重ねると, 中のノードも一式の重みに含める
+    layered = nested_spec(width, "test.SourceLinear")
+    layered["format_version"] = 2
+    layered["nodes"]["block"]["weights"] = {"hub": "org/demo",
+                                            "file": "w.pt"}
+    info = make_bundle(tmp_path / "layered", layered, table_dataset, weights,
+                       pretrained={"block.inner.fc": license_info(False)})
+    assert info["model"]["pretrained"][0]["place"] == "bundle"
+    assert any("block.inner.fc" in n and "外部の重み (weights) を重ねた" in n
+               for n in info["notes"])
+    assert inner_keys <= set(torch.load(
+        tmp_path / "layered" / "final_model.pt", weights_only=True
+    ))
+
+    # 記録のノードが定義に無い一式は誤り
+    info = read_info(path)
+    info["model"]["pretrained"][0]["node"] = "block.fc"
+    rewrite(path, info)
+    with pytest.raises(ValueError, match="block.fc はモデルの定義"):
+        load_bundle(path)
+
+    # 定義に無い部分モデルの中のノードの情報は誤り
+    with pytest.raises(ValueError, match="ノードにありません"):
+        make_bundle(tmp_path / "bad", spec, table_dataset, weights,
+                    pretrained={"block.fc": license_info(False)})
+
+
+def test_subgraph_pretrained_info(
     tmp_path: Path, table_dataset: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """
     部分モデルを部品にしたノードを pretrained_info に渡さず, 部分モデルの
-    中の学習済みの部品と weights の hub から読む重みに注意を残すことを
-    確かめる関数
+    中のノードの情報を読んで記録し, 情報を渡さなかった中の学習済みの部品と
+    weights の hub から読む重みに注意を残すことを確かめる関数
 
     Parameters
     ----------
@@ -947,32 +1088,9 @@ def test_subgraph_node_skips_pretrained_info(
     ----------
     None
     """
-    # 部分モデルの全結合 2 層だけのモデル (使わない部分モデルも持つ)
+    # 部分モデルの全結合 2 層だけのモデル
     width = len(load_dataset(table_dataset).features)
-    linear = {"unit": "nn.Linear", "inputs": "x",
-              "params": {"in_features": width, "out_features": 3}}
-    spec = {
-        "format_version": 1,
-        "name": "nested",
-        "inputs": {"x": {"shape": [4, width]}},
-        "nodes": {"block": {"unit": "sub.head", "inputs": "x"}},
-        "outputs": {"logits": "block"},
-        "subgraphs": {
-            "head": {
-                "inputs": {"x": {}},
-                "nodes": {"fc": dict(linear), "fc2": {
-                    "unit": "nn.Linear", "inputs": "fc",
-                    "params": {"in_features": 3, "out_features": 3},
-                }},
-                "outputs": {"out": "fc2"},
-            },
-            "spare": {
-                "inputs": {"x": {}},
-                "nodes": {"unused": dict(linear)},
-                "outputs": {"out": "unused"},
-            },
-        },
-    }
+    spec = nested_spec(width)
     weights = tmp_path / "w.pt"
     torch.save(build_model(spec, seed=0).state_dict(), weights)
 
@@ -981,22 +1099,38 @@ def test_subgraph_node_skips_pretrained_info(
     assert info["model"]["pretrained"] == []
     assert not any("ライセンス" in n for n in info["notes"])
 
-    # 部分モデルの中の学習済みの部品は, ネットワークを使わずに見て, 記録
-    # せずに 1 文の注意 (使わない部分モデルは見ない)
+    # 部分モデルの中のノードも読んで記録する (部分モデルを部品にした
+    # ノードと, 使わない部分モデルは読まない)
     calls: list = []
     monkeypatch.setattr(
         ml_modelcontrol, "pretrained_info", LinearInfo(calls), raising=False
     )
     info = make_bundle(tmp_path / "inner", spec, table_dataset, weights)
-    assert info["model"]["pretrained"] == []
-    assert calls == [("nn.Linear", False), ("nn.Linear", False)]
-    inner = [n for n in info["notes"] if "ライセンス" in n]
-    assert len(inner) == 1 and "head/fc, head/fc2 " in inner[0]
-    assert "spare" not in inner[0]
+    assert calls == [("nn.Linear", True), ("nn.Linear", True)]
+    records = info["model"]["pretrained"]
+    assert [r["node"] for r in records] == [
+        "block.inner.fc", "block.inner.fc2"
+    ]
+    assert all(r["place"] == "source" for r in records)
+    assert torch.load(tmp_path / "inner" / "final_model.pt",
+                      weights_only=True) == {}
+    assert not any("情報を渡されなかった" in n for n in info["notes"])
+
+    # 情報を渡した場合は, 渡さなかった中の学習済みの部品をネットワークを
+    # 使わずに見て, 写した注意を 1 文
+    calls.clear()
+    info = make_bundle(tmp_path / "given", spec, table_dataset, weights,
+                       pretrained={"block.inner.fc": license_info(True)})
+    assert calls == [("nn.Linear", False)]
+    assert [r["node"] for r in info["model"]["pretrained"]] == [
+        "block.inner.fc"
+    ]
+    inner = [n for n in info["notes"] if "情報を渡されなかった" in n]
+    assert len(inner) == 1 and "block.inner.fc2 " in inner[0]
 
     # 重みを写さない一式には注意を出さない
     info = make_bundle(tmp_path / "unwritten", spec, table_dataset, weights,
-                       copy_weights=False)
+                       copy_weights=False, pretrained={})
     assert not any("ライセンス" in n for n in info["notes"])
 
     # 本体の学習済みのノードが weights の hub を重ねる場合は置き方の 1 文
@@ -1024,6 +1158,120 @@ def test_subgraph_node_skips_pretrained_info(
     flat["nodes"]["head"]["weights"] = {"path": "w.pt"}
     info = make_bundle(tmp_path / "path", flat, table_dataset, plain)
     assert not any("ライセンス" in n for n in info["notes"])
+
+
+def test_shared_subgraph_pretrained(
+    tmp_path: Path, table_dataset: Path, table_csv: Path
+) -> None:
+    """
+    同じ部分モデルを使うノードごとに記録し, 違う情報を渡すと誤りにする
+    ことと, 部分モデルの中を記録しない前の一式を読めることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    table_dataset: Path
+        データセット
+    table_csv: Path
+        元の CSV
+
+    Returns
+    ----------
+    None
+    """
+    # 全結合の後に, 同じ部分モデルを 2 つのノードで続けて使う定義
+    SOURCE["seed"] = 1
+    width = len(load_dataset(table_dataset).features)
+    spec = nested_spec(3, "test.SourceLinear")
+    del spec["subgraphs"]["spare"]
+    spec["nodes"] = {
+        "pre": {"unit": "nn.Linear", "inputs": "x",
+                "params": {"in_features": width, "out_features": 3}},
+        "block1": {"unit": "sub.outer", "inputs": "pre"},
+        "block2": {"unit": "sub.outer", "inputs": "block1"},
+    }
+    spec["inputs"] = {"x": {"shape": [4, width]}}
+    spec["outputs"] = {"logits": "block2"}
+    weights = tmp_path / "w.pt"
+    torch.save(build_model(spec, seed=0).state_dict(), weights)
+
+    # ノードごとに記録し, どちらも出どころから読む
+    given = {"block1.inner.fc": license_info(False),
+             "block2.inner.fc": license_info(False)}
+    path = tmp_path / "shared"
+    info = make_bundle(path, spec, table_dataset, weights, pretrained=given)
+    records = info["model"]["pretrained"]
+    assert [r["node"] for r in records] == [
+        "block1.inner.fc", "block2.inner.fc"
+    ]
+    assert all(r["place"] == "source" and r["keys"] == 2 for r in records)
+    kept = set(torch.load(path / "final_model.pt", weights_only=True))
+    assert not any(".inner.nodes.fc." in k for k in kept)
+    full = tmp_path / "full"
+    make_bundle(full, spec, table_dataset, weights, pretrained={
+        node: license_info(True) for node in given
+    })
+    pd.testing.assert_frame_equal(
+        predict(path, table_csv), predict(full, table_csv)
+    )
+
+    # 同じ部分モデルの同じノードに違う情報は誤り
+    with pytest.raises(ValueError, match="block1.inner.fc と block2.inner.fc"):
+        make_bundle(tmp_path / "differ", spec, table_dataset, weights,
+                    pretrained={**given,
+                                "block2.inner.fc": license_info(True)})
+    with pytest.raises(ValueError, match="同じ部分モデルの同じノード"):
+        make_bundle(tmp_path / "revision", spec, table_dataset, weights,
+                    pretrained={**given, "block2.inner.fc": {
+                        **license_info(False), "pinned_revision": "def456"
+                    }})
+
+    # 部分モデルの中を記録しない前の一式 (一番上のノードだけの記録と,
+    # 全ての重み) もそのまま読む
+    old = tmp_path / "old"
+    make_bundle(old, spec, table_dataset, weights,
+                pretrained={"block1.inner.fc": license_info(True)})
+    info = read_info(old)
+    info["model"]["pretrained"] = []
+    rewrite(old, info)
+    pd.testing.assert_frame_equal(
+        predict(old, table_csv), predict(full, table_csv)
+    )
+    assert describe_bundle(old)["pretrained_warnings"] == []
+    top = tmp_path / "top"
+    make_bundle(top, pretrained_spec(width), table_dataset,
+                save_weights(pretrained_spec(width), tmp_path / "top.pt"),
+                pretrained={"base": license_info(False)})
+    assert read_info(top)["model"]["pretrained"][0]["node"] == "base"
+    assert len(predict(top, table_csv)) > 0
+
+
+def test_cyclic_subgraphs_stop() -> None:
+    """
+    外側の部分モデルを中に含む循環を辿らずに止まることを確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # a が b を, b が a と自分を使う定義
+    spec = {
+        "nodes": {"top": {"unit": "sub.a"}},
+        "subgraphs": {
+            "a": {"nodes": {"b": {"unit": "sub.b"}}},
+            "b": {"nodes": {"back": {"unit": "sub.a"},
+                            "own": {"unit": "sub.b"},
+                            "fc": {"unit": "nn.Linear"}}},
+        },
+    }
+    assert list(node_items(spec)) == [
+        "top", "top.b", "top.b.back", "top.b.own", "top.b.fc"
+    ]
 
 
 class LinearInfo:
