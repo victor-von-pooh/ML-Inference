@@ -329,7 +329,7 @@ def number_text(value: float) -> str:
     return text
 
 
-def sentences_of(summary: dict, task: str) -> list[str]:
+def summary_sentences(summary: dict, task: str) -> list[str]:
     """
     まとめを日本語の文にする関数
 
@@ -433,7 +433,7 @@ def conclude(
     conclusion = {
         "frame": frame,
         "summary": summary,
-        "sentences": sentences_of(summary, task),
+        "sentences": summary_sentences(summary, task),
         "rules": rules,
     }
 
