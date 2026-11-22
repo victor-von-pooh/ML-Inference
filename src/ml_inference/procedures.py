@@ -481,6 +481,30 @@ def get_procedure(name: str) -> Procedure:
     return procedure
 
 
+def option_params(name: str) -> Optional[list[inspect.Parameter]]:
+    """
+    手順の関数の設定 (5 つ目からの引数) を返す関数
+
+    Parameters
+    ----------
+    name: str
+        手順の名前
+
+    Returns
+    ----------
+    params: Optional[list[inspect.Parameter]]
+        設定の引数 (引数を読めない関数は None)
+    """
+    # 引数を読めない呼べるもの (組み込みの関数など) は None
+    try:
+        signature = inspect.signature(get_procedure(name).function)
+    except (TypeError, ValueError):
+        return None
+    params = list(signature.parameters.values())[4:]
+
+    return params
+
+
 def option_names(name: str) -> Optional[list[str]]:
     """
     手順の設定 (関数の 5 つ目からの引数) の名前を返す関数
@@ -493,17 +517,53 @@ def option_names(name: str) -> Optional[list[str]]:
     Returns
     ----------
     names: Optional[list[str]]
-        設定の名前 (設定の無い手順は空. **kwargs を持つ関数は None で,
-        何でも受け取る)
+        設定の名前 (設定の無い手順は空. **kwargs を持つ関数と, 引数を
+        読めない関数は None で, 何でも受け取る)
     """
     # model, state, steps, generator の後の引数 (**kwargs なら何でも)
-    signature = inspect.signature(get_procedure(name).function)
-    params = list(signature.parameters.values())[4:]
-    names: Optional[list[str]] = [p.name for p in params]
-    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params):
-        names = None
+    params = option_params(name)
+    if params is None or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in params
+    ):
+        return None
+    names: Optional[list[str]] = [
+        p.name for p in params if p.kind != inspect.Parameter.VAR_POSITIONAL
+    ]
 
     return names
+
+
+def procedure_options(name: str) -> dict[str, Any]:
+    """
+    手順の設定の名前と既定値を返す関数
+
+    Parameters
+    ----------
+    name: str
+        手順の名前
+
+    Returns
+    ----------
+    options: dict[str, Any]
+        names (設定の名前. 設定の無い手順は空, **kwargs を持つ関数と引数を
+        読めない関数は None) と defaults (設定の名前ごとの既定値. 有限の数,
+        真偽値, 文字の既定値だけ)
+
+    Raises
+    ----------
+    KeyError
+        登録簿に無い名前の場合
+    """
+    # 既定値は JSON の 1 つの値で書けるものだけ (None, inf, NaN は除く)
+    params = option_params(name) or []
+    defaults = {
+        p.name: p.default for p in params
+        if isinstance(p.default, (int, float, bool, str))
+        and not (isinstance(p.default, float) and not math.isfinite(p.default))
+    }
+    options = {"names": option_names(name), "defaults": defaults}
+
+    return options
 
 
 def run_procedure(

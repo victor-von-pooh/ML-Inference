@@ -1,4 +1,5 @@
 from pathlib import Path
+import math
 import shutil
 from types import SimpleNamespace
 from typing import Any
@@ -23,6 +24,7 @@ from ml_inference.conclude import conclude
 from ml_inference.predict import (
     DECODERS, finite_raw, join_parts, median_of
 )
+from ml_inference import procedure_options
 from ml_inference.procedures import (
     get_procedure, make_generator, option_names, register_procedure,
     run_procedure, start_noise
@@ -1484,3 +1486,91 @@ class FailingBuild:
         """
         # 出どころを読めない誤り
         raise OSError("出どころにつながりません")
+
+
+def odd_steps(
+    model: Any, state: torch.Tensor, steps: int,
+    generator: torch.Generator, scale: float = math.inf,
+    label: str = "a", flag: bool = True, limit: Any = None,
+    table: Any = (1, 2), count: int = 3, need: Any = 0.0
+) -> torch.Tensor:
+    """
+    既定値の種類の違う設定を持つ自作の手順の例として, 中身をそのまま
+    返す関数
+
+    Parameters
+    ----------
+    model: Any
+        モデル
+    state: torch.Tensor
+        始まりの中身
+    steps: int
+        回数
+    generator: torch.Generator
+        乱数の生成器
+    scale: float = math.inf
+        JSON にできない既定値の設定
+    label: str = "a"
+        文字の既定値の設定
+    flag: bool = True
+        真偽値の既定値の設定
+    limit: Any = None
+        既定値が None の設定
+    table: Any = (1, 2)
+        並びの既定値の設定
+    count: int = 3
+        整数の既定値の設定
+    need: Any = 0.0
+        小数の既定値の設定
+
+    Returns
+    ----------
+    state: torch.Tensor
+        始まりの中身
+    """
+    # そのまま
+    return state
+
+
+def test_procedure_options() -> None:
+    """
+    公開の procedure_options が, 手順の設定の名前と既定値を返すことを
+    確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 組み込みの手順は 5 つ目からの引数と既定値 (None の既定値は除く)
+    assert procedure_options("ddim") == {
+        "names": ["train_steps", "beta_start", "beta_end", "eta"],
+        "defaults": {"train_steps": 1000, "beta_start": 1e-4,
+                     "beta_end": 0.02, "eta": 0.0},
+    }
+    assert procedure_options("greedy") == {"names": ["eos"], "defaults": {}}
+    assert procedure_options("sample")["defaults"] == {"temperature": 1.0}
+
+    # 設定の無い手順は空, **kwargs の手順は名前を決めない
+    register_procedure("plain", plain_steps, "noise", True, overwrite=True)
+    register_procedure("loose", loose_steps, "noise", True, overwrite=True)
+    assert procedure_options("plain") == {"names": [], "defaults": {}}
+    assert procedure_options("loose") == {"names": None, "defaults": {}}
+
+    # 既定値は有限の数, 真偽値, 文字だけ
+    register_procedure("odd", odd_steps, "noise", True, overwrite=True)
+    found = procedure_options("odd")
+    assert found["names"] == ["scale", "label", "flag", "limit", "table",
+                              "count", "need"]
+    assert found["defaults"] == {"label": "a", "flag": True, "count": 3,
+                                 "need": 0.0}
+
+    # 引数を読めない関数は何でも受け取る. 無い名前は登録簿の誤り
+    register_procedure("opaque", max, "noise", True, overwrite=True)
+    assert procedure_options("opaque") == {"names": None, "defaults": {}}
+    assert option_names("opaque") is None
+    with pytest.raises(KeyError, match="登録簿"):
+        procedure_options("beam")
