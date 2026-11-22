@@ -94,8 +94,8 @@ def test_make_sample_bundle(tmp_path: Path) -> None:
         )
         assert info["name"] == f"見本 {kind}"
         bundle = load_bundle(tmp_path / kind)
-        # 元のデータは場所 (古い ML-EDA) か名前だけ (今の ML-EDA は手元の
-        # 場所を残さない)
+        # 元のデータは場所 (手元の場所を残す版 1 の書き出し) か名前だけ
+        # (手元の場所を残さない版 1 の書き出し)
         described = bundle.dataset.info["source"]
         if "path" in described:
             assert described["path"] == str(source)
