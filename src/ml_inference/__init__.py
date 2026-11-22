@@ -4,7 +4,8 @@ from ml_inference.baseline import (
     BASELINE_TYPES, check_baseline, current_from_baseline
 )
 from ml_inference.bundle import (
-    BUNDLE_FORMAT_VERSION, FORMS, ROLES, Bundle, load_bundle, make_bundle
+    BUNDLE_FORMAT_VERSION, FORMS, ROLES, Bundle, load_bundle, make_bundle,
+    make_ready_bundle
 )
 from ml_inference.conclude import (
     NO_PREDICTION, UNDECIDED, check_rules, conclude
@@ -21,6 +22,7 @@ from ml_inference.procedures import (
     PROCEDURES, get_procedure, make_generator, register_procedure,
     run_procedure, start_noise
 )
+from ml_inference.ready import READY_LIBRARIES
 from ml_inference.remeasure import remeasure, restore_uncertainty
 from ml_inference.result import (
     RESULT_FORMAT_VERSION, artifact_path, infer, read_result, write_result
@@ -43,6 +45,7 @@ __all__ = [
     "OK",
     "POLICY_FORMAT_VERSION",
     "PROCEDURES",
+    "READY_LIBRARIES",
     "RESULT_FORMAT_VERSION",
     "ROLES",
     "SKIPPED",
@@ -66,6 +69,7 @@ __all__ = [
     "load_policy",
     "make_bundle",
     "make_generator",
+    "make_ready_bundle",
     "make_sample_bundle",
     "predict",
     "read_policy_spec",

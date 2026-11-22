@@ -15,6 +15,7 @@ from ml_inference.items import (
 from ml_inference.procedures import (
     get_procedure, make_generator, run_procedure, start_noise
 )
+from ml_inference.ready import prepare_ready, weights_file
 from ml_inference.texts import ids_to_text, text_vocabulary
 
 # 予測しなかった行の印
@@ -1191,6 +1192,14 @@ def predict(
     if bundle.from_items:
         result = predict_items(bundle, source, batch_size, device)
         return result
+    if bundle.from_ready:
+        if options:
+            raise ValueError(
+                "既製のモデルの一式は画像を一式の前処理で読むので, 読み込み"
+                "の設定 (options) は使えません"
+            )
+        result = predict_ready(bundle, source, batch_size, device)
+        return result
     if bundle.from_noise:
         if options:
             raise ValueError(
@@ -1327,10 +1336,17 @@ def attach_columns(
     texts = ("output", "tokens") + (
         ("prediction",) if bundle.form in ("class", "text") else ()
     )
+    added_columns = {}
     for name, values in columns.items():
         full = pd.Series([None] * count, dtype=object)
         full[keep] = pd.Series(list(values), dtype=object).to_numpy()
-        result[name] = full if name in texts else pd.to_numeric(full)
+        added_columns[name] = full if name in texts else pd.to_numeric(full)
+
+    # 種類の多い分類 (1000 の種類など) の確率の列は 1 度に並べる
+    if added_columns:
+        result = pd.concat(
+            [result, pd.DataFrame(added_columns, index=result.index)], axis=1
+        )
 
     return result
 
@@ -1438,6 +1454,66 @@ def predict_noise(
         bundle, {}, keep, reasons, batch_size, device, seed
     )
     frame = pd.DataFrame({"sample": np.arange(count), "seed": seed})
+    result = attach_columns(bundle, frame, columns, keep, reasons)
+
+    return result
+
+
+def predict_ready(
+    bundle: Bundle, source: Any, batch_size: int, device: str
+) -> pd.DataFrame:
+    """
+    既製のモデルの一式で, 画像ごとの種類の予測を返す関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        既製のモデルの一式
+    source: Any
+        画像のファイルかディレクトリ
+    batch_size: int
+        1 回に渡す件数
+    device: str
+        使うデバイス
+
+    Returns
+    ----------
+    result: pd.DataFrame
+        読み込みの表 (path など) と, status, reason, prediction,
+        confidence, p:<種類> の列
+
+    Raises
+    ----------
+    ValueError
+        画像のファイルかディレクトリでない場合と, 読めない場合
+    """
+    # 画像だけ (表と ML-EDA の Data は渡せない)
+    if not isinstance(source, (str, Path)):
+        raise ValueError(
+            "既製のモデルの一式には画像のファイルかディレクトリの場所を渡して"
+            "ください"
+        )
+    path = Path(source).expanduser()
+    try:
+        data = load_data(path, loader=ITEM_LOADERS["image"])
+    except Exception as error:
+        raise ValueError(f"{path.name} を読めません ({error})") from error
+
+    # 1 枚ずつ一式の前処理 (読めない画像は理由を付けて飛ばす)
+    frame = data.frame.reset_index(drop=True)
+    preprocess = bundle.info["ready"]["preprocess"]
+    crop = int(preprocess["crop"])
+    images = np.zeros((len(frame), 3, crop, crop), dtype=np.float32)
+    reasons = [""] * len(frame)
+    for index in range(len(frame)):
+        try:
+            images[index] = prepare_ready(data.load_item(index), preprocess)
+        except Exception as error:
+            reasons[index] = f"画像を読めません ({error})"
+    keep = np.array([not r for r in reasons], dtype=bool)
+    columns = infer_kept(
+        bundle, {"items": images}, keep, reasons, batch_size, device
+    )
     result = attach_columns(bundle, frame, columns, keep, reasons)
 
     return result
@@ -1634,9 +1710,39 @@ def describe_bundle(bundle: Union[str, Path, Bundle]) -> dict:
             bundle.cache.get("pretrained_warnings") or []
         ),
         "items": items_of_bundle(bundle),
+        "ready": ready_of_bundle(bundle),
     }
 
     return description
+
+
+def ready_of_bundle(bundle: Bundle) -> Optional[dict]:
+    """
+    既製のモデルの一式の出どころと前処理を, 説明の形で返す関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+
+    Returns
+    ----------
+    ready: Optional[dict]
+        ready の欄と, 重みのファイルを置く場所 (weights_file) と, そこに
+        あるか (weights_cached). 既製のモデルの一式でなければ None
+    """
+    # 画面がライセンスの警告と, 初回に取りに行くかを出すため
+    if not bundle.from_ready:
+        return None
+    found = bundle.info["ready"]
+    path = weights_file(found)
+    ready = {
+        **found,
+        "weights_file": str(path),
+        "weights_cached": bool(found.get("file")) and path.is_file(),
+    }
+
+    return ready
 
 
 def items_of_bundle(bundle: Bundle) -> Optional[dict]:

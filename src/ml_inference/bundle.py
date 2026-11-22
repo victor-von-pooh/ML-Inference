@@ -20,24 +20,29 @@ from ml_inference.items import (
     ITEM_FORMS, PREPARE_KINDS, check_items, check_point_count
 )
 from ml_inference.procedures import PROCEDURES, get_procedure, option_names
+from ml_inference.ready import (
+    LICENSE_KEYS, READY_FORMS, READY_LIBRARIES, check_ready
+)
 from ml_inference.units import check_units
 from ml_inference.weights import (
-    PLACES, layers_weights, place_weights, lookup_pretrained, node_keys,
-    pin_spec, state_hash, unchecked_notes
+    INFO_KEYS, PLACES, layers_weights, place_weights, lookup_pretrained,
+    node_keys, pin_spec, state_hash, unchecked_notes
 )
 
 # 推論の一式の形の版 (読める最も新しい版. 版 1 のデータセットの一式は
-# 版 3, 版 2 のデータセットの一式は版 4, 雑音だけの一式は版 5 で書く)
-BUNDLE_FORMAT_VERSION = 5
+# 版 3, 版 2 のデータセットの一式は版 4, 雑音だけの一式は版 5, 既製の
+# モデルの一式は版 6 で書く)
+BUNDLE_FORMAT_VERSION = 6
 COLUMN_BUNDLE_VERSION = 3
 ITEMS_BUNDLE_VERSION = 4
 NOISE_BUNDLE_VERSION = 5
+READY_BUNDLE_VERSION = 6
 
 # inference.yaml の一番上の項目
 TOP_KEYS = (
     "format_version", "name", "created_at", "role", "output", "target",
     "procedure", "model", "inputs", "dataset", "run", "conclusion",
-    "decision", "check", "uncertainty", "notes", "items"
+    "decision", "check", "uncertainty", "notes", "items", "ready"
 )
 
 # 出力の扱い方
@@ -130,7 +135,10 @@ class Bundle:
         task: str
             classification, regression, forecasting など
         """
-        # データセットの説明の task
+        # データセットの説明の task (既製のモデルの一式は出力の形から)
+        if self.from_ready:
+            task = "classification" if self.form == "class" else ""
+            return task
         task = str(self.dataset.info.get("task", ""))
 
         return task
@@ -149,7 +157,13 @@ class Bundle:
         classes: list[str]
             クラスの名前 (分類でなければ空)
         """
-        # データセットの説明の classes
+        # データセットの説明の classes (既製のモデルの一式は出力の形の
+        # classes. 重みの説明の種類の名前の表)
+        if self.from_ready:
+            classes = [
+                str(c) for c in self.output_info.get("classes") or []
+            ]
+            return classes
         classes = [str(c) for c in self.dataset.info.get("classes") or []]
 
         return classes
@@ -167,11 +181,15 @@ class Bundle:
         ----------
         kind: str
             table, timeseries, image, text, pointcloud, audio, items
-            (版 2 のデータセットの一式), noise (雑音だけの一式)
+            (版 2 のデータセットの一式), noise (雑音だけの一式), ready
+            (既製のモデルの一式)
         """
         # 版 2 のデータセットの一式はファイルの組, 雑音だけの一式は雑音
         if self.from_items:
             kind = "items"
+            return kind
+        if self.from_ready:
+            kind = "ready"
             return kind
         if self.from_noise:
             kind = "noise"
@@ -213,10 +231,31 @@ class Bundle:
         noise: bool
             dataset が null の一式 (版 5) なら True
         """
-        # 版 5 の dataset の有無
-        noise = self.info.get("dataset") is None
+        # 版 5 の dataset の有無 (既製のモデルの一式もデータセットを持た
+        # ない)
+        noise = self.info.get("dataset") is None and not self.from_ready
 
         return noise
+
+    @property
+    def from_ready(self) -> bool:
+        """
+        学習しない既製のモデルの一式かを返す関数
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        ----------
+        ready: bool
+            ready (既製のモデルの出どころと前処理) を持つ一式 (版 6) なら
+            True
+        """
+        # 版 6 の ready の有無
+        ready = self.info.get("ready") is not None
+
+        return ready
 
     @property
     def mask_values(self) -> Optional[list[int]]:
@@ -422,7 +461,13 @@ class Bundle:
         ValueError
             列の出力でない一式の場合
         """
-        # 結論と意思決定は 1 行に 1 つのクラスか値が前提
+        # 結論と意思決定は 1 行に 1 つのクラスか値が前提. 既製のモデルの
+        # 一式は測るデータを持たない
+        if self.from_ready:
+            raise ValueError(
+                f"既製のモデルの一式はデータセットと外れ方の記録を持たない"
+                f"ので, {what} を使えません"
+            )
         if not self.column_output:
             raise ValueError(
                 f"出力の形が {self.form} の一式には {what} を使えません "
@@ -473,7 +518,7 @@ class Bundle:
         )
         if sourced:
             self.cache["pretrained_warnings"] = load_sourced(
-                model, state, sourced, self.spec
+                model, state, sourced, self.spec, self.from_ready
             )
         else:
             model.load_state_dict(state)
@@ -484,7 +529,7 @@ class Bundle:
 
 
 def load_sourced(
-    model: Any, state: dict, sourced: list, spec: dict
+    model: Any, state: dict, sourced: list, spec: dict, pinned: bool = False
 ) -> list[str]:
     """
     出どころから読むノードの重みを hash で確かめる関数
@@ -502,6 +547,9 @@ def load_sourced(
         出どころから読むノードの記録
     spec: dict
         一式のモデルの定義
+    pinned: bool = False
+        hash の違いを誤りにするか (既製のモデルの一式は重みを hash で
+        固定する)
 
     Returns
     ----------
@@ -513,7 +561,8 @@ def load_sourced(
     ValueError
         足りない重みが出どころから読むノードのものだけでない場合と, hash の
         違ったノードが外部の重み (weights) を重ねる場合 (外部の重みを
-        読まずに組み立てるので, 出どころの重みと違う)
+        読まずに組み立てるので, 出どころの重みと違う) と, 既製のモデルの
+        一式で hash が違う場合
     """
     # 足りないキーは出どころから読むノードのものだけ
     built = model.state_dict()
@@ -542,6 +591,15 @@ def load_sourced(
                 "組み立てるので, 一式を作ったときの重みになりません. 今の"
                 "ライブラリで一式を作り直してください (重ねたノードの重みは"
                 "一式に含めます)"
+            )
+        if found != record.get("sha256") and pinned:
+            raise ValueError(
+                f"既製のモデルの一式のノード {node} の出どころから読んだ重み "
+                f"({record.get('model') or ''} 版 "
+                f"{record.get('pinned_revision')}) の hash が一式と違います "
+                f"(一式 {str(record.get('sha256'))[:12]}…, 読んだもの "
+                f"{found[:12]}…). 置いた重みのファイルが違うか, 出どころの"
+                "重みが入れ替わりました"
             )
         if found != record.get("sha256"):
             message = (
@@ -654,7 +712,9 @@ def check_info(info: Any) -> list[str]:
             errors.append(
                 "model.target_scale は center と scale の数にしてください"
             )
-    if info.get("dataset") is None and version != NOISE_BUNDLE_VERSION:
+    if info.get("dataset") is None and version not in (
+        NOISE_BUNDLE_VERSION, READY_BUNDLE_VERSION
+    ):
         errors.append("dataset (データセットの説明の場所) が要ります")
     elif info.get("dataset") is not None and not info.get("dataset"):
         errors.append("dataset (データセットの説明の場所) が空です")
@@ -688,6 +748,74 @@ def check_info(info: Any) -> list[str]:
         errors.extend(check_items(info["items"]))
     if version == NOISE_BUNDLE_VERSION:
         errors.extend(check_noise(info))
+    if info.get("ready") is not None and version != READY_BUNDLE_VERSION:
+        errors.append(
+            f"ready を持つ一式は版 {READY_BUNDLE_VERSION} にしてください"
+        )
+    if version == READY_BUNDLE_VERSION:
+        errors.extend(check_ready_info(info))
+
+    return errors
+
+
+def check_ready_info(info: dict) -> list[str]:
+    """
+    既製のモデルの一式 (版 6) の形を確かめる関数
+
+    Parameters
+    ----------
+    info: dict
+        inference.yaml の中身
+
+    Returns
+    ----------
+    errors: list[str]
+        誤りの一覧 (無ければ空)
+    """
+    # ready が要り, データセット, items, 手順を持たない
+    if info.get("ready") is None:
+        return [f"版 {READY_BUNDLE_VERSION} の一式には ready (既製のモデル"
+                "の出どころと前処理) が要ります"]
+    errors = check_ready(info["ready"])
+    held = [k for k in ("dataset", "items", "procedure", "decision",
+                        "check", "uncertainty", "target")
+            if info.get(k) is not None]
+    if held:
+        errors.append(
+            f"既製のモデルの一式の {', '.join(held)} は null にしてください "
+            "(データセットと正解を持たず, 学習しないため)"
+        )
+
+    # 出力は種類の名前の表を持つ分類, 入力は画像, 重みは出どころから
+    output = info.get("output") if isinstance(info.get("output"), dict) else {}
+    classes = output.get("classes")
+    if output.get("form") not in READY_FORMS:
+        errors.append(
+            f"既製のモデルの一式の出力の形は {', '.join(READY_FORMS)} だけ"
+            "です"
+        )
+    elif not isinstance(classes, list) or not classes or not all(
+        isinstance(c, str) for c in classes
+    ) or len(set(classes)) != len(classes):
+        errors.append(
+            "既製のモデルの一式の output.classes は重ならない種類の名前の"
+            "並びにしてください"
+        )
+    inputs = info.get("inputs") if isinstance(info.get("inputs"), dict) else {}
+    if any(isinstance(item, dict) and item.get("source", "items") != "items"
+           for item in inputs.values()):
+        errors.append("既製のモデルの一式の入力の source は items だけです")
+    model = info.get("model") if isinstance(info.get("model"), dict) else {}
+    if model.get("target_scale") is not None:
+        errors.append("既製のモデルの一式は model.target_scale を持てません")
+    records = model.get("pretrained")
+    if not isinstance(records, list) or not records or not all(
+        isinstance(r, dict) and r.get("place") == "source" for r in records
+    ):
+        errors.append(
+            "既製のモデルの一式の model.pretrained は, 出どころから読む "
+            "(place: source) ノードの記録にしてください"
+        )
 
     return errors
 
@@ -1076,7 +1204,8 @@ def load_bundle(path: Union[str, Path]) -> Bundle:
     spec = load_spec(inside(root, str(info["model"]["spec"])))
     check_units(spec)
     if info.get("dataset") is None:
-        # 雑音だけの一式は説明とレシピが空のデータセット
+        # 雑音だけの一式と既製のモデルの一式は説明とレシピが空の
+        # データセット
         dataset = Dataset(path=root, info={}, frames={}, recipe={})
     else:
         data_dir = inside(root, str(info["dataset"]))
@@ -1622,6 +1751,268 @@ def make_bundle(
     writing.rename(final)
 
     return info
+
+
+def make_ready_bundle(
+    path: Union[str, Path], model: str, weights: str,
+    library: str = "torchvision", sha256: Optional[str] = None,
+    name: Optional[str] = None, license: Optional[dict] = None,
+    conclusion: Optional[dict] = None, overwrite: bool = False
+) -> dict:
+    """
+    学習しない既製のモデルの一式を, 重みの版と hash を固定して作る関数
+
+    重みは一式に写さず, 使うときに出どころ (ライブラリ) から読む (利用者
+    が置いたファイルか, 初回に取りに行ったもの)
+
+    Parameters
+    ----------
+    path: Union[str, Path]
+        作るディレクトリ
+    model: str
+        モデルの名前 (resnet18 など)
+    weights: str
+        重みの名前 (IMAGENET1K_V1 など. DEFAULT はその時の名前に直す)
+    library: str = "torchvision"
+        出どころのライブラリ (READY_LIBRARIES の名前)
+    sha256: Optional[str] = None
+        決めておいた重みの hash (渡すと, 読んだ重みと違えば作らない)
+    name: Optional[str] = None
+        一式の名前 (省略するとディレクトリの名前)
+    license: Optional[dict] = None
+        重みのライセンスの情報 (ML-ModelControl の pretrained_info の
+        形). 省略すると pretrained_info で読む
+    conclusion: Optional[dict] = None
+        結論の決め方の既定値
+    overwrite: bool = False
+        既にある一式を置き換えるか
+
+    Returns
+    ----------
+    info: dict
+        書き出した inference.yaml の中身
+
+    Raises
+    ----------
+    FileExistsError
+        ディレクトリが既にあり, overwrite が False の場合と, 一式ではない
+        ディレクトリを置き換えようとした場合
+    ValueError
+        出どころ, モデル, 重みの名前が無い場合と, 重みを読めない場合,
+        hash が sha256 と違う場合
+    """
+    # 置き換えられるのは, 前に作った一式だけ
+    final = Path(path).expanduser().resolve()
+    if final.exists():
+        if not overwrite:
+            raise FileExistsError(f"{final} は既にあります")
+        if not (final / "inference.yaml").is_file():
+            raise FileExistsError(f"{final} は推論の一式ではないので置き換えません")
+    if library not in READY_LIBRARIES:
+        raise ValueError(
+            f"既製のモデルの出どころ {library} はありません (出どころ: "
+            f"{', '.join(READY_LIBRARIES)})"
+        )
+
+    # 重みの説明 (種類の名前の表と前処理) と, 1 つのノードの定義
+    found = READY_LIBRARIES[library](model, weights)
+    crop = int(found["preprocess"]["crop"])
+    spec = {
+        "format_version": 1,
+        "name": model,
+        "inputs": {"image": {"shape": [1, 3, crop, crop]}},
+        "nodes": {
+            "model": {
+                "unit": found["unit"], "params": dict(found["params"]),
+                "inputs": "image",
+            }
+        },
+        "outputs": {"logits": "model"},
+    }
+    spec = load_spec(spec)
+    check_units(spec)
+
+    # 出どころの重みを読んで hash を求める (初回は取りに行く)
+    record, ready, notes = ready_record(
+        spec, found, library, model, license
+    )
+    if sha256 is not None and sha256 != record["sha256"]:
+        raise ValueError(
+            f"{library} の {model} の重み {record['pinned_revision']} の "
+            f"hash が決めておいたものと違います (決めたもの "
+            f"{sha256[:12]}…, 読んだもの {record['sha256'][:12]}…)"
+        )
+
+    # 隣の一時ディレクトリに作り, 確かめてから入れ替える (重みは空)
+    writing = final.with_name(f".{final.name}.writing")
+    if writing.exists():
+        shutil.rmtree(writing)
+    writing.mkdir(parents=True)
+    try:
+        dump_spec(spec, writing / "model_spec.yaml")
+        torch.save({}, writing / "final_model.pt")
+        info = {
+            "format_version": READY_BUNDLE_VERSION,
+            "name": name or final.name,
+            "created_at": dt.datetime.now().astimezone().isoformat(),
+            "role": "predict",
+            "output": {"form": "class", "classes": list(found["classes"])},
+            "target": None,
+            "procedure": None,
+            "model": {
+                "spec": "model_spec.yaml",
+                "weights": "final_model.pt",
+                "output": None,
+                "kind": "logits",
+                "target_scale": None,
+                "pretrained": [record],
+            },
+            "inputs": {},
+            "dataset": None,
+            "run": None,
+            "conclusion": plain(conclusion or {}),
+            "decision": None,
+            "check": None,
+            "uncertainty": None,
+            "notes": notes,
+            "ready": ready,
+        }
+        (writing / "inference.yaml").write_text(
+            yaml.safe_dump(info, allow_unicode=True, sort_keys=False),
+            encoding="utf-8"
+        )
+        bundle = load_bundle(writing)
+        if conclusion:
+            errors = check_rules(conclusion, bundle.task, bundle.classes)
+            if errors:
+                raise ValueError("結論の決め方の誤り: " + " / ".join(errors))
+        check_ready_sample(bundle)
+    except Exception:
+        shutil.rmtree(writing, ignore_errors=True)
+        raise
+    if final.exists():
+        shutil.rmtree(final)
+    writing.rename(final)
+
+    return info
+
+
+def ready_record(
+    spec: dict, found: dict, library: str, model: str,
+    license: Optional[dict]
+) -> tuple[dict, dict, list[str]]:
+    """
+    既製のモデルの重みを出どころから読み, 置き方の記録と ready を作る関数
+
+    Parameters
+    ----------
+    spec: dict
+        1 つのノード (model) の定義
+    found: dict
+        出どころの重みの説明 (READY_LIBRARIES の関数の結果)
+    library: str
+        出どころのライブラリ
+    model: str
+        モデルの名前
+    license: Optional[dict]
+        重みのライセンスの情報 (省略すると pretrained_info で読む)
+
+    Returns
+    ----------
+    result: tuple[dict, dict, list[str]]
+        model.pretrained の記録, ready, 注意の文
+
+    Raises
+    ----------
+    ValueError
+        出どころの重みを読めない場合
+    """
+    # 組み立てると部品が出どころの重みを読む (外部の重みのファイルは無い)
+    version = str(found["params"].get("weights") or "")
+    try:
+        state = build_model(spec, seed=0, load_weights=False).state_dict()
+    except Exception as error:
+        raise ValueError(
+            f"{library} の {model} の重み {version} を読めません "
+            f"({type(error).__name__}: {error}). 初回はネットワークから"
+            f"取りに行きます. ネットワークを使えない場合は "
+            f"{found.get('file') or '重みのファイル'} を PyTorch の置き場 "
+            "(torch.hub.get_dir() の checkpoints) に置いてください"
+        ) from error
+    keys = node_keys(state, "model")
+    infos, notes = lookup_pretrained(
+        spec, None if license is None else {"model": license}
+    )
+    info = infos.get("model") or {
+        "unit": found["unit"], "status": "unknown", "redistributable": False,
+        "source": "読めなかった (ライセンスの情報を読めない)",
+    }
+
+    # 版は重みの名前 (名前ごとに重みのファイルが決まる). 重みは写さない
+    record: dict[str, Any] = {"node": "model"}
+    record.update({k: info.get(k) for k in INFO_KEYS})
+    record["model"] = model
+    record["revision"] = version
+    record["pinned_revision"] = info.get("pinned_revision") or version
+    record["redistributable"] = bool(info.get("redistributable"))
+    record["place"] = "source"
+    record["sha256"] = state_hash(state, keys)
+    record["keys"] = len(keys)
+    ready = {
+        "library": library,
+        "model": model,
+        "weights": version,
+        "input": found["input"],
+        "preprocess": dict(found["preprocess"]),
+        "url": found.get("url"),
+        "file": found.get("file"),
+        "license": {k: info.get(k) for k in LICENSE_KEYS},
+    }
+    ready["license"]["redistributable"] = record["redistributable"]
+    notes = list(notes) + [
+        f"重みは一式に写さず, 使うときに {library} の {model} の "
+        f"{version} を出どころから読み, hash "
+        f"({record['sha256'][:12]}…) で確かめます"
+    ]
+    if info.get("status") != "commercial":
+        notes.append(
+            f"重みのライセンスは {info.get('license') or '分からない'} "
+            f"({info.get('status') or 'unknown'}) です. 商用で使う前に配布"
+            "元で確かめてください"
+        )
+    if info.get("gated"):
+        notes.append("重みは申請制です. 使う人ごとに配布元で申請してください")
+
+    return record, ready, notes
+
+
+def check_ready_sample(bundle: Bundle) -> None:
+    """
+    既製のモデルの一式で, 前処理の後の大きさの画像を推論できるかを
+    確かめる関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        作っている一式
+
+    Returns
+    ----------
+    None
+
+    Raises
+    ----------
+    ValueError
+        推論できない場合と, 出力が種類の名前の表と合わない場合
+    """
+    # 予測の関数はこのモジュールを読むので, 使うときに読み込む
+    from ml_inference.predict import shape_inputs
+
+    # 前処理の後の (3, crop, crop) の 0 の画像を数件
+    crop = int(bundle.info["ready"]["preprocess"]["crop"])
+    images = np.zeros((NOISE_SAMPLE_ROWS, 3, crop, crop), dtype=np.float32)
+    tensors = shape_inputs(bundle, {"items": images}, NOISE_SAMPLE_ROWS)
+    sample_inference(bundle, tensors)
 
 
 def bundle_version(

@@ -10,6 +10,7 @@
 - **何段も先の予測と列の効き**: 予測した値を次の入力に使って先の行を埋める. どの列が予測を動かしているかを並べ替えで求める
 - **意思決定**: 予測から次の行動 (量, 選ぶ対象, 人が確かめる対象) と見込みの得と損を出し, 過去のデータでたどり直して, 素朴なやり方と今のやり方 (問題の設定と同じ決まりでも書ける) と比べる. 新しい実績で外れ方を測り直す
 - **方策の一式**: ML-Found が書き出す強化学習の方策を読み, 観測から行動と守り (行動の範囲, 止める条件, 外れたときの動き) の結果を返す. 実機では動かさない
+- **既製のモデルの一式**: 学習しない既製のモデル (torchvision の学習済みの画像の分類など) を, 重みの版と hash を固定し, 種類の名前の表と前処理を持たせて一式にする
 - **見本の一式**: 表か文のデータから小さなモデルをその場で学習し, 画面で操作を試すための一式を作る
 
 前処理は [ML-EDA](https://github.com/victor-von-pooh/ML-EDA), モデルの組み立ては [ML-ModelControl](https://github.com/victor-von-pooh/ML-ModelControl) を使い, [ML-Found](https://github.com/victor-von-pooh/ML-Found) で学習した重みを読む.
@@ -155,6 +156,20 @@ write_result(result, "results/shape")   # 点群は artifacts/000000.npy など
 ```
 
 一式を作るときに, 検証用の分割の IoU (領域) か Chamfer 距離 (点群) を求め, 実験の監視した指標 (`valid/iou`, `valid/chamfer`) と比べる (DESIGN の「版 2 のデータセットの一式」).
+
+### 学習しない既製のモデル (一式の版 6)
+
+ライブラリの学習済みの重みを学習せずにそのまま使う一式も作れる. 今は torchvision の画像の分類 (ML-ModelControl の追加の依存 `torchvision` で入れる). 種類の名前の表と前処理 (大きさ, 切り出し, 正規化) は重みの説明から一式に書き, 重みは写さずに名前 (版) と hash で固定する. 重みは初回に取りに行くか, 利用者が PyTorch の置き場 (`torch.hub.get_dir()` の `checkpoints`) に置く.
+
+```python
+from ml_inference import describe_bundle, infer, make_ready_bundle
+
+make_ready_bundle("bundles/resnet18", "resnet18", "IMAGENET1K_V1")
+description = describe_bundle("bundles/resnet18")
+len(description["classes"])            # 1000 (tench, goldfish, ...)
+description["ready"]["license"]        # ライセンスの警告 (torchvision は unknown)
+result = infer("bundles/resnet18", "photos/")   # prediction は種類の名前
+```
 
 ### 何段も先を予測する
 
