@@ -32,6 +32,38 @@ class Scale(nn.Module):
 UNITS = [{{"cls": Scale, "name": "{unit}"}}]
 '''
 
+# 部品を引数に取る自作の部品を宣言するモジュールの中身 ({unit} は包む
+# 部品の名前, {inner} は包まれる部品の名前)
+WRAP_MODULE = """
+from torch import nn
+
+
+class Wrap(nn.Module):
+    def __init__(self, inner: nn.Module):
+        super(Wrap, self).__init__()
+        self.inner = inner
+
+    def forward(self, x):
+        out = self.inner(x) + 1.0
+        return out
+
+
+class Scale(nn.Module):
+    def __init__(self, features: int = 2):
+        super(Scale, self).__init__()
+        self.fc = nn.Linear(features, features)
+
+    def forward(self, x):
+        out = self.fc(x) * 2.0
+        return out
+
+
+UNITS = [
+    {{"cls": Wrap, "name": "{unit}"}},
+    {{"cls": Scale, "name": "{inner}"}},
+]
+"""
+
 # 読み込まれたら印のファイルを作るモジュールの中身
 MARK_MODULE = '''
 from pathlib import Path
@@ -306,3 +338,115 @@ def test_register_units_errors() -> None:
         register_units("lab.units")  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         register_units([unique("no_such_module")])
+
+
+def wrap_spec(width: int, unit: str, inner: str) -> dict:
+    """
+    引数に自作の部品を書いたモデルの定義 (版 3) を返す関数
+
+    Parameters
+    ----------
+    width: int
+        入力の列の数
+    unit: str
+        部品を引数に取る自作の部品の名前
+    inner: str
+        引数に書く自作の部品の名前
+
+    Returns
+    ----------
+    spec: dict
+        ML-ModelControl の定義
+    """
+    # 自作の部品を包む自作の部品から 3 クラスへ
+    spec = {
+        "format_version": 3,
+        "inputs": {"x": {"shape": [4, width]}},
+        "nodes": {
+            "lab": {"unit": unit,
+                    "params": {"inner": {"unit": inner,
+                                         "params": {"features": width}}},
+                    "inputs": "x"},
+            "head": {"unit": "nn.Linear",
+                     "params": {"in_features": width, "out_features": 3},
+                     "inputs": "lab"},
+        },
+        "outputs": {"logits": "head"},
+    }
+
+    return spec
+
+
+def test_param_unit_bundle_predicts(
+    tmp_path: Path, table_dataset: Path, table_csv: Path,
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 引数に書いた自作の部品も前もって集め, 登録した一式は読めて推論できる
+    module = unique("lab_wrap")
+    unit, inner = f"{module}.Wrap", f"{module}.Scale"
+    place = tmp_path / "modules"
+    place.mkdir()
+    (place / f"{module}.py").write_text(
+        WRAP_MODULE.format(unit=unit, inner=inner), encoding="utf-8"
+    )
+    monkeypatch.syspath_prepend(str(place))
+    width = len(load_dataset(table_dataset).features)
+    spec = wrap_spec(width, unit, inner)
+    assert ("lab.params.inner", inner) in spec_units(spec)
+
+    # 登録の前は引数の部品も挙げて止め, 登録の後は読める
+    with pytest.raises(UnregisteredUnitError) as caught:
+        check_units(spec)
+    assert caught.value.units == [unit, inner]
+    assert caught.value.nodes == ["lab", "lab.params.inner"]
+    register_units([module])
+    weights = save_weights(spec, tmp_path / "wrap.pt")
+    path = tmp_path / "wrap"
+    make_bundle(path, spec, table_dataset, weights)
+    bundle = load_bundle(path)
+    assert len(predict(bundle, table_csv)) > 0
+
+
+def test_unregistered_param_unit_is_named() -> None:
+    # 引数の部品の中の部品も, 場所を挙げて止める
+    missing = unique("nested") + ".Block"
+    spec = {
+        "format_version": 3,
+        "inputs": {"x": {}},
+        "nodes": {"enc": {
+            "unit": "nn.TransformerEncoder",
+            "params": {
+                "encoder_layer": {
+                    "unit": "nn.TransformerEncoderLayer",
+                    "params": {"d_model": 4, "nhead": 1,
+                               "norm": {"unit": missing}},
+                },
+                "num_layers": 1,
+            },
+            "inputs": {"src": "x"},
+        }},
+        "outputs": {"out": "enc"},
+    }
+    with pytest.raises(UnregisteredUnitError) as caught:
+        check_units(spec)
+    assert caught.value.units == [missing]
+    assert caught.value.nodes == [
+        "enc.params.encoder_layer.params.norm"
+    ]
+
+
+def test_param_units_stop_at_depth_and_cycle() -> None:
+    # 上限 (10 段) より深い入れ子と循環はたどらない
+    inner: dict = {"unit": "nn.ReLU"}
+    for _ in range(11):
+        inner = {"unit": "nn.Sequential", "params": {"inner": inner}}
+    spec = {"nodes": {"a": {"unit": "nn.Identity",
+                            "params": {"inner": inner}}}}
+    assert len(spec_units(spec)) == 1 + 10
+    cycle: dict = {"unit": "nn.Identity"}
+    cycle["params"] = {"inner": cycle}
+    spec = {"nodes": {"a": {"unit": "nn.Identity",
+                            "params": {"inner": cycle}}}}
+    assert spec_units(spec) == [
+        ("a", "nn.Identity"), ("a.params.inner", "nn.Identity")
+    ]

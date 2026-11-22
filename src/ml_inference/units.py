@@ -11,6 +11,10 @@ from ml_modelcontrol import get_unit
 # 定義の部分モデルを指す部品の名前の頭 (登録簿を見ない)
 SUBGRAPH_PREFIX = "sub."
 
+# 引数に書く部品の入れ子の上限 (ML-ModelControl の版 3 と同じ. ノードの
+# 引数に書いた部品が 1 段目)
+MAX_UNIT_DEPTH = 10
+
 # 登録されていない部品の足し方の案内
 UNIT_HINT = (
     "自作の部品なら, 部品を宣言したモジュールの名前を起動の設定に足して"
@@ -102,7 +106,9 @@ def spec_units(spec: dict) -> list[tuple[str, str]]:
     ----------
     pairs: list[tuple[str, str]]
         (ノードの名前, 部品の名前). 部分モデルのノードは「部分モデル/
-        ノード」, 外部の重みを読む部品 (weights.unit) は「ノード.weights」
+        ノード」, 外部の重みを読む部品 (weights.unit) は「ノード.weights」,
+        引数に書いた部品 (版 3) は「ノード.params.引数」(中の部品は
+        「ノード.params.引数.params.引数」)
     """
     # 本体と, 名前を付けた部分モデル
     graphs: list[tuple[str, Any]] = [("", spec)]
@@ -121,6 +127,7 @@ def spec_units(spec: dict) -> list[tuple[str, str]]:
                 continue
             if "unit" in node:
                 pairs.append((f"{prefix}{name}", str(node["unit"])))
+            pairs += param_units(f"{prefix}{name}", node.get("params"))
             weights = node.get("weights")
             if isinstance(weights, dict) and isinstance(
                 weights.get("unit"), str
@@ -128,6 +135,49 @@ def spec_units(spec: dict) -> list[tuple[str, str]]:
                 pairs.append(
                     (f"{prefix}{name}.weights", weights["unit"])
                 )
+
+    return pairs
+
+
+def param_units(
+    place: str, params: Any, depth: int = 1, seen: tuple = ()
+) -> list[tuple[str, str]]:
+    """
+    ノードの引数に書いた部品 (版 3) の, 場所と部品の名前の組を返す関数
+
+    Parameters
+    ----------
+    place: str
+        引数を持つものの場所 (ノードの名前か, 外側の引数の部品の場所)
+    params: Any
+        引数の辞書 (ノードの params か, 引数の部品の params)
+    depth: int = 1
+        入れ子の深さ (ノードの引数に書いた部品は 1)
+    seen: tuple = ()
+        たどっている外側の引数の部品の辞書の id
+
+    Returns
+    ----------
+    pairs: list[tuple[str, str]]
+        (引数の場所, 部品の名前). 外側の部品を先に並べる
+    """
+    # unit を文字で持つ辞書の値だけが引数の部品 (深すぎる入れ子と循環
+    # は, ML-ModelControl の確かめが誤りにするので, たどらずに止める)
+    pairs: list[tuple[str, str]] = []
+    if not isinstance(params, dict):
+        return pairs
+    for key, value in params.items():
+        if not isinstance(value, dict) or not isinstance(
+            value.get("unit"), str
+        ):
+            continue
+        if depth > MAX_UNIT_DEPTH or id(value) in seen:
+            continue
+        location = f"{place}.params.{key}"
+        pairs.append((location, value["unit"]))
+        pairs += param_units(
+            location, value.get("params"), depth + 1, (*seen, id(value))
+        )
 
     return pairs
 
