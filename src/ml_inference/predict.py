@@ -27,6 +27,12 @@ OK, SKIPPED = "ok", "skipped"
 # 予測の値が数でない行の理由
 NOT_FINITE = "予測の値が数ではありません (入力に無限大などが無いか)"
 
+# 表の出力で, 予測の値を表に戻せない行の理由
+NOT_DECODED = (
+    "予測の値を表に戻せません (数でない値か, 整数の列の値が Int64 の範囲"
+    "の外)"
+)
+
 # 表として前処理をかける種類
 TABLE_KINDS = ("table", "timeseries")
 
@@ -1324,8 +1330,9 @@ def infer_kept(
     finite = finite_rows(bundle, columns) & finite_raw(raw)
     if not finite.all():
         rows = np.flatnonzero(keep)[~finite]
+        reason = NOT_DECODED if bundle.form == "table" else NOT_FINITE
         for row in rows:
-            reasons[row] = NOT_FINITE
+            reasons[row] = reason
         keep[rows] = False
         columns = {
             name: [v for v, ok in zip(values, finite) if ok]
@@ -1587,9 +1594,11 @@ def finite_rows(bundle: Bundle, columns: dict) -> np.ndarray:
             dtype=bool
         )
     elif bundle.form == "table":
-        # 表はモデルの出力で確かめる (数でない値は None に戻す)
-        first = next(iter(columns.values()))
-        finite = np.ones(len(first), dtype=bool)
+        # 表は全ての列が戻せた行 (戻せない値は None)
+        finite = np.array(
+            [all(v is not None for v in row)
+             for row in zip(*columns.values())], dtype=bool
+        )
     elif bundle.form == "text":
         finite = np.ones(len(columns["prediction"]), dtype=bool)
     else:

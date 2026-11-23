@@ -22,6 +22,9 @@ RESERVED_PREFIXES = ("p:", "q:")
 # 種類の値に使える型 (JSON と YAML のまま書けるもの)
 CATEGORY_TYPES = (str, int, float, bool)
 
+# 整数の列の値の範囲 (予測の表の Int64 に入る値)
+INT64_MIN, INT64_MAX = -(2 ** 63), 2 ** 63 - 1
+
 
 def is_number(value: Any) -> bool:
     """
@@ -207,8 +210,9 @@ def decode_table_rows(columns: list[dict], outputs: np.ndarray) -> dict:
     ----------
     values: dict
         列の名前ごとの値の並び (数の列は値 × std + mean で, 整数の列は
-        丸めた int. 数でない値は None. 種類の列はその列の区間で最も大きい
-        値の種類)
+        丸めた int. 種類の列はその列の区間で最も大きい値の種類. 戻せない
+        値は None. 数でない値, Int64 に入らない整数, 区間に数でない値の
+        ある種類)
 
     Raises
     ----------
@@ -231,15 +235,41 @@ def decode_table_rows(columns: list[dict], outputs: np.ndarray) -> dict:
         if column["type"] == "number":
             raw = array[:, start] * column["std"] + column["mean"]
             values[column["name"]] = [
-                (int(round(v)) if column["integer"] else float(v))
+                (to_integer(v) if column["integer"] else float(v))
                 if math.isfinite(v) else None for v in raw
             ]
             start += 1
             continue
         size = len(column["categories"])
-        picked = array[:, start:start + size].argmax(axis=1)
-        values[column["name"]] = [column["categories"][int(i)]
-                                  for i in picked]
+        part = array[:, start:start + size]
+        finite = np.isfinite(part).all(axis=1)
+        picked = np.where(finite[:, None], part, 0.0).argmax(axis=1)
+        values[column["name"]] = [
+            column["categories"][int(i)] if ok else None
+            for i, ok in zip(picked, finite)
+        ]
         start += size
 
     return values
+
+
+def to_integer(value: float) -> Any:
+    """
+    戻した値を丸めて, Int64 に入る整数にする関数
+
+    Parameters
+    ----------
+    value: float
+        有限の値
+
+    Returns
+    ----------
+    integer: Any
+        偶数への丸めの int (Int64 に入らなければ None)
+    """
+    # 範囲の外は戻せない値
+    integer = int(round(value))
+    if not INT64_MIN <= integer <= INT64_MAX:
+        return None
+
+    return integer

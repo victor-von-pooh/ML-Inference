@@ -1,3 +1,4 @@
+import importlib
 import json
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,9 @@ from ml_inference import (
     write_result
 )
 from ml_inference.tables import decode_table_rows, table_width
+
+# 予測のモジュール (ml_inference.predict は関数の名前と重なるため)
+predict_module = importlib.import_module("ml_inference.predict")
 
 # 符号化した行の幅が 16 (拡散の雑音の予測器の幅) になる列の符号化
 COLUMNS = [
@@ -236,6 +240,8 @@ def test_make_table_bundle_errors(
         ({"columns": [{"name": "a", "type": "date"}]}, "type"),
         ({"columns": [{"name": "a", "type": "category",
                        "categories": [1, "1"]}]}, "categories"),
+        ({"columns": [{"name": "a", "type": "category",
+                       "categories": []}]}, "categories は"),
         ({"columns": COLUMNS, "shape": [8]}, "幅"),
         ({"columns": tmp_path / "missing.json"}, "ありません"),
     ]
@@ -332,5 +338,81 @@ def test_decode_table_rows() -> None:
     assert values["a"][0] == pytest.approx(2.0) and values["a"][1] is None
     assert values["b"] == [1, -3]
     assert values["c"] == ["q", "p"]
+
+    # 種類の区間の数でない値と, Int64 に入らない整数は戻せない値
+    odd = np.array([
+        [0.0, 1e19, 0.1, np.nan, 0.2],
+        [0.0, -1e19, np.inf, 0.0, 0.0],
+    ], dtype=np.float64)
+    values = decode_table_rows(columns, odd)
+    assert values["b"] == [None, None]
+    assert values["c"] == [None, None]
     with pytest.raises(ValueError, match="件数, 5"):
         decode_table_rows(columns, outputs[:, :4])
+
+
+def test_table_bundle_skips_undecodable_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    種類の列の区間の数でない値と, Int64 に入らない整数の行を予測しなかった
+    行にし, 欠損のある Int64 の列の結果を書き出して読み直せることを確かめる
+    関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    monkeypatch: pytest.MonkeyPatch
+        モデルの出力を決めた値にする
+
+    Returns
+    ----------
+    None
+    """
+    # 行 0 は戻せる, 行 1 は種類の列 (color) の区間が nan, 行 2 は整数の
+    # 列 (n) が Int64 の外
+    path = table_bundle(tmp_path, "table")
+    raw = np.zeros((3, 16), dtype=np.float32)
+    raw[:, 2] = 1.0
+    raw[1, 3] = np.nan
+    raw[2, 1] = 1e19
+
+    def fixed(*args: object, **kwargs: object) -> np.ndarray:
+        """
+        決めた符号化した行を返す関数
+
+        Parameters
+        ----------
+        *args: object
+            run_model の引数 (使わない)
+        **kwargs: object
+            run_model の引数 (使わない)
+
+        Returns
+        ----------
+        raw: np.ndarray
+            (3, 16) の符号化した行
+        """
+        # 毎回同じ行
+        return raw
+
+    monkeypatch.setattr(predict_module, "run_model", fixed)
+    result = infer(path, {"count": 3, "seed": 0})
+    frame = result["frame"]
+    assert frame["status"].tolist() == ["ok", "skipped", "skipped"]
+    assert all("表に戻せません" in r for r in frame["reason"][1:])
+    assert str(frame["n"].dtype) == "Int64"
+    assert frame["n"].iloc[0] == 3 and frame["n"].iloc[1:].isna().all()
+    assert frame["color"].iloc[0] == "blue"
+    assert frame["color"].iloc[1:].isna().all()
+    assert result["summary"]["skipped"] == 2
+
+    # 書き出して読み直すと, 欠損は欠損のまま
+    place = tmp_path / "result"
+    write_result(result, place)
+    back = read_result(place)["frame"]
+    assert back["status"].tolist() == ["ok", "skipped", "skipped"]
+    assert back["n"].iloc[0] == 3 and back["n"].iloc[1:].isna().all()
+    assert back["color"].iloc[0] == "blue"
+    assert back["color"].iloc[1:].isna().all()
