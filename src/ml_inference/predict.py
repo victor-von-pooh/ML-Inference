@@ -18,6 +18,7 @@ from ml_inference.procedures import (
     get_procedure, make_generator, run_procedure, start_noise
 )
 from ml_inference.ready import prepare_ready, weights_file
+from ml_inference.tables import decode_table_rows, table_width
 from ml_inference.texts import ids_to_text, text_vocabulary
 
 # 予測しなかった行の印
@@ -25,6 +26,12 @@ OK, SKIPPED = "ok", "skipped"
 
 # 予測の値が数でない行の理由
 NOT_FINITE = "予測の値が数ではありません (入力に無限大などが無いか)"
+
+# 表の出力で, 予測の値を表に戻せない行の理由
+NOT_DECODED = (
+    "予測の値を表に戻せません (数でない値か, 整数の列の値が Int64 の範囲"
+    "の外)"
+)
 
 # 表として前処理をかける種類
 TABLE_KINDS = ("table", "timeseries")
@@ -795,7 +802,7 @@ def decode(bundle: Bundle, outputs: np.ndarray) -> dict:
     columns: dict
         出力の形ごとの列 (分類は prediction, confidence, p:<クラス>, 値は
         prediction, 分布は prediction と q:<水準>, 配列の形は output, 文は
-        prediction)
+        prediction, 表は列の符号化の列の名前)
 
     Raises
     ----------
@@ -1010,6 +1017,34 @@ def decode_array(bundle: Bundle, outputs: np.ndarray) -> dict:
     return columns
 
 
+def decode_table(bundle: Bundle, outputs: np.ndarray) -> dict:
+    """
+    表の出力 (符号化した行) を, 列の名前ごとの値にする関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+    outputs: np.ndarray
+        (件数, 幅) の符号化した行
+
+    Returns
+    ----------
+    columns: dict
+        列の符号化の列の名前ごとの値 (数の列は元の単位で, 整数の列は
+        丸めた値. 種類の列は区間で最も大きい値の種類)
+
+    Raises
+    ----------
+    ValueError
+        出力が (件数, 幅) でない場合
+    """
+    # 一式に写した列の符号化で戻す
+    columns = decode_table_rows(bundle.output_info["columns"], outputs)
+
+    return columns
+
+
 def text_settings(bundle: Bundle) -> tuple[Optional[dict], list[int], Any]:
     """
     文の出力を戻すための語彙と, 除く先頭の番号と終わりの番号を返す関数
@@ -1153,6 +1188,7 @@ DECODERS = {
     "vector": decode_array,
     "image": decode_array,
     "text": decode_text,
+    "table": decode_table,
 }
 
 
@@ -1184,6 +1220,7 @@ def predict(
     result: pd.DataFrame
         元の列 (雑音だけの一式は sample と seed) と, status, reason,
         prediction (分類は confidence と p:<クラス> も) か output の列
+        (表の出力は列の符号化の列)
 
     Raises
     ----------
@@ -1293,8 +1330,9 @@ def infer_kept(
     finite = finite_rows(bundle, columns) & finite_raw(raw)
     if not finite.all():
         rows = np.flatnonzero(keep)[~finite]
+        reason = NOT_DECODED if bundle.form == "table" else NOT_FINITE
         for row in rows:
-            reasons[row] = NOT_FINITE
+            reasons[row] = reason
         keep[rows] = False
         columns = {
             name: [v for v, ok in zip(values, finite) if ok]
@@ -1343,10 +1381,16 @@ def attach_columns(
     texts = ("output", "tokens") + (
         ("prediction",) if bundle.form in ("class", "text") else ()
     )
+    types = table_types(bundle)
     added_columns = {}
     for name, values in columns.items():
         full = pd.Series([None] * count, dtype=object)
         full[keep] = pd.Series(list(values), dtype=object).to_numpy()
+        if name in types:
+            added_columns[name] = full if types[name] == "category" else (
+                pd.to_numeric(full).astype(types[name])
+            )
+            continue
         added_columns[name] = full if name in texts else pd.to_numeric(full)
 
     # 種類の多い分類 (1000 の種類など) の確率の列は 1 度に並べる
@@ -1549,6 +1593,12 @@ def finite_rows(bundle: Bundle, columns: dict) -> np.ndarray:
             [bool(np.isfinite(a).all()) for a in columns["output"]],
             dtype=bool
         )
+    elif bundle.form == "table":
+        # 表は全ての列が戻せた行 (戻せない値は None)
+        finite = np.array(
+            [all(v is not None for v in row)
+             for row in zip(*columns.values())], dtype=bool
+        )
     elif bundle.form == "text":
         finite = np.ones(len(columns["prediction"]), dtype=bool)
     else:
@@ -1572,7 +1622,8 @@ def empty_output(bundle: Bundle) -> np.ndarray:
     outputs: np.ndarray
         0 件の出力
     """
-    # 分類はクラスの数, 分布は分位点の数の列. 配列の形は次元の数だけ
+    # 分類はクラスの数, 分布は分位点の数, 表は符号化した行の幅の列. 配列
+    # の形は次元の数だけ
     form = bundle.form
     if form == "class":
         shape: tuple = (0, len(bundle.classes))
@@ -1580,6 +1631,8 @@ def empty_output(bundle: Bundle) -> np.ndarray:
         shape = (0, len(bundle.output_info["quantiles"]))
     elif form in ("point_cloud", "mask"):
         shape = (0, 1, 1)
+    elif form == "table":
+        shape = (0, table_width(bundle.output_info["columns"]))
     else:
         shape = (0, 1)
     outputs = np.zeros(shape, dtype=np.float32)
@@ -1684,6 +1737,35 @@ def calibrate_summary(calibrate: Optional[dict]) -> Optional[dict]:
     }
 
     return summary
+
+
+def table_types(bundle: Bundle) -> dict:
+    """
+    表の出力の列ごとの予測の表の型を返す関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+
+    Returns
+    ----------
+    types: dict
+        列の名前ごとの型 (数の列は float64, 整数の列は欠損を持てる Int64,
+        種類の列は category で, 値のまま object の列にする). 表の出力で
+        なければ空
+    """
+    # 列の符号化の type と integer
+    if bundle.form != "table":
+        return {}
+    types = {
+        c["name"]: "category" if c["type"] == "category" else (
+            "Int64" if c["integer"] else "float64"
+        )
+        for c in bundle.output_info["columns"]
+    }
+
+    return types
 
 
 def describe_bundle(bundle: Union[str, Path, Bundle]) -> dict:

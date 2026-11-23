@@ -24,6 +24,9 @@ from ml_inference.procedures import PROCEDURES, get_procedure, option_names
 from ml_inference.ready import (
     READY_FORMS, READY_LIBRARIES, check_ready, ready_license
 )
+from ml_inference.tables import (
+    check_table_columns, read_table_columns, table_width
+)
 from ml_inference.units import check_units
 from ml_inference.weights import (
     INFO_KEYS, PLACES, layers_weights, place_weights, lookup_pretrained,
@@ -31,13 +34,19 @@ from ml_inference.weights import (
 )
 
 # 推論の一式の形の版 (読める最も新しい版. 版 1 のデータセットの一式は
-# 版 3, 版 2 のデータセットの一式は版 4, 雑音だけの一式は版 5, 既製の
-# モデルの一式は版 6 で書く)
-BUNDLE_FORMAT_VERSION = 6
+# 版 3, 版 2 のデータセットの一式は版 4, 雑音だけの一式は版 5 (表の出力は
+# 版 7), 既製のモデルの一式は版 6 で書く)
+BUNDLE_FORMAT_VERSION = 7
 COLUMN_BUNDLE_VERSION = 3
 ITEMS_BUNDLE_VERSION = 4
 NOISE_BUNDLE_VERSION = 5
 READY_BUNDLE_VERSION = 6
+TABLE_BUNDLE_VERSION = 7
+
+# データセットを持たない一式の版
+DATASETLESS_VERSIONS = (
+    NOISE_BUNDLE_VERSION, READY_BUNDLE_VERSION, TABLE_BUNDLE_VERSION
+)
 
 # inference.yaml の一番上の項目
 TOP_KEYS = (
@@ -63,6 +72,7 @@ FORM_KINDS = {
     "vector": ("value",),
     "text": ("logits",),
     "image": ("value",),
+    "table": ("value",),
 }
 FORMS = tuple(FORM_KINDS)
 
@@ -331,7 +341,7 @@ class Bundle:
         ----------
         form: str
             class, value, distribution, mask, point_cloud, vector, text,
-            image のどれか
+            image, table のどれか
         """
         # 出力の形の説明の form
         form = str(self.output_info["form"])
@@ -714,9 +724,7 @@ def check_info(info: Any) -> list[str]:
             errors.append(
                 "model.target_scale は center と scale の数にしてください"
             )
-    if info.get("dataset") is None and version not in (
-        NOISE_BUNDLE_VERSION, READY_BUNDLE_VERSION
-    ):
+    if info.get("dataset") is None and version not in DATASETLESS_VERSIONS:
         errors.append("dataset (データセットの説明の場所) が要ります")
     elif info.get("dataset") is not None and not info.get("dataset"):
         errors.append("dataset (データセットの説明の場所) が空です")
@@ -748,8 +756,15 @@ def check_info(info: Any) -> list[str]:
         if isinstance(version, int) and version < 4:
             errors.append(f"版 {version} の一式は items を持てません")
         errors.extend(check_items(info["items"]))
-    if version == NOISE_BUNDLE_VERSION:
+    if version in (NOISE_BUNDLE_VERSION, TABLE_BUNDLE_VERSION):
         errors.extend(check_noise(info))
+    output = info.get("output") if isinstance(info.get("output"), dict) else {}
+    if (output.get("form") == "table") != (version == TABLE_BUNDLE_VERSION):
+        errors.append(
+            f"出力の形 table は版 {TABLE_BUNDLE_VERSION} の雑音だけの一式"
+            f"だけで, 版 {TABLE_BUNDLE_VERSION} の一式の出力の形は table "
+            "だけです"
+        )
     if info.get("ready") is not None and version != READY_BUNDLE_VERSION:
         errors.append(
             f"ready を持つ一式は版 {READY_BUNDLE_VERSION} にしてください"
@@ -824,7 +839,7 @@ def check_ready_info(info: dict) -> list[str]:
 
 def check_noise(info: dict) -> list[str]:
     """
-    雑音だけの一式 (版 5) の形を確かめる関数
+    雑音だけの一式 (版 5 と, 表の出力の版 7) の形を確かめる関数
 
     Parameters
     ----------
@@ -838,13 +853,14 @@ def check_noise(info: dict) -> list[str]:
     """
     # データセットと items を持たず, 雑音から始まる手順だけ
     errors = []
+    version = info.get("format_version")
     if info.get("dataset") is not None:
         errors.append(
-            f"版 {NOISE_BUNDLE_VERSION} の一式は dataset を持てません "
+            f"版 {version} の一式は dataset を持てません "
             "(雑音だけの一式だけを書く版)"
         )
     if info.get("items") is not None:
-        errors.append(f"版 {NOISE_BUNDLE_VERSION} の一式は items を持てません")
+        errors.append(f"版 {version} の一式は items を持てません")
     procedure = info.get("procedure")
     name = procedure.get("name") if isinstance(procedure, dict) else None
     if name is None:
@@ -941,6 +957,10 @@ def check_kinds(info: dict) -> list[str]:
             )
         ):
             errors.append("output.shape は正の整数の並びにしてください")
+        if form == "table":
+            errors.extend(check_table_output(output))
+        elif output.get("columns") is not None:
+            errors.append("output.columns は出力の形 table だけに使えます")
 
     # 正解の種類と出どころ
     target = info.get("target")
@@ -958,6 +978,34 @@ def check_kinds(info: dict) -> list[str]:
                     "target.origin.type は "
                     f"{', '.join(ORIGIN_TYPES)} のどれかにしてください"
                 )
+
+    return errors
+
+
+def check_table_output(output: dict) -> list[str]:
+    """
+    表の出力の形の列の符号化と 1 件の形を確かめる関数
+
+    Parameters
+    ----------
+    output: dict
+        inference.yaml の output (form が table)
+
+    Returns
+    ----------
+    errors: list[str]
+        誤りの一覧 (無ければ空)
+    """
+    # 列の符号化と, 1 件の形が符号化した行の幅か
+    errors = check_table_columns(output.get("columns"))
+    if errors:
+        return errors
+    width = table_width(output["columns"])
+    if output.get("shape") != [width]:
+        errors.append(
+            f"表の出力の output.shape は符号化した行の幅 [{width}] にして"
+            "ください"
+        )
 
     return errors
 
@@ -1562,7 +1610,7 @@ def make_bundle(
     dataset: Union[str, Path, None]
         ML-EDA で書き出したデータセットのディレクトリ (版 1 か, 版 2 の
         ファイルの組). None は雑音だけの一式 (データセットを持たず, 件数
-        と種で推論する. 版 5)
+        と種で推論する. 版 5. 表の出力は版 7)
     weights: Union[str, Path]
         重み (state_dict) のファイルか, ML-Found の実験のディレクトリ
         (final_model.pt を使い, 実験の状態を記録する)
@@ -1591,10 +1639,12 @@ def make_bundle(
         predict. 雑音だけの一式は generate)
     form: Optional[str] = None
         出力の形 (class, value, distribution, mask, point_cloud, vector,
-        text, image. 省略するとタスクから. 雑音だけの一式は要る)
+        text, image, table. 省略するとタスクから. 雑音だけの一式は要る.
+        table は雑音だけの一式だけ)
     output_options: Optional[dict] = None
         出力の形ごとの欄 (distribution の quantiles, 雑音から始まる手順の
-        shape, mask の classes)
+        shape, mask の classes, table の columns (列の符号化の並びか, その
+        JSON のファイル. shape は省くと符号化した行の幅))
     target: Optional[dict] = None
         正解の種類 (kind) と出どころ (origin. ML-EDA の版 2 の
         target.origin の形). 省略すると列の出力は kind: column, 他は null
@@ -1737,7 +1787,9 @@ def make_bundle(
         elif copy_weights:
             shutil.copy(source, writing / "final_model.pt")
         info = {
-            "format_version": bundle_version(data_dir, item_info),
+            "format_version": bundle_version(
+                data_dir, item_info, kinds["output"]["form"]
+            ),
             "name": name or final.name,
             "created_at": dt.datetime.now().astimezone().isoformat(),
             **kinds,
@@ -2084,7 +2136,7 @@ def check_ready_sample(bundle: Bundle) -> None:
 
 
 def bundle_version(
-    data_dir: Optional[Path], item_info: Optional[dict]
+    data_dir: Optional[Path], item_info: Optional[dict], form: str
 ) -> int:
     """
     書く一式の形の版を決める関数
@@ -2095,14 +2147,20 @@ def bundle_version(
         データセットのディレクトリ (雑音だけの一式は None)
     item_info: Optional[dict]
         版 2 のデータセットの 1 件の扱い (版 1 のデータセットは None)
+    form: str
+        出力の形
 
     Returns
     ----------
     version: int
-        雑音だけの一式は 5, 版 2 のデータセットの一式は 4, 他は 3
+        表の出力は 7, 他の雑音だけの一式は 5, 版 2 のデータセットの一式は
+        4, 他は 3
     """
-    # 読む側が知る古い版で書けるものは古い版で
-    if data_dir is None:
+    # 読む側が知る古い版で書けるものは古い版で (表の出力の形を持つ版は
+    # 雑音だけの一式でなくても 7 にし, 読むときの誤りにする)
+    if form == "table":
+        version = TABLE_BUNDLE_VERSION
+    elif data_dir is None:
         version = NOISE_BUNDLE_VERSION
     elif item_info is not None:
         version = ITEMS_BUNDLE_VERSION
@@ -2171,10 +2229,22 @@ def noise_fields(
             "ください"
         )
 
-    # 出力の形 (受け持ちは省くと生成する. 正解は無し)
+    # 出力の形 (受け持ちは省くと生成する. 正解は無し. 表の列の符号化は
+    # 一式に写し, 1 件の形は省くと符号化した行の幅)
     output = {"form": form, **plain(dict(options or {}))}
     if "form" in (options or {}):
         raise ValueError("output_options に form は書けません (form で選ぶ)")
+    if form == "table":
+        if output.get("columns") is None:
+            raise ValueError(
+                "表の出力の形 (table) には output_options の columns (列の"
+                "符号化の並びか, その JSON のファイル) が要ります"
+            )
+        output["columns"] = plain(read_table_columns(output["columns"]))
+        errors = check_table_columns(output["columns"])
+        if errors:
+            raise ValueError("列の符号化の誤り: " + " / ".join(errors))
+        output.setdefault("shape", [table_width(output["columns"])])
     fields = {
         "role": role or "generate",
         "output": output,
@@ -2363,6 +2433,11 @@ def output_fields(
                 f"(form. {', '.join(FORMS)}) を選んでください"
             )
         form = form_of_task(task)
+    if form == "table":
+        raise ValueError(
+            "表の出力の形 (table) は雑音だけの一式 (データセット無し) だけに"
+            "使えます"
+        )
     output = {"form": form, **plain(dict(options or {}))}
     if "form" in (options or {}):
         raise ValueError("output_options に form は書けません (form で選ぶ)")

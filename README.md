@@ -5,7 +5,7 @@
 ## できること
 
 - **推論の一式**: モデルの定義 (ML-ModelControl), 学習した重み (ML-Found の実験), 前処理 (ML-EDA のデータセット) を 1 つのディレクトリにまとめ, 見本を推論できることを確かめてから作る
-- **予測**: 新しいデータに学習のときと同じ前処理をかけて推論し, クラスの名前と確率, 元の単位の値で返す. 予測できない行 (前処理の後に欠損がある, 中身を読めない) は理由を付けて飛ばす. 領域, 点群, ベクトル, 文などの出力と, 拡散のサンプリングのような繰り返しの手順も扱う
+- **予測**: 新しいデータに学習のときと同じ前処理をかけて推論し, クラスの名前と確率, 元の単位の値で返す. 予測できない行 (前処理の後に欠損がある, 中身を読めない) は理由を付けて飛ばす. 領域, 点群, ベクトル, 文, 作った表などの出力と, 拡散のサンプリングのような繰り返しの手順も扱う
 - **結論**: 確信の低いものを保留にする, 決めた確率で陽性を決める, 値を帯に分ける, 列の値ごとにまとめる. 全体のまとめを日本語の文でも返す
 - **何段も先の予測と列の効き**: 予測した値を次の入力に使って先の行を埋める. どの列が予測を動かしているかを並べ替えで求める
 - **意思決定**: 予測から次の行動 (量, 選ぶ対象, 人が確かめる対象) と見込みの得と損を出し, 過去のデータでたどり直して, 素朴なやり方と今のやり方 (問題の設定と同じ決まりでも書ける) と比べる. 新しい実績で外れ方を測り直す
@@ -111,10 +111,10 @@ write_result(result, "results/reviews")   # predictions.csv と result.yaml
 
 ### 構造のある出力, ベクトル, 繰り返しの手順 (一式の版 3)
 
-一式は受け持ち (`role`) と出力の形 (`form`: `class`, `value`, `distribution`, `mask`, `point_cloud`, `vector`, `text`, `image`) を持ち, 出力の形ごとに読み方を変える. 省くとタスクから決める (分類は `class`, 回帰と予測は `value`). 版 1 と 2 の一式もそのまま読める.
+一式は受け持ち (`role`) と出力の形 (`form`: `class`, `value`, `distribution`, `mask`, `point_cloud`, `vector`, `text`, `image`, `table`) を持ち, 出力の形ごとに読み方を変える. 省くとタスクから決める (分類は `class`, 回帰と予測は `value`). 版 1 と 2 の一式もそのまま読める.
 
 ```python
-from ml_inference import infer, make_bundle, write_result
+from ml_inference import infer, make_bundle, predict, write_result
 
 # 埋め込みのモデル (出力がベクトル). 正解の無いデータセットでも作れる
 make_bundle("bundles/embed", spec, "outputs/dataset", weights, form="vector")
@@ -130,7 +130,19 @@ make_bundle(
     procedure={"name": "ddim", "steps": 50, "seed": 0},
 )
 result = infer("bundles/gen", {"count": 8, "seed": 1})   # 同じ件数と種なら同じ出力
+
+# 表を作る拡散のモデル. 列の符号化 (ML-Quest の骨組みの table_columns.json) を
+# 一式に写し (版 7), 件数と種から列の名前と型のある表を返す
+make_bundle(
+    "bundles/rows", spec, None, run_dir, form="table",
+    output_options={"columns": f"{run_dir}/table_columns.json"},
+    inputs={"x": {"source": "state"}, "t": {"source": "time"}},
+    procedure={"name": "ddim", "steps": 50, "seed": 0},
+)
+rows = predict("bundles/rows", {"count": 100, "seed": 0})   # sample, seed, status, reason と表の列
 ```
+
+表の出力 (`table`) は, 符号化した行 (数の列は標準化, 種類の列はワンホット) を, 数の列は値 × `std` + `mean` (整数の列は丸める), 種類の列は区間で最も大きい値の種類に戻す (DESIGN の「表の出力の雑音だけの一式」). 結果は配列を持たないので, 書き出しは `predictions.csv` だけ.
 
 繰り返しの手順 (`ddim`, `euler`, `greedy`, `sample`) と学習済みの重みの置き方は, DESIGN の「繰り返しの手順」「学習済みの重みの置き方」. 学習済みの重みは, 定義の一番上のノードと部分モデル (`subgraphs`) の中のノードのどちらも, 再配布できるものだけ一式に写し, できないものは出どころから読んで hash で確かめる (外部の重みを重ねたもの, 学習で変わったもの, ライセンスか版を読めなかったものは, 注意を付けて一式に残す. DESIGN の「学習済みの重みの置き方」). 部分モデルの中のノードの情報を `pretrained` で渡すときは `block.inner.fc` のように外のノードの名前とつなぐ. 研究の自作の部品を使う一式は, 一式を読む前に `ml_inference.register_units(["my_lab.units"])` で部品を登録する (ML-Provide なら起動の `--units` か `ML_PROVIDE_UNITS`. DESIGN の「自作の部品」).
 
