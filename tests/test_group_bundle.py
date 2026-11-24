@@ -544,12 +544,20 @@ def test_group_summary(tmp_path: Path, group_run: Path) -> None:
     assert BASELINE in result["sentences"][2]
     assert list(result["frame"]["decision"][-2:]) == ["", "予測なし"]
 
-    # 書き出しは版 1 で, 読んだ表からも群の要約を作れる
+    # 書き出しは版 1 で, 読んだ表からも群の要約を作れる (CSV を通した
+    # 数は丸めの差まで)
     out = tmp_path / "result"
     write_result(result, out)
     loaded = read_result(out)
     assert loaded["format_version"] == 1
-    assert group_summary(root, loaded["frame"]) == rows
+    again = group_summary(root, loaded["frame"])
+    assert [list(row) for row in again] == [list(row) for row in rows]
+    for mine, theirs in zip(again, rows):
+        for key, value in theirs.items():
+            if isinstance(value, float):
+                assert mine[key] == pytest.approx(value)
+            else:
+                assert mine[key] == value
 
     # 割り当てた行が無ければ空. 結論の決め方は使えない
     assert group_summary(root, prediction.iloc[39:]) == []
