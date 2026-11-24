@@ -35,19 +35,21 @@ from ml_inference.weights import (
 
 # 推論の一式の形の版 (読める最も新しい版. 版 1 のデータセットの一式は
 # 版 3, 版 2 のデータセットの一式は版 4, 雑音だけの一式は版 5 (表の出力は
-# 版 7), 既製のモデルの一式は版 6, 並べるの一式は版 8 で書く)
-BUNDLE_FORMAT_VERSION = 8
+# 版 7), 既製のモデルの一式は版 6, 並べるの一式は版 8, 群分けの一式は
+# 版 9 で書く)
+BUNDLE_FORMAT_VERSION = 9
 COLUMN_BUNDLE_VERSION = 3
 ITEMS_BUNDLE_VERSION = 4
 NOISE_BUNDLE_VERSION = 5
 READY_BUNDLE_VERSION = 6
 TABLE_BUNDLE_VERSION = 7
 RANK_BUNDLE_VERSION = 8
+GROUP_BUNDLE_VERSION = 9
 
 # データセットを持たない一式の版
 DATASETLESS_VERSIONS = (
     NOISE_BUNDLE_VERSION, READY_BUNDLE_VERSION, TABLE_BUNDLE_VERSION,
-    RANK_BUNDLE_VERSION
+    RANK_BUNDLE_VERSION, GROUP_BUNDLE_VERSION
 )
 
 # inference.yaml の一番上の項目
@@ -55,7 +57,7 @@ TOP_KEYS = (
     "format_version", "name", "created_at", "role", "output", "target",
     "procedure", "model", "inputs", "dataset", "run", "conclusion",
     "decision", "check", "uncertainty", "notes", "items", "ready",
-    "calibrate", "rank"
+    "calibrate", "rank", "group"
 )
 
 # 出力の扱い方
@@ -76,6 +78,7 @@ FORM_KINDS = {
     "image": ("value",),
     "table": ("value",),
     "ranking": ("value",),
+    "cluster": ("value",),
 }
 FORMS = tuple(FORM_KINDS)
 
@@ -125,6 +128,11 @@ ITEM_METRICS = {"mask": "iou", "point_cloud": "chamfer"}
 # 並べるの出力の形を make_bundle に渡したときの誤り
 RANKING_ONLY = (
     "並べるの出力の形 (ranking) の一式は make_rank_bundle で作ってください"
+)
+
+# 群分けの出力の形を make_bundle に渡したときの誤り
+GROUP_ONLY = (
+    "群分けの出力の形 (cluster) の一式は make_group_bundle で作ってください"
 )
 
 
@@ -202,7 +210,8 @@ class Bundle:
         kind: str
             table, timeseries, image, text, pointcloud, audio, items
             (版 2 のデータセットの一式), noise (雑音だけの一式), ready
-            (既製のモデルの一式), rank (並べるの一式)
+            (既製のモデルの一式), rank (並べるの一式), group (群分けの
+            一式)
         """
         # 版 2 のデータセットの一式はファイルの組, 雑音だけの一式は雑音
         if self.from_items:
@@ -213,6 +222,9 @@ class Bundle:
             return kind
         if self.from_rank:
             kind = "rank"
+            return kind
+        if self.from_group:
+            kind = "group"
             return kind
         if self.from_noise:
             kind = "noise"
@@ -254,10 +266,10 @@ class Bundle:
         noise: bool
             dataset が null の一式 (版 5) なら True
         """
-        # dataset が null で, 既製のモデルの一式でも並べるの一式でもない
-        # 一式 (版 5 と, 表の出力の版 7)
+        # dataset が null で, 既製のモデルの一式でも並べるの一式でも群分け
+        # の一式でもない一式 (版 5 と, 表の出力の版 7)
         noise = self.info.get("dataset") is None and not (
-            self.from_ready or self.from_rank
+            self.from_ready or self.from_rank or self.from_group
         )
 
         return noise
@@ -301,6 +313,25 @@ class Bundle:
         rank = self.info.get("rank") is not None
 
         return rank
+
+    @property
+    def from_group(self) -> bool:
+        """
+        行を群に割り当てる一式かを返す関数
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        ----------
+        group: bool
+            group (列の符号化と群の中心) を持つ一式 (版 9) なら True
+        """
+        # 版 9 の group の有無
+        group = self.info.get("group") is not None
+
+        return group
 
     @property
     def mask_values(self) -> Optional[list[int]]:
@@ -374,7 +405,7 @@ class Bundle:
         ----------
         form: str
             class, value, distribution, mask, point_cloud, vector, text,
-            image, table, ranking のどれか
+            image, table, ranking, cluster のどれか
         """
         # 出力の形の説明の form
         form = str(self.output_info["form"])
@@ -819,6 +850,23 @@ def check_info(info: Any) -> list[str]:
         from ml_inference.ranking import check_rank_info
 
         errors.extend(check_rank_info(info))
+    if (output.get("form") == "cluster") != (
+        version == GROUP_BUNDLE_VERSION
+    ):
+        errors.append(
+            f"出力の形 cluster は版 {GROUP_BUNDLE_VERSION} の群分けの一式"
+            f"だけで, 版 {GROUP_BUNDLE_VERSION} の一式の出力の形は cluster "
+            "だけです"
+        )
+    if info.get("group") is not None and version != GROUP_BUNDLE_VERSION:
+        errors.append(
+            f"group を持つ一式は版 {GROUP_BUNDLE_VERSION} にしてください"
+        )
+    if version == GROUP_BUNDLE_VERSION:
+        # 群分けの一式の決まりは群分けのモジュールが持つ
+        from ml_inference.grouping import check_group_info
+
+        errors.extend(check_group_info(info))
 
     return errors
 
@@ -1351,6 +1399,10 @@ def load_bundle(path: Union[str, Path]) -> Bundle:
         from ml_inference.ranking import check_rank_bundle
 
         check_rank_bundle(bundle)
+    if bundle.from_group:
+        from ml_inference.grouping import check_group_bundle
+
+        check_group_bundle(bundle)
     if info.get("calibrate") is not None:
         classes = bundle.classes if (
             bundle.form == "class" and not bundle.from_ready
@@ -2313,6 +2365,8 @@ def noise_fields(
         )
     if form == "ranking":
         raise ValueError(RANKING_ONLY)
+    if form == "cluster":
+        raise ValueError(GROUP_ONLY)
 
     # 出力の形 (受け持ちは省くと生成する. 正解は無し. 表の列の符号化は
     # 一式に写し, 1 件の形は省くと符号化した行の幅)
@@ -2525,6 +2579,8 @@ def output_fields(
         )
     if form == "ranking":
         raise ValueError(RANKING_ONLY)
+    if form == "cluster":
+        raise ValueError(GROUP_ONLY)
     output = {"form": form, **plain(dict(options or {}))}
     if "form" in (options or {}):
         raise ValueError("output_options に form は書けません (form で選ぶ)")

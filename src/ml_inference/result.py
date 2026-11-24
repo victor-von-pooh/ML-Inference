@@ -15,6 +15,7 @@ from ml_inference.forecast import forecast as forecast_rows
 from ml_inference.predict import (
     ARRAY_FORMS, OK, noise_request, predict, target_of
 )
+from ml_inference.grouping import conclude_groups
 from ml_inference.ranking import conclude_ranking, request_users
 
 # 結果のファイル (result.yaml) の形の版 (表に収まらない中身が無ければ 1)
@@ -125,7 +126,8 @@ def infer(
         merged.pop("threshold", None)
     merged = {k: v for k, v in merged.items() if v is not None}
 
-    # 列の出力でない一式は, 推論と件数だけ (並べるの一式は利用者の人数)
+    # 列の出力でない一式は, 推論と件数だけ (並べるの一式は利用者の人数,
+    # 群分けの一式は群の要約も)
     if not bundle.column_output:
         if given or decision or forecast:
             bundle.require_column("結論の決め方, 意思決定, 何段も先の予測")
@@ -138,6 +140,7 @@ def infer(
             "created_at": dt.datetime.now().astimezone().isoformat(),
             "form": bundle.form,
             **(conclude_ranking(prediction) if bundle.from_rank
+               else conclude_groups(bundle, prediction) if bundle.from_group
                else conclude_outputs(prediction)),
         }
         return result
