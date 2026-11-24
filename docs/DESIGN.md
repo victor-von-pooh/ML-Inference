@@ -531,6 +531,30 @@ ready:
 - 目的の列のラベルは, 空欄で小数に読まれた値 (1.0) も整数のクラスの名前 (1) と比べる
 - 外れ方を測った分割の期間をたどり直すと甘くなるので, それより後の期間で比べる (過去の値の列のために前の行も渡し, `count` で後の期間だけを数える)
 
+#### 守る指標を数える (`guard`)
+
+`backtest(..., guard=...)` は, 守る指標 (引き換えに悪くしてはいけない数字) を, この方針の行動で数えて結果に並べる. 守る指標の名前と測り方は自由な文なので, 数えるのは, 型ごとにたどり直しで数えられる量の一覧 (`GUARD_COUNTS`) のうち, 守る指標が指した量だけにする.
+
+- 形は問題の設定の受け渡し (ML-Quest の推論の `guard`) の `name` (名前. 要る), `unit`, `better` (`lower` か `higher`), `line` (守る線. 有限の数), `measure` に, 指す量の名前 `counted` を足したもの. `counted` は型の一覧の名前か `None`. 一覧に無い名前, 崩れた向きと線, 名前の無い守る指標は誤り
+- 一覧 (`GUARD_COUNTS`) は型ごとに, 量の名前から説明 (`description`) と向き (`better`. `lower` は小さいほど良い) を持つ. 問題の設定が, 守る指標がどれを指すかの問いの選択肢に使う. 割合は 0 から 1
+
+| 型 | 名前 | 量 | 向き |
+| --- | --- | --- | --- |
+| `quantity` | `shortage_rate` | 足りなかった行の割合 | `lower` |
+| `quantity` | `shortage` | 足りなかった量の合計 (目的の列の単位) | `lower` |
+| `quantity` | `surplus` | 余った量の合計 (目的の列の単位) | `lower` |
+| `select` | `selected` | 選んだ件数 | `lower` |
+| `select` | `selected_cost` | 選んだ行の費用の合計 | `lower` |
+| `select` | `selected_hit_rate` | 選んだ行のうち当たりの割合 | `higher` |
+| `triage` | `routed` | 回した件数 | `lower` |
+| `triage` | `missed` | 見逃した件数 (回さなかった当たり) | `lower` |
+| `triage` | `false_alarms` | 空振りの件数 (回した外れ) | `lower` |
+
+- 結果の `guard` は `name`, `unit`, `counted`, `description`, `value` (数えた値), `line`, `better`, `kept` (守れたか), `note`. 向きは守る指標の `better` で, 無ければ量の向き. 線が無ければ `kept` は `None`. 選ぶ行が無く割合を数えられなければ `value` は `None` で, `note` にそう書く. 文にも「守る指標「…」(量の説明) は, この方針で x (守る線は y 以下. 守れた)」の形で並べる
+- 指していない (`counted` が `None`) 守る指標は数えず, `note` と文に `GUARD_UNCOUNTED` (「過去のデータでは数えられない. 課題の場で数える」) を並べる. `guard` を渡さなければ結果の `guard` は `None`
+- 数えるのはこの方針の行動だけで, 得と損の比べ (`policies`, `gaps`) は変えない
+- 外れ方の測り直し (`remeasure`) は方針を取らないので, 守る指標を数えない
+
 ### 今のやり方を決まりで書く (`current_from_baseline`)
 
 `current_from_baseline(data, baseline, target)` は, 今のやり方をデータの上で書いた決まりから, 行ごとの今のやり方の値の列 (`Series`. 名前は「今のやり方」, 行の並びと index は渡したデータと同じ) を作る. 決まりの形と値の求め方は問題の設定 (ML-Quest の `action.current`) と同じで, 問題の設定で求めた今のやり方の損と, 学習のプロジェクトの骨組みが比べる相手として求める値と, たどり直しの今のやり方が同じ値になるようにする.

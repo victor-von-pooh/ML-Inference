@@ -11,7 +11,9 @@ from ml_inference.conclude import (
     NO_PREDICTION, RULE_KEYS, UNDECIDED, check_rules, conclude,
     conclude_outputs, origin_sentence, summary_sentences
 )
-from ml_inference.decision import backtest, check_decision, decide
+from ml_inference.decision import (
+    GUARD_COUNTS, GUARD_UNCOUNTED, backtest, check_decision, decide
+)
 from ml_inference.explain import explain, explain_rows
 from ml_inference.forecast import forecast
 from ml_inference.items import POINT_KINDS, backproject, describe_items
@@ -44,6 +46,8 @@ __all__ = [
     "BUNDLE_FORMAT_VERSION",
     "Bundle",
     "FORMS",
+    "GUARD_COUNTS",
+    "GUARD_UNCOUNTED",
     "NO_PREDICTION",
     "GuardedPolicy",
     "OK",

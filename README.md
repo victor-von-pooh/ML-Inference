@@ -263,6 +263,18 @@ frame = pd.read_csv("last_month.csv")
 now = current_from_baseline(frame, rule, target="sales")   # 行ごとの今のやり方の量
 ```
 
+守る指標 (引き換えに悪くしてはいけない数字. 問題の設定の受け渡しの `guard`) は, 型ごとの数えられる量 (`GUARD_COUNTS`) のどれを指すか (`counted`) を足して渡すと, たどり直しがこの方針の行動で数え, 守る線を守れたかと並べる. 指していなければ「過去のデータでは数えられない. 課題の場で数える」と並べる (DESIGN の「守る指標を数える」).
+
+```python
+from ml_inference import GUARD_COUNTS, backtest
+
+print(list(GUARD_COUNTS["quantity"]))   # ['shortage_rate', 'shortage', 'surplus']
+guard = {"name": "欠品の割合", "unit": None, "better": "lower", "line": 0.1,
+         "measure": "棚が空いた日を数える", "counted": "shortage_rate"}
+result = backtest("bundles/sales", "last_month.csv", decision, guard=guard)
+print(result["guard"]["value"], result["guard"]["kept"])
+```
+
 損得の値は数か, 予測の表の列の名前. 文は「書いた損得と外れ方の記録が正しいとすれば」の前提を先に述べるので, 実際の差は `backtest` で確かめる. 値段を変える判断は扱わない (DESIGN の「意思決定」).
 
 選ぶと振り分けの型は確率を額面どおりに使う. 分類の確率がずれている (説明の `uncertainty.ece` が大きい) 一式は, 作るときに検証用の分割で確率を補正できる (`make_bundle(..., calibrate="platt")` か `"isotonic"`). 補正の前と後のずれは `calibrate.before` と `calibrate.after` に残り, 予測と意思決定は補正した確率を使う (DESIGN の「確率の補正」).
