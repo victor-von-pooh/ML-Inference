@@ -195,6 +195,21 @@ def test_backtest_guard_quantity(tmp_path: Path) -> None:
     )
     assert shortage["guard"]["kept"] is False
 
+    # 割合は % で書く. 線と等しければ守れた. 向きが higher なら逆
+    assert any(f"{100 * rate:.3g} %" in text and "50 %" in text
+               for text in result["sentences"])
+    equal = backtest(path, frame, decision, guard=dict(guard, line=rate))
+    assert equal["guard"]["kept"] is True
+    higher = dict(guard, better="higher")
+    assert backtest(path, frame, decision, guard=dict(
+        higher, line=rate
+    ))["guard"]["kept"] is True
+    above = backtest(path, frame, decision,
+                     guard=dict(higher, line=rate + 0.01))
+    assert above["guard"]["better"] == "higher"
+    assert above["guard"]["kept"] is False
+    assert any("以上. 守れなかった" in text for text in above["sentences"])
+
     # 向きを省けば量の向き, 線が無ければ守れたかは数えない
     loose = backtest(path, frame, decision,
                      guard=dict(guard, better=None, line=None))
@@ -212,7 +227,8 @@ def test_backtest_guard_quantity(tmp_path: Path) -> None:
 
     # 型に無い量, 崩れた向きと線, 名前の無い守る指標は誤り
     for wrong in (dict(guard, counted="missed"), dict(guard, better="up"),
-                  dict(guard, line=float("nan")), dict(guard, name=" ")):
+                  dict(guard, line=float("nan")), dict(guard, name=" "),
+                  dict(guard, counted=["shortage"]), dict(guard, line=True)):
         with pytest.raises(ValueError, match="守る指標"):
             backtest(path, frame, decision, guard=wrong)
 
@@ -321,6 +337,11 @@ def test_select_and_triage(tmp_path: Path) -> None:
         item = backtest(path, past, triage, guard=guard)["guard"]
         assert item["value"] == expected
         assert item["kept"] is True
+    assert acted.any()
+    tight = backtest(path, past, triage,
+                     guard={"name": "回す件数", "line": 0,
+                            "counted": "routed"})["guard"]
+    assert tight["kept"] is False
 
     # 選ぶ: 選んだ件数, 費用, 当たりの割合
     valued = past.assign(value=1000.0)
@@ -333,6 +354,14 @@ def test_select_and_triage(tmp_path: Path) -> None:
         guard = {"name": counted, "counted": counted}
         item = backtest(path, valued, select, guard=guard)["guard"]
         assert item["value"] == pytest.approx(expected)
+
+    # 選んだ行が無ければ, 当たりの割合は数えない
+    empty = backtest(path, past.assign(value=0.0), select, guard={
+        "name": "当たりの割合", "line": 0.5, "counted": "selected_hit_rate"
+    })
+    assert empty["guard"]["value"] is None
+    assert empty["guard"]["kept"] is None
+    assert any("数える行が無いので" in text for text in empty["sentences"])
 
 
 def test_uplift_effect(tmp_path: Path) -> None:
@@ -396,6 +425,8 @@ def test_uplift_effect(tmp_path: Path) -> None:
     past = frame.assign(label=["yes", "no", "no", "yes"])
     with pytest.raises(ValueError, match="無作為"):
         backtest(path, past, select)
+    with pytest.raises(ValueError, match="無作為"):
+        backtest(path, past, select, guard={"name": "苦情", "counted": None})
 
 
 def test_current_flags(tmp_path: Path) -> None:

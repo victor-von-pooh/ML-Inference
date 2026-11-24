@@ -269,6 +269,7 @@ now = current_from_baseline(frame, rule, target="sales")   # 行ごとの今の�
 from ml_inference import GUARD_COUNTS, backtest
 
 print(list(GUARD_COUNTS["quantity"]))   # ['shortage_rate', 'shortage', 'surplus']
+# decision は上の例の量の決め方
 guard = {"name": "欠品の割合", "unit": None, "better": "lower", "line": 0.1,
          "measure": "棚が空いた日を数える", "counted": "shortage_rate"}
 result = backtest("bundles/sales", "last_month.csv", decision, guard=guard)

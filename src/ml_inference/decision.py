@@ -1878,7 +1878,9 @@ def check_guard(guard: Optional[dict], kind: str) -> list[str]:
         errors.append("守る指標の name を書いてください")
     counted = guard.get("counted")
     counts = GUARD_COUNTS.get(kind, {})
-    if counted is not None and counted not in counts:
+    if counted is not None and (
+        not isinstance(counted, str) or counted not in counts
+    ):
         errors.append(
             f"守る指標の counted は {', '.join(counts)} のどれかか, "
             "None にしてください"
@@ -1991,7 +1993,11 @@ def guard_result(
         item["note"] = "数える行が無い"
         return item, (f"守る指標「{name}」({count['description']}) は, "
                       "数える行が無いので数えなかった")
-    text = f"{amount_text(value)}{f' {unit}' if unit else ''}"
+    # 割合 (0 から 1) は値も線も % で書く
+    scale, mark = (100, " %") if counted.endswith("_rate") else (1, "")
+    text = f"{amount_text(scale * value)}{mark}" + (
+        f" {unit}" if unit else ""
+    )
     if line is None:
         return item, (f"守る指標「{name}」({count['description']}) は, "
                       f"この方針で {text} (守る線は無い)")
@@ -2001,7 +2007,8 @@ def guard_result(
     verdict = "守れた" if item["kept"] else "守れなかった"
     sentence = (
         f"守る指標「{name}」({count['description']}) は, この方針で "
-        f"{text} (守る線は {amount_text(line)} {side}. {verdict})"
+        f"{text} (守る線は {amount_text(scale * line)}{mark} {side}. "
+        f"{verdict})"
     )
 
     return item, sentence
