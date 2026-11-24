@@ -254,8 +254,8 @@ class Bundle:
         noise: bool
             dataset が null の一式 (版 5) なら True
         """
-        # 版 5 の dataset の有無 (既製のモデルの一式と並べるの一式も
-        # データセットを持たない)
+        # dataset が null で, 既製のモデルの一式でも並べるの一式でもない
+        # 一式 (版 5 と, 表の出力の版 7)
         noise = self.info.get("dataset") is None and not (
             self.from_ready or self.from_rank
         )

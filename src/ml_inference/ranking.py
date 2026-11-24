@@ -39,7 +39,8 @@ RANK_COLUMNS = {"user": "user", "item": "item", "reaction": None}
 RANK_KEYS = ("index", "embeddings", "users", "items", "width", "scale", "k",
              "columns")
 
-# 点数と内積の定数倍を確かめる見本の利用者と品物の数, 合うとみなす差
+# 点数と内積の定数倍を確かめる見本の利用者と品物の, 先頭と等間隔の
+# それぞれの数, 合うとみなす差
 SCALE_USERS = 8
 SCALE_ITEMS = 256
 SCALE_TOLERANCE = 1e-4
@@ -398,6 +399,31 @@ def item_index(
     return embeddings
 
 
+def sample_numbers(size: int, count: int) -> np.ndarray:
+    """
+    確かめの見本の番号 (先頭の count 個と, 全体から等間隔の count 個) を
+    返す関数
+
+    Parameters
+    ----------
+    size: int
+        番号の数
+    count: int
+        先頭と等間隔のそれぞれの数
+
+    Returns
+    ----------
+    numbers: np.ndarray
+        重ならない番号の小さい順 (size が count 以下なら全ての番号)
+    """
+    # 先頭だけでは後ろの番号の重みの誤りに気付けないため, 等間隔も混ぜる
+    head = np.arange(min(count, size))
+    spread = np.linspace(0, size - 1, min(count, size)).round()
+    numbers = np.unique(np.concatenate([head, spread.astype(np.int64)]))
+
+    return numbers
+
+
 def score_scale(
     model: Any, spec: dict, sizes: tuple, embeddings: np.ndarray, device: str
 ) -> float:
@@ -428,9 +454,11 @@ def score_scale(
         点数の形が違う場合, 品物の埋め込みが利用者に依る場合, 点数が内積の
         正の定数倍でない場合
     """
-    # 見本の利用者と品物の全ての組の点数と, 埋め込みの内積
-    users = np.arange(min(SCALE_USERS, sizes[0]))
-    items = np.arange(min(SCALE_ITEMS, sizes[1]))
+    # 見本 (先頭と等間隔の利用者と品物) の全ての組の点数と, 埋め込みの
+    # 内積
+    users = sample_numbers(sizes[0], SCALE_USERS)
+    items = sample_numbers(sizes[1], SCALE_ITEMS)
+    chosen = embeddings[items].astype(np.float64)
     found = tower_outputs(model, spec, users, items, sizes, device)
     score = found[SCORE_OUTPUT]
     if score.shape != (len(users), len(items)):
@@ -438,15 +466,13 @@ def score_scale(
             f"{SCORE_OUTPUT} の形 {tuple(score.shape)} が (利用者の件数, "
             f"品物の件数) = ({len(users)}, {len(items)}) ではありません"
         )
-    if not np.allclose(found[ITEM_EMBEDDING], embeddings[:len(items)],
+    if not np.allclose(found[ITEM_EMBEDDING], chosen,
                        rtol=SCALE_TOLERANCE, atol=SCALE_TOLERANCE):
         raise ValueError(
             f"{ITEM_EMBEDDING} が一緒に渡した利用者で変わります (品物の塔"
             "が品物の入力だけから埋め込みを作るモデルにしてください)"
         )
-    inner = found[USER_EMBEDDING] @ embeddings[:len(items)].astype(
-        np.float64
-    ).T
+    inner = found[USER_EMBEDDING] @ chosen.T
 
     # 最小二乗の倍率で, 全ての組が合うか
     power = float((inner * inner).sum())
@@ -914,8 +940,17 @@ def top_of(
         (利用者の件数, K) の品物の番号と点数 (同じ点数なら番号の小さい
         品物が先. 除いた品物は点数が -inf)
     """
-    # 安定な並べ替えで, 同じ点数は番号の順
-    order = np.argsort(-scores, axis=1, kind="stable")[:, :k]
+    # 全ての品物は並べ替えず, K 番目の点数以上の品物 (同じ点数の品物は
+    # 全て) だけを, 点数の高い順, 同じ点数は番号の順に並べる
+    size = scores.shape[1]
+    k = min(k, size)
+    order = np.zeros((len(scores), k), dtype=np.int64)
+    for row, values in enumerate(-scores):
+        found = np.arange(size)
+        if k < size:
+            cut = np.partition(values, k - 1)[k - 1]
+            found = np.flatnonzero(values <= cut)
+        order[row] = found[np.lexsort((found, values[found]))][:k]
     picked = (order, np.take_along_axis(scores, order, axis=1))
 
     return picked
@@ -1073,21 +1108,27 @@ def rank_metrics(
     seen: Union[str, Path, pd.DataFrame, None] = None
         前に反応した品物の表 (渡すと, 正解から除く)
     k: Optional[int] = None
-        K (省くと予測の表の件数か, 一式の rank.k)
+        K (省くと予測の表の attrs の k, 無ければ表の最大の順位, 並べた
+        行が無ければ一式の rank.k)
 
     Returns
     ----------
     metrics: dict
         users (数えた利用者の数), k, recall_at_k, ndcg (数える利用者が
-        いなければ None)
+        いなければ 0.0)
     """
     # 正解は, 番号の表にある品物のうち前に反応していないもの
     if not isinstance(bundle, Bundle):
         bundle = load_bundle(bundle)
     if not bundle.from_rank:
         raise ValueError("rank_metrics は並べるの一式だけに使えます")
+    done = prediction[prediction["status"] == OK]
     if k is None:
-        k = prediction.attrs.get("k") or bundle.info["rank"]["k"]
+        k = prediction.attrs.get("k")
+    if k is None and len(done):
+        k = int(done["rank"].max())
+    if k is None:
+        k = bundle.info["rank"]["k"]
     if not is_count(k):
         raise ValueError(f"k は 1 以上の整数にしてください (今は {k})")
     relevant = reaction_pairs(bundle, truth, "正解の反応の表")
@@ -1097,20 +1138,25 @@ def rank_metrics(
                     for u, items in relevant.items()}
 
     # 並べた利用者ごとの上位 K 件 (表の順は利用者ごとの順位の順. 同じ
-    # 利用者を 2 度渡した表は初めの並びだけ)
+    # 利用者を 2 度渡した表は初めの並びだけ). 前に反応した品物を除くと
+    # 残りが無い利用者は, 空の上位として数える (ML-Quest の骨組みと同じ)
     index = bundle.cache["rank_index"]
     users = {str(v): n for n, v in enumerate(index["users"])}
     items = {str(v): n for n, v in enumerate(index["items"])}
-    done = prediction[prediction["status"] == OK]
+    counted = prediction[(prediction["status"] == OK) | (
+        prediction["reason"] == NOTHING_LEFT
+    )]
     top: dict = {}
     current = None
-    for user, place, item in zip(done["user"], done["rank"], done["item"]):
-        if int(place) == 1:
+    for user, status, place, item in zip(
+        counted["user"], counted["status"], counted["rank"], counted["item"]
+    ):
+        if status != OK or int(place) == 1:
             current = users.get(str(user))
             current = None if current in top else current
             if current is not None:
                 top[current] = []
-        if current is not None:
+        if current is not None and status == OK:
             top[current].append(items.get(str(item)))
 
     # Recall@K は正解の全数で割り, NDCG は min(K, 正解の数) 件の理想と比べる
@@ -1124,11 +1170,13 @@ def rank_metrics(
         ideal = sum(1 / math.log2(r + 1)
                     for r in range(1, min(k, len(wanted)) + 1))
         gains.append(sum(1 / math.log2(r + 1) for r in hits) / ideal)
+    # 数える利用者がいなければ 0 (ML-Quest の骨組みと同じ)
+    count = max(len(recalls), 1)
     metrics = {
         "users": len(recalls),
         "k": k,
-        "recall_at_k": float(np.mean(recalls)) if recalls else None,
-        "ndcg": float(np.mean(gains)) if gains else None,
+        "recall_at_k": float(sum(recalls) / count),
+        "ndcg": float(sum(gains) / count),
     }
 
     return metrics
