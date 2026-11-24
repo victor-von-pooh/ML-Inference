@@ -35,17 +35,19 @@ from ml_inference.weights import (
 
 # 推論の一式の形の版 (読める最も新しい版. 版 1 のデータセットの一式は
 # 版 3, 版 2 のデータセットの一式は版 4, 雑音だけの一式は版 5 (表の出力は
-# 版 7), 既製のモデルの一式は版 6 で書く)
-BUNDLE_FORMAT_VERSION = 7
+# 版 7), 既製のモデルの一式は版 6, 並べるの一式は版 8 で書く)
+BUNDLE_FORMAT_VERSION = 8
 COLUMN_BUNDLE_VERSION = 3
 ITEMS_BUNDLE_VERSION = 4
 NOISE_BUNDLE_VERSION = 5
 READY_BUNDLE_VERSION = 6
 TABLE_BUNDLE_VERSION = 7
+RANK_BUNDLE_VERSION = 8
 
 # データセットを持たない一式の版
 DATASETLESS_VERSIONS = (
-    NOISE_BUNDLE_VERSION, READY_BUNDLE_VERSION, TABLE_BUNDLE_VERSION
+    NOISE_BUNDLE_VERSION, READY_BUNDLE_VERSION, TABLE_BUNDLE_VERSION,
+    RANK_BUNDLE_VERSION
 )
 
 # inference.yaml の一番上の項目
@@ -53,7 +55,7 @@ TOP_KEYS = (
     "format_version", "name", "created_at", "role", "output", "target",
     "procedure", "model", "inputs", "dataset", "run", "conclusion",
     "decision", "check", "uncertainty", "notes", "items", "ready",
-    "calibrate"
+    "calibrate", "rank"
 )
 
 # 出力の扱い方
@@ -73,6 +75,7 @@ FORM_KINDS = {
     "text": ("logits",),
     "image": ("value",),
     "table": ("value",),
+    "ranking": ("value",),
 }
 FORMS = tuple(FORM_KINDS)
 
@@ -118,6 +121,11 @@ METRIC_NAMES = {
 
 # 版 2 のデータセットの一式の, 出力の形ごとの確かめの指標
 ITEM_METRICS = {"mask": "iou", "point_cloud": "chamfer"}
+
+# 並べるの出力の形を make_bundle に渡したときの誤り
+RANKING_ONLY = (
+    "並べるの出力の形 (ranking) の一式は make_rank_bundle で作ってください"
+)
 
 
 @dataclass
@@ -194,7 +202,7 @@ class Bundle:
         kind: str
             table, timeseries, image, text, pointcloud, audio, items
             (版 2 のデータセットの一式), noise (雑音だけの一式), ready
-            (既製のモデルの一式)
+            (既製のモデルの一式), rank (並べるの一式)
         """
         # 版 2 のデータセットの一式はファイルの組, 雑音だけの一式は雑音
         if self.from_items:
@@ -202,6 +210,9 @@ class Bundle:
             return kind
         if self.from_ready:
             kind = "ready"
+            return kind
+        if self.from_rank:
+            kind = "rank"
             return kind
         if self.from_noise:
             kind = "noise"
@@ -243,9 +254,11 @@ class Bundle:
         noise: bool
             dataset が null の一式 (版 5) なら True
         """
-        # 版 5 の dataset の有無 (既製のモデルの一式もデータセットを持た
-        # ない)
-        noise = self.info.get("dataset") is None and not self.from_ready
+        # dataset が null で, 既製のモデルの一式でも並べるの一式でもない
+        # 一式 (版 5 と, 表の出力の版 7)
+        noise = self.info.get("dataset") is None and not (
+            self.from_ready or self.from_rank
+        )
 
         return noise
 
@@ -268,6 +281,26 @@ class Bundle:
         ready = self.info.get("ready") is not None
 
         return ready
+
+    @property
+    def from_rank(self) -> bool:
+        """
+        利用者ごとに品物を並べる一式かを返す関数
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        ----------
+        rank: bool
+            rank (番号の表と品物の埋め込みの索引) を持つ一式 (版 8) なら
+            True
+        """
+        # 版 8 の rank の有無
+        rank = self.info.get("rank") is not None
+
+        return rank
 
     @property
     def mask_values(self) -> Optional[list[int]]:
@@ -341,7 +374,7 @@ class Bundle:
         ----------
         form: str
             class, value, distribution, mask, point_cloud, vector, text,
-            image, table のどれか
+            image, table, ranking のどれか
         """
         # 出力の形の説明の form
         form = str(self.output_info["form"])
@@ -771,6 +804,21 @@ def check_info(info: Any) -> list[str]:
         )
     if version == READY_BUNDLE_VERSION:
         errors.extend(check_ready_info(info))
+    if (output.get("form") == "ranking") != (version == RANK_BUNDLE_VERSION):
+        errors.append(
+            f"出力の形 ranking は版 {RANK_BUNDLE_VERSION} の並べるの一式だけ"
+            f"で, 版 {RANK_BUNDLE_VERSION} の一式の出力の形は ranking だけ"
+            "です"
+        )
+    if info.get("rank") is not None and version != RANK_BUNDLE_VERSION:
+        errors.append(
+            f"rank を持つ一式は版 {RANK_BUNDLE_VERSION} にしてください"
+        )
+    if version == RANK_BUNDLE_VERSION:
+        # 並べるの一式の決まりは並べるのモジュールが持つ
+        from ml_inference.ranking import check_rank_info
+
+        errors.extend(check_rank_info(info))
 
     return errors
 
@@ -1299,6 +1347,10 @@ def load_bundle(path: Union[str, Path]) -> Bundle:
         )
     check_items_bundle(bundle)
     check_ready_spec(bundle)
+    if bundle.from_rank:
+        from ml_inference.ranking import check_rank_bundle
+
+        check_rank_bundle(bundle)
     if info.get("calibrate") is not None:
         classes = bundle.classes if (
             bundle.form == "class" and not bundle.from_ready
@@ -1740,30 +1792,9 @@ def make_bundle(
         )
 
     # 学習済みの重みを読むノードの置き方 (無ければ丸ごとの写し)
-    infos, weight_notes = lookup_pretrained(spec_dict, pretrained)
-    records: list = []
-    kept = None
-    if infos:
-        spec_dict = pin_spec(spec_dict, infos)
-        state = torch.load(source, map_location="cpu", weights_only=True)
-        fresh = build_model(
-            spec_dict, seed=0, load_weights=False
-        ).state_dict()
-        records, kept, notes = place_weights(
-            infos, state, fresh, copy_weights, spec_dict
-        )
-        weight_notes.extend(notes)
-
-    # ライセンスを確かめずに一式に写す重みの注意 (写す場合だけ. 置き方の
-    # 注意でライセンスを確かめるよう書いたノードは除く)
-    if copy_weights:
-        noted = {
-            str(r["node"]) for r in records if not r["redistributable"]
-        }
-        looked = None if pretrained is None else {
-            str(node) for node in pretrained
-        }
-        weight_notes.extend(unchecked_notes(spec_dict, noted, looked))
+    spec_dict, records, kept, weight_notes = plan_weights(
+        spec_dict, source, pretrained, copy_weights
+    )
 
     # 隣の一時ディレクトリに作り, 確かめてから入れ替える
     writing = final.with_name(f".{final.name}.writing")
@@ -1871,6 +1902,58 @@ def make_bundle(
     writing.rename(final)
 
     return info
+
+
+def plan_weights(
+    spec: dict, source: Path, pretrained: Optional[dict], copy_weights: bool
+) -> tuple[dict, list, Optional[dict], list[str]]:
+    """
+    学習済みの重みを読むノードの置き方と, 一式に写す重みを決める関数
+
+    Parameters
+    ----------
+    spec: dict
+        モデルの定義
+    source: Path
+        重みのファイル
+    pretrained: Optional[dict]
+        ノードの名前ごとの重みのライセンスの情報 (省略すると
+        pretrained_info で読む)
+    copy_weights: bool
+        重みを一式に写すか
+
+    Returns
+    ----------
+    plan: tuple[dict, list, Optional[dict], list[str]]
+        版を固定した定義, model.pretrained の記録, 一式に写す重み (丸ごと
+        写すなら None), 注意の文
+    """
+    # 学習済みの重みを読むノードの置き方 (無ければ丸ごとの写し)
+    infos, notes = lookup_pretrained(spec, pretrained)
+    records: list = []
+    kept = None
+    if infos:
+        spec = pin_spec(spec, infos)
+        state = torch.load(source, map_location="cpu", weights_only=True)
+        fresh = build_model(spec, seed=0, load_weights=False).state_dict()
+        records, kept, placed = place_weights(
+            infos, state, fresh, copy_weights, spec
+        )
+        notes.extend(placed)
+
+    # ライセンスを確かめずに一式に写す重みの注意 (写す場合だけ. 置き方の
+    # 注意でライセンスを確かめるよう書いたノードは除く)
+    if copy_weights:
+        noted = {
+            str(r["node"]) for r in records if not r["redistributable"]
+        }
+        looked = None if pretrained is None else {
+            str(node) for node in pretrained
+        }
+        notes.extend(unchecked_notes(spec, noted, looked))
+    plan = (spec, records, kept, notes)
+
+    return plan
 
 
 def make_ready_bundle(
@@ -2228,6 +2311,8 @@ def noise_fields(
             "雑音だけの一式 (データセット無し) では出力の形 (form) を選んで"
             "ください"
         )
+    if form == "ranking":
+        raise ValueError(RANKING_ONLY)
 
     # 出力の形 (受け持ちは省くと生成する. 正解は無し. 表の列の符号化は
     # 一式に写し, 1 件の形は省くと符号化した行の幅)
@@ -2438,6 +2523,8 @@ def output_fields(
             "表の出力の形 (table) は雑音だけの一式 (データセット無し) だけに"
             "使えます"
         )
+    if form == "ranking":
+        raise ValueError(RANKING_ONLY)
     output = {"form": form, **plain(dict(options or {}))}
     if "form" in (options or {}):
         raise ValueError("output_options に form は書けません (form で選ぶ)")

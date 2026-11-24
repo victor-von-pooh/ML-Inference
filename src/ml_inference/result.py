@@ -15,6 +15,7 @@ from ml_inference.forecast import forecast as forecast_rows
 from ml_inference.predict import (
     ARRAY_FORMS, OK, noise_request, predict, target_of
 )
+from ml_inference.ranking import conclude_ranking, request_users
 
 # 結果のファイル (result.yaml) の形の版 (表に収まらない中身が無ければ 1)
 RESULT_FORMAT_VERSION = 2
@@ -46,12 +47,16 @@ def source_text(bundle: Bundle, source: Any) -> Optional[str]:
     Returns
     ----------
     text: Optional[str]
-        パスはそのまま, 雑音だけの一式は「件数 n, 種 s」, 他は None
+        パスはそのまま, 雑音だけの一式は「件数 n, 種 s」, 並べるの一式は
+        「利用者 n 人」, 他は None
     """
-    # 雑音だけの一式は件数と種
+    # 雑音だけの一式は件数と種, 並べるの一式は利用者の人数
     if bundle.from_noise:
         count, seed = noise_request(bundle, source)
         text: Optional[str] = f"件数 {count}, 種 {seed}"
+        return text
+    if bundle.from_rank:
+        text = f"利用者 {len(request_users(bundle, source)):,} 人"
         return text
     text = str(source) if isinstance(source, (str, Path)) else None
 
@@ -63,7 +68,8 @@ def infer(
     source: Union[str, Path, pd.DataFrame, Data, dict],
     rules: Optional[dict] = None, options: Optional[dict] = None,
     batch_size: int = 256, device: str = "cpu", forecast: bool = False,
-    decision: Optional[dict] = None
+    decision: Optional[dict] = None, k: Optional[int] = None,
+    seen: Union[str, Path, pd.DataFrame, None] = None
 ) -> dict:
     """
     新しいデータを推論し, 結論まで出す関数
@@ -72,8 +78,9 @@ def infer(
     ----------
     bundle: Union[str, Path, Bundle]
         推論の一式かそのディレクトリ
-    source: Union[str, Path, pd.DataFrame, Data, dict]
-        推論するデータ (雑音だけの一式は件数と種の辞書)
+    source: Union[str, Path, pd.DataFrame, Data, dict, list]
+        推論するデータ (雑音だけの一式は件数と種の辞書. 並べるの一式は
+        利用者の値の並びか利用者の列を持つ表)
     rules: Optional[dict] = None
         結論の決め方 (一式の既定値に上書きする. 値を None にすると消す)
     options: Optional[dict] = None
@@ -88,6 +95,10 @@ def infer(
     decision: Optional[dict] = None
         意思決定の決め方 (渡すと, 行ごとの行動と見込みも出す. 省略すると
         一式の既定値. 空の辞書で意思決定しない)
+    k: Optional[int] = None
+        並べるの一式の, 利用者ごとに並べる件数 (省くと一式の rank.k)
+    seen: Union[str, Path, pd.DataFrame, None] = None
+        並べるの一式の, 前に反応した品物の表 (渡すと除いて並べる)
 
     Returns
     ----------
@@ -114,20 +125,27 @@ def infer(
         merged.pop("threshold", None)
     merged = {k: v for k, v in merged.items() if v is not None}
 
-    # 列の出力でない一式は, 推論と件数だけ
+    # 列の出力でない一式は, 推論と件数だけ (並べるの一式は利用者の人数)
     if not bundle.column_output:
         if given or decision or forecast:
             bundle.require_column("結論の決め方, 意思決定, 何段も先の予測")
-        prediction = predict(bundle, source, options, batch_size, device)
+        prediction = predict(bundle, source, options, batch_size, device,
+                             k=k, seen=seen)
         result = {
             "bundle": {"name": bundle.info.get("name"),
                        "path": str(bundle.path)},
             "source": source_text(bundle, source),
             "created_at": dt.datetime.now().astimezone().isoformat(),
             "form": bundle.form,
-            **conclude_outputs(prediction),
+            **(conclude_ranking(prediction) if bundle.from_rank
+               else conclude_outputs(prediction)),
         }
         return result
+    if k is not None or seen is not None:
+        raise ValueError(
+            "並べる件数 (k) と前に反応した品物の表 (seen) は, 並べるの一式"
+            "だけに渡せます"
+        )
 
     # 予測 (何段も先の予測は先の行だけ) と結論
     if forecast:

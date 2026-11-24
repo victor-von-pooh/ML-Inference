@@ -11,6 +11,7 @@
 - **意思決定**: 予測から次の行動 (量, 選ぶ対象, 人が確かめる対象) と見込みの得と損を出し, 過去のデータでたどり直して, 素朴なやり方と今のやり方 (問題の設定と同じ決まりでも書ける) と比べる. 新しい実績で外れ方を測り直す
 - **方策の一式**: ML-Found が書き出す強化学習の方策を読み, 観測から行動と守り (行動の範囲, 止める条件, 外れたときの動き) の結果を返す. 実機では動かさない
 - **既製のモデルの一式**: 学習しない既製のモデル (torchvision の学習済みの画像の分類など) を, 重みの版と hash を固定し, 種類の名前の表と前処理を持たせて一式にする
+- **並べるの一式**: 利用者と品物の 2 塔のモデル (ML-Quest の並べるの骨組みの実験) から, 品物の埋め込みを索引に持つ一式を作り, 利用者ごとに上位 K 件の品物と点数を返す. 前に反応した品物を除くかを選べ, 後の反応から Recall@K と NDCG を数える
 - **見本の一式**: 表か文のデータから小さなモデルをその場で学習し, 画面で操作を試すための一式を作る
 
 前処理は [ML-EDA](https://github.com/victor-von-pooh/ML-EDA), モデルの組み立ては [ML-ModelControl](https://github.com/victor-von-pooh/ML-ModelControl) を使い, [ML-Found](https://github.com/victor-von-pooh/ML-Found) で学習した重みを読む.
@@ -19,7 +20,7 @@
 
 | 相手 | 使うもの |
 | --- | --- |
-| ML-Provide (推論) | 推論の一式の作成と確かめ, 版 2 のデータセットの説明 (`describe_items`), 予測と同じデータの読み込み (`read_source`), 正解の種類と出どころ (`target_of`, `origin_sentence`), 結論 (決め方の項目 `RULE_KEYS`, 件数だけの結論 `conclude_outputs`, まとめからの文 `summary_sentences`), 撮影の深度から点 (`backproject`), 意思決定, 先の予測と列の効き, 方策の一式. 自作の繰り返しの手順 (`register_procedure`, `PROCEDURES`) と自作の部品 (`register_units`) の登録. 問題の設定 (ML-Quest) の損得と今のやり方は, 画面が引数で渡す |
+| ML-Provide (推論) | 推論の一式の作成と確かめ (並べるの一式は `make_rank_bundle` と `rank_metrics`), 版 2 のデータセットの説明 (`describe_items`), 予測と同じデータの読み込み (`read_source`), 正解の種類と出どころ (`target_of`, `origin_sentence`), 結論 (決め方の項目 `RULE_KEYS`, 件数だけの結論 `conclude_outputs`, まとめからの文 `summary_sentences`), 撮影の深度から点 (`backproject`), 意思決定, 先の予測と列の効き, 方策の一式. 自作の繰り返しの手順 (`register_procedure`, `PROCEDURES`) と自作の部品 (`register_units`) の登録. 問題の設定 (ML-Quest) の損得と今のやり方は, 画面が引数で渡す |
 | ML-Found の学習のスクリプト (ML-Quest の骨組みを含む) | 学習の後に `make_bundle` で実験のディレクトリの中に一式を作る |
 
 ## 導入
@@ -183,6 +184,32 @@ description = describe_bundle("bundles/resnet18")
 len(description["classes"])            # 1000 (tench, goldfish, ...)
 description["ready"]["license"]        # ライセンスの警告 (torchvision は unknown)
 result = infer("bundles/resnet18", "photos/")   # prediction は種類の名前
+```
+
+### 利用者ごとに品物を並べる (一式の版 8)
+
+並べるの実験 (重み `final_model.pt`, 定義 `model_spec.yaml`, 利用者と品物の番号の表 `rank_index.json`) から一式を作る. モデルの入力は利用者と品物の番号のワンホット `user` と `item`, 出力は点数 `score` と埋め込み `user_embedding`, `item_embedding`. 作るときに全ての品物の埋め込みを索引にし, 点数が埋め込みの内積の定数倍であることを確かめる.
+
+```python
+import pandas as pd
+from ml_inference import infer, make_rank_bundle, predict, rank_metrics
+
+# k と列の名前は問題の設定 (ML-Quest の受け渡し) の rank から
+make_rank_bundle("bundles/shop", "outputs/shop/run", k=10,
+                 columns={"user": "member", "item": "item_id",
+                          "reaction": "qty"})
+
+# 利用者ごとの上位 10 件 (user, status, reason, rank, item, score の表)
+seen = pd.read_csv("reactions.csv")             # 前に反応した品物を除くとき
+frame = predict("bundles/shop", ["m001", "m002", "m999"], seen=seen)
+# m999 は番号の表に無いので status が skipped (理由付き)
+
+result = infer("bundles/shop", ["m001", "m002"], k=5)
+result["sentences"]   # ['利用者 2 人のうち 2 人に, 上位 5 件の品物を並べた']
+
+# 後の反応で確かめる (前の反応は正解から除く)
+rank_metrics("bundles/shop", frame, truth=pd.read_csv("later.csv"),
+             seen=seen)  # {'users': ..., 'k': 10, 'recall_at_k': ..., 'ndcg': ...}
 ```
 
 ### 何段も先を予測する
