@@ -28,6 +28,7 @@ from ml_inference.procedures import (
     PROCEDURES, get_procedure, make_generator, procedure_options,
     register_procedure, run_procedure, start_noise
 )
+from ml_inference.ranking import make_rank_bundle, rank_metrics
 from ml_inference.ready import READY_LIBRARIES
 from ml_inference.remeasure import remeasure, restore_uncertainty
 from ml_inference.result import (
@@ -83,11 +84,13 @@ __all__ = [
     "load_policy",
     "make_bundle",
     "make_generator",
+    "make_rank_bundle",
     "make_ready_bundle",
     "make_sample_bundle",
     "origin_sentence",
     "predict",
     "procedure_options",
+    "rank_metrics",
     "read_policy_spec",
     "read_result",
     "read_source",

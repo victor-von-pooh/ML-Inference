@@ -17,6 +17,7 @@ from ml_inference.items import (
 from ml_inference.procedures import (
     get_procedure, make_generator, run_procedure, start_noise
 )
+from ml_inference.ranking import predict_rank, rank_of_bundle
 from ml_inference.ready import prepare_ready, weights_file
 from ml_inference.tables import decode_table_rows, table_width
 from ml_inference.texts import ids_to_text, text_vocabulary
@@ -1194,9 +1195,10 @@ DECODERS = {
 
 def predict(
     bundle: Union[str, Path, Bundle],
-    source: Union[str, Path, pd.DataFrame, Data, dict],
+    source: Union[str, Path, pd.DataFrame, Data, dict, list],
     options: Optional[dict] = None, batch_size: int = 256,
-    device: str = "cpu"
+    device: str = "cpu", k: Optional[int] = None,
+    seen: Union[str, Path, pd.DataFrame, None] = None
 ) -> pd.DataFrame:
     """
     新しいデータを前処理して推論し, 行ごとの予測を返す関数
@@ -1205,22 +1207,27 @@ def predict(
     ----------
     bundle: Union[str, Path, Bundle]
         推論の一式かそのディレクトリ
-    source: Union[str, Path, pd.DataFrame, Data, dict]
+    source: Union[str, Path, pd.DataFrame, Data, dict, list]
         推論するデータ (雑音だけの一式は件数と種の辞書 {"count": n,
-        "seed": s})
+        "seed": s}. 並べるの一式は利用者の値の並びか利用者の列を持つ表)
     options: Optional[dict] = None
         読み込みの設定 (学習のときの設定に上書きする)
     batch_size: int = 256
         1 回に渡す件数
     device: str = "cpu"
         使うデバイス
+    k: Optional[int] = None
+        並べるの一式の, 利用者ごとに並べる件数 (省くと一式の rank.k)
+    seen: Union[str, Path, pd.DataFrame, None] = None
+        並べるの一式の, 前に反応した品物の表 (渡すと除いて並べる)
 
     Returns
     ----------
     result: pd.DataFrame
         元の列 (雑音だけの一式は sample と seed) と, status, reason,
         prediction (分類は confidence と p:<クラス> も) か output の列
-        (表の出力は列の符号化の列)
+        (表の出力は列の符号化の列. 並べるの一式は利用者と順位ごとの user,
+        status, reason, rank, item, score)
 
     Raises
     ----------
@@ -1233,6 +1240,19 @@ def predict(
         raise ValueError("batch_size は 1 以上にしてください")
     if not isinstance(bundle, Bundle):
         bundle = load_bundle(bundle)
+    if bundle.from_rank:
+        if options:
+            raise ValueError(
+                "並べるの一式は利用者の値を受け取るので, 読み込みの設定 "
+                "(options) は使えません"
+            )
+        result = predict_rank(bundle, source, k, seen, batch_size, device)
+        return result
+    if k is not None or seen is not None:
+        raise ValueError(
+            "並べる件数 (k) と前に反応した品物の表 (seen) は, 並べるの一式"
+            "だけに渡せます"
+        )
     if bundle.from_items:
         result = predict_items(bundle, source, batch_size, device)
         return result
@@ -1838,6 +1858,7 @@ def describe_bundle(bundle: Union[str, Path, Bundle]) -> dict:
         ),
         "items": items_of_bundle(bundle),
         "ready": ready_of_bundle(bundle),
+        "rank": rank_of_bundle(bundle),
     }
 
     return description
