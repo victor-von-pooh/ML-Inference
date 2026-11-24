@@ -12,6 +12,7 @@
 - **方策の一式**: ML-Found が書き出す強化学習の方策を読み, 観測から行動と守り (行動の範囲, 止める条件, 外れたときの動き) の結果を返す. 実機では動かさない
 - **既製のモデルの一式**: 学習しない既製のモデル (torchvision の学習済みの画像の分類など) を, 重みの版と hash を固定し, 種類の名前の表と前処理を持たせて一式にする
 - **並べるの一式**: 利用者と品物の 2 塔のモデル (ML-Quest の並べるの骨組みの実験) から, 品物の埋め込みを索引に持つ一式を作り, 利用者ごとに上位 K 件の品物と点数を返す. 前に反応した品物を除くかを選べ, 後の反応から Recall@K と NDCG を数える
+- **群分けの一式**: 表の行の埋め込みと群の中心 (ML-Quest のまとめるの骨組みの実験) から, 列の符号化と群の安定性を持つ一式を作り, 新しい行を最も近い群に割り当てて, 群ごとの件数と特徴 (群の要約) を返す
 - **見本の一式**: 表か文のデータから小さなモデルをその場で学習し, 画面で操作を試すための一式を作る
 
 前処理は [ML-EDA](https://github.com/victor-von-pooh/ML-EDA), モデルの組み立ては [ML-ModelControl](https://github.com/victor-von-pooh/ML-ModelControl) を使い, [ML-Found](https://github.com/victor-von-pooh/ML-Found) で学習した重みを読む.
@@ -20,7 +21,7 @@
 
 | 相手 | 使うもの |
 | --- | --- |
-| ML-Provide (推論) | 推論の一式の作成と確かめ (並べるの一式は `make_rank_bundle` と `rank_metrics`), 版 2 のデータセットの説明 (`describe_items`), 予測と同じデータの読み込み (`read_source`), 正解の種類と出どころ (`target_of`, `origin_sentence`), 結論 (決め方の項目 `RULE_KEYS`, 件数だけの結論 `conclude_outputs`, まとめからの文 `summary_sentences`), 撮影の深度から点 (`backproject`), 意思決定, 先の予測と列の効き, 方策の一式. 自作の繰り返しの手順 (`register_procedure`, `PROCEDURES`) と自作の部品 (`register_units`) の登録. 問題の設定 (ML-Quest) の損得と今のやり方は, 画面が引数で渡す |
+| ML-Provide (推論) | 推論の一式の作成と確かめ (並べるの一式は `make_rank_bundle` と `rank_metrics`, 群分けの一式は `make_group_bundle` と `group_summary`), 版 2 のデータセットの説明 (`describe_items`), 予測と同じデータの読み込み (`read_source`), 正解の種類と出どころ (`target_of`, `origin_sentence`), 結論 (決め方の項目 `RULE_KEYS`, 件数だけの結論 `conclude_outputs`, まとめからの文 `summary_sentences`), 撮影の深度から点 (`backproject`), 意思決定, 先の予測と列の効き, 方策の一式. 自作の繰り返しの手順 (`register_procedure`, `PROCEDURES`) と自作の部品 (`register_units`) の登録. 問題の設定 (ML-Quest) の損得と今のやり方は, 画面が引数で渡す |
 | ML-Found の学習のスクリプト (ML-Quest の骨組みを含む) | 学習の後に `make_bundle` で実験のディレクトリの中に一式を作る |
 
 ## 導入
@@ -210,6 +211,24 @@ result["sentences"]   # ['利用者 2 人のうち 2 人に, 上位 5 件の品�
 # 後の反応で確かめる (前の反応は正解から除く)
 rank_metrics("bundles/shop", frame, truth=pd.read_csv("later.csv"),
              seen=seen)  # {'users': ..., 'k': 10, 'recall_at_k': ..., 'ndcg': ...}
+```
+
+### 行を群に割り当てる (一式の版 9)
+
+群分けの実験 (重み `final_model.pt`, 定義 `model_spec.yaml`, 列の符号化と群の中心 `group_centers.json`, 群の割り当て `group_assignments.csv`, 群の安定性と群の要約 `evaluations/group_stability.json`, `evaluations/group_summary.json`) から一式を作る. モデルの入力は符号化した行の特徴 `x`, 出力は埋め込み `embedding`. 学習に使った表を渡すと, 割り当て直して実験の割り当てと比べる.
+
+```python
+from ml_inference import group_summary, infer, make_group_bundle, predict
+
+make_group_bundle("bundles/customers", "outputs/group_4/run",
+                  data="data/customers.csv")
+
+# 行ごとの群 (元の列と status, reason, group, distance の表)
+frame = predict("bundles/customers", "new_customers.csv")
+group_summary("bundles/customers", frame)   # 群ごとの行の数, 割合, 安定性と列の要約 (最後は「全体」)
+
+result = infer("bundles/customers", "new_customers.csv")
+result["sentences"]   # ['500 行のうち 500 行を 4 個の群に割り当てた', '群 0 ...', '学習の群の安定性 ...']
 ```
 
 ### 何段も先を予測する

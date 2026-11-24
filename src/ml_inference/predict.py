@@ -17,6 +17,7 @@ from ml_inference.items import (
 from ml_inference.procedures import (
     get_procedure, make_generator, run_procedure, start_noise
 )
+from ml_inference.grouping import group_of_bundle, predict_group
 from ml_inference.ranking import predict_rank, rank_of_bundle
 from ml_inference.ready import prepare_ready, weights_file
 from ml_inference.tables import decode_table_rows, table_width
@@ -1227,7 +1228,8 @@ def predict(
         元の列 (雑音だけの一式は sample と seed) と, status, reason,
         prediction (分類は confidence と p:<クラス> も) か output の列
         (表の出力は列の符号化の列. 並べるの一式は利用者と順位ごとの user,
-        status, reason, rank, item, score)
+        status, reason, rank, item, score. 群分けの一式は元の列と status,
+        reason, group, distance)
 
     Raises
     ----------
@@ -1253,6 +1255,9 @@ def predict(
             "並べる件数 (k) と前に反応した品物の表 (seen) は, 並べるの一式"
             "だけに渡せます"
         )
+    if bundle.from_group:
+        result = predict_group(bundle, source, options, batch_size, device)
+        return result
     if bundle.from_items:
         result = predict_items(bundle, source, batch_size, device)
         return result
@@ -1859,6 +1864,7 @@ def describe_bundle(bundle: Union[str, Path, Bundle]) -> dict:
         "items": items_of_bundle(bundle),
         "ready": ready_of_bundle(bundle),
         "rank": rank_of_bundle(bundle),
+        "group": group_of_bundle(bundle),
     }
 
     return description
