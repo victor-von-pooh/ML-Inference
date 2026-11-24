@@ -8,8 +8,10 @@ from conftest import linear_spec
 from ml_eda import export_dataset, load_data
 from ml_modelcontrol import build_model
 
-from ml_inference import backtest, check_decision, decide, infer, make_bundle
-from ml_inference import load_bundle, predict
+from ml_inference import (
+    GUARD_COUNTS, GUARD_UNCOUNTED, backtest, check_decision, decide, infer,
+    load_bundle, make_bundle, predict, remeasure
+)
 
 
 def regression_bundle(tmp_path: Path) -> Path:
@@ -149,6 +151,91 @@ def test_backtest_quantity(tmp_path: Path) -> None:
     assert missing["group"]["count"] == 39
 
 
+def test_backtest_guard_quantity(tmp_path: Path) -> None:
+    """
+    守る指標が指す量をたどり直しで数え, 指していなければ課題の場で数える
+    と並べることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 足りなかった行の割合と量を, 置いた量と実際の値から手で数える
+    path = regression_bundle(tmp_path)
+    rng = np.random.default_rng(6)
+    x = rng.uniform(1, 10, 200)
+    frame = pd.DataFrame({"x": x, "y": 10 * x * rng.uniform(0.9, 1.1, 200)})
+    decision = {"type": "quantity", "under_cost": 9, "over_cost": 1}
+    level = decide(path, predict(path, frame), decision)["frame"][
+        "level"
+    ].to_numpy(float)
+    actual = frame["y"].to_numpy()
+    rate = float(np.mean(actual > level))
+    guard = {"name": "欠品の割合", "unit": None, "better": "lower",
+             "line": 0.5, "measure": "棚が空いた日を数える",
+             "counted": "shortage_rate"}
+    result = backtest(path, frame, decision, guard=guard)
+    item = result["guard"]
+    assert item["value"] == pytest.approx(rate)
+    assert item["kept"] is (rate <= 0.5)
+    assert item["description"] == GUARD_COUNTS["quantity"][
+        "shortage_rate"
+    ]["description"]
+    assert any("欠品の割合" in text and "守る線" in text
+               for text in result["sentences"])
+    shortage = backtest(path, frame, decision,
+                        guard=dict(guard, counted="shortage", line=0.0))
+    assert shortage["guard"]["value"] == pytest.approx(
+        np.maximum(actual - level, 0).sum()
+    )
+    assert shortage["guard"]["kept"] is False
+
+    # 割合は % で書く. 線と等しければ守れた. 向きが higher なら逆
+    assert any(f"{100 * rate:.3g} %" in text and "50 %" in text
+               for text in result["sentences"])
+    equal = backtest(path, frame, decision, guard=dict(guard, line=rate))
+    assert equal["guard"]["kept"] is True
+    higher = dict(guard, better="higher")
+    assert backtest(path, frame, decision, guard=dict(
+        higher, line=rate
+    ))["guard"]["kept"] is True
+    above = backtest(path, frame, decision,
+                     guard=dict(higher, line=rate + 0.01))
+    assert above["guard"]["better"] == "higher"
+    assert above["guard"]["kept"] is False
+    assert any("以上. 守れなかった" in text for text in above["sentences"])
+
+    # 向きを省けば量の向き, 線が無ければ守れたかは数えない
+    loose = backtest(path, frame, decision,
+                     guard=dict(guard, better=None, line=None))
+    assert loose["guard"]["better"] == "lower"
+    assert loose["guard"]["kept"] is None
+
+    # 指していなければ数えず, 渡さなければ並べない
+    uncounted = backtest(path, frame, decision,
+                         guard=dict(guard, counted=None))
+    assert uncounted["guard"]["value"] is None
+    assert uncounted["guard"]["note"] == GUARD_UNCOUNTED
+    assert any(GUARD_UNCOUNTED in text for text in uncounted["sentences"])
+    assert result["policies"] == uncounted["policies"]
+    assert backtest(path, frame, decision)["guard"] is None
+
+    # 型に無い量, 崩れた向きと線, 名前の無い守る指標は誤り
+    for wrong in (dict(guard, counted="missed"), dict(guard, better="up"),
+                  dict(guard, line=float("nan")), dict(guard, name=" "),
+                  dict(guard, counted=["shortage"]), dict(guard, line=True)):
+        with pytest.raises(ValueError, match="守る指標"):
+            backtest(path, frame, decision, guard=wrong)
+
+    # 測り直しの結果には並ばない
+    assert "guard" not in remeasure(path, frame, write=False)
+
+
 def classifier_bundle(tmp_path: Path) -> Path:
     """
     x が大きいほど当たりの 2 クラスの分類の一式を作る関数
@@ -238,6 +325,44 @@ def test_select_and_triage(tmp_path: Path) -> None:
     policies = backtest(path, past, triage)["policies"]
     assert policies["この方針"] >= policies["確率 0.5 で分ける"]
 
+    # 守る指標: 回した件数と見逃しを, この方針の行動から数える
+    acted = decide(path, predict(path, past), triage)["frame"][
+        "action"
+    ].to_numpy(bool)
+    hit = (past["label"] == "yes").to_numpy()
+    for counted, expected in (("routed", acted.sum()),
+                              ("missed", (~acted & hit).sum()),
+                              ("false_alarms", (acted & ~hit).sum())):
+        guard = {"name": counted, "line": 10**6, "counted": counted}
+        item = backtest(path, past, triage, guard=guard)["guard"]
+        assert item["value"] == expected
+        assert item["kept"] is True
+    assert acted.any()
+    tight = backtest(path, past, triage,
+                     guard={"name": "回す件数", "line": 0,
+                            "counted": "routed"})["guard"]
+    assert tight["kept"] is False
+
+    # 選ぶ: 選んだ件数, 費用, 当たりの割合
+    valued = past.assign(value=1000.0)
+    chosen = decide(path, predict(path, valued), select)["frame"][
+        "action"
+    ].to_numpy(bool)
+    for counted, expected in (("selected", chosen.sum()),
+                              ("selected_cost", 50 * chosen.sum()),
+                              ("selected_hit_rate", hit[chosen].mean())):
+        guard = {"name": counted, "counted": counted}
+        item = backtest(path, valued, select, guard=guard)["guard"]
+        assert item["value"] == pytest.approx(expected)
+
+    # 選んだ行が無ければ, 当たりの割合は数えない
+    empty = backtest(path, past.assign(value=0.0), select, guard={
+        "name": "当たりの割合", "line": 0.5, "counted": "selected_hit_rate"
+    })
+    assert empty["guard"]["value"] is None
+    assert empty["guard"]["kept"] is None
+    assert any("数える行が無いので" in text for text in empty["sentences"])
+
 
 def test_uplift_effect(tmp_path: Path) -> None:
     """
@@ -300,6 +425,8 @@ def test_uplift_effect(tmp_path: Path) -> None:
     past = frame.assign(label=["yes", "no", "no", "yes"])
     with pytest.raises(ValueError, match="無作為"):
         backtest(path, past, select)
+    with pytest.raises(ValueError, match="無作為"):
+        backtest(path, past, select, guard={"name": "苦情", "counted": None})
 
 
 def test_current_flags(tmp_path: Path) -> None:

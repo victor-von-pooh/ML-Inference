@@ -61,6 +61,39 @@ MIN_GROUPS = 20
 # 外れ方を粗いと添える, 測った行の数の境
 COARSE_ROWS = 100
 
+# たどり直しで数えられる守る指標の量 (型ごと. 名前から説明と向き. lower
+# は小さいほど良い). 数えるのはこの方針の行動で, 割合は 0 から 1
+GUARD_COUNTS = {
+    "quantity": {
+        "shortage_rate": {"description": "足りなかった行の割合",
+                          "better": "lower"},
+        "shortage": {"description": "足りなかった量の合計 (目的の列の単位)",
+                     "better": "lower"},
+        "surplus": {"description": "余った量の合計 (目的の列の単位)",
+                    "better": "lower"},
+    },
+    "select": {
+        "selected": {"description": "選んだ件数", "better": "lower"},
+        "selected_cost": {"description": "選んだ行の費用の合計",
+                          "better": "lower"},
+        "selected_hit_rate": {"description": "選んだ行のうち当たりの割合",
+                              "better": "higher"},
+    },
+    "triage": {
+        "routed": {"description": "回した件数", "better": "lower"},
+        "missed": {"description": "見逃した件数 (回さなかった当たり)",
+                   "better": "lower"},
+        "false_alarms": {"description": "空振りの件数 (回した外れ)",
+                         "better": "lower"},
+    },
+}
+
+# 数える量を指していない守る指標に添える文
+GUARD_UNCOUNTED = "過去のデータでは数えられない. 課題の場で数える"
+
+# 守る指標の向き
+GUARD_BETTER = ("lower", "higher")
+
 
 def check_amount(
     decision: dict, name: str, columns: Optional[list[str]],
@@ -1817,11 +1850,175 @@ def current_column(
     return result
 
 
+def check_guard(guard: Optional[dict], kind: str) -> list[str]:
+    """
+    たどり直しに渡した守る指標を確かめる関数
+
+    Parameters
+    ----------
+    guard: Optional[dict]
+        守る指標 (name, unit, better, line, measure と, 数える量の名前
+        counted. 無ければ None)
+    kind: str
+        意思決定の型
+
+    Returns
+    ----------
+    errors: list[str]
+        誤りの一覧 (無ければ空)
+    """
+    # 名前は要る. 数える量は型の一覧の名前, 向きと線は省ける
+    if guard is None:
+        return []
+    if not isinstance(guard, dict):
+        return ["守る指標は辞書で書いてください"]
+    errors = []
+    name = guard.get("name")
+    if not isinstance(name, str) or not name.strip():
+        errors.append("守る指標の name を書いてください")
+    counted = guard.get("counted")
+    counts = GUARD_COUNTS.get(kind, {})
+    if counted is not None and (
+        not isinstance(counted, str) or counted not in counts
+    ):
+        errors.append(
+            f"守る指標の counted は {', '.join(counts)} のどれかか, "
+            "None にしてください"
+        )
+    if guard.get("better") not in (None, *GUARD_BETTER):
+        errors.append("守る指標の better は lower か higher にしてください")
+    line = guard.get("line")
+    if line is not None and (
+        not is_number(line) or not np.isfinite(float(line))
+    ):
+        errors.append("守る指標の line は有限の数にしてください")
+
+    return errors
+
+
+def guard_value(
+    counted: str, flag: np.ndarray, part: pd.DataFrame, decision: dict,
+    actual: np.ndarray
+) -> Optional[float]:
+    """
+    方針の行動から, 守る指標の数える量を求める関数
+
+    Parameters
+    ----------
+    counted: str
+        数える量の名前 (GUARD_COUNTS の名前)
+    flag: np.ndarray
+        量の型は置いた量, 他は行動したかの印
+    part: pd.DataFrame
+        数える行の予測の表
+    decision: dict
+        意思決定の決め方
+    actual: np.ndarray
+        量の型は実際の値, 他は実際に当たりだったかの印
+
+    Returns
+    ----------
+    value: Optional[float]
+        数えた量 (割合の分母が 0 なら None)
+    """
+    # 量は置いた量と実際の値の差, 選ぶと振り分けは行動と当たりの件数
+    if counted == "shortage_rate":
+        return float(np.mean(actual > flag))
+    if counted == "shortage":
+        return float(np.maximum(actual - flag, 0).sum())
+    if counted == "surplus":
+        return float(np.maximum(flag - actual, 0).sum())
+    if counted == "selected_cost":
+        amounts, _ = amounts_of(part, decision)
+        return float(np.nan_to_num(amounts["cost"])[flag].sum())
+    if counted == "selected_hit_rate":
+        return float(actual[flag].mean()) if flag.any() else None
+    counts = {
+        "selected": flag, "routed": flag, "missed": ~flag & actual,
+        "false_alarms": flag & ~actual,
+    }
+    value = float(counts[counted].sum())
+
+    return value
+
+
+def guard_result(
+    guard: dict, kind: str, flag: np.ndarray, part: pd.DataFrame,
+    decision: dict, actual: np.ndarray
+) -> tuple[dict, str]:
+    """
+    たどり直しの結果に並べる守る指標と, その文を返す関数
+
+    Parameters
+    ----------
+    guard: dict
+        守る指標 (check_guard で確かめたもの)
+    kind: str
+        意思決定の型
+    flag: np.ndarray
+        この方針の, 量の型は置いた量, 他は行動したかの印
+    part: pd.DataFrame
+        数える行の予測の表
+    decision: dict
+        意思決定の決め方
+    actual: np.ndarray
+        量の型は実際の値, 他は実際に当たりだったかの印
+
+    Returns
+    ----------
+    result: tuple[dict, str]
+        守る指標 (name, unit, counted, description, value, line, better,
+        kept, note) と文
+    """
+    # 指していなければ数えず, 課題の場で数えると添える
+    name = guard["name"].strip()
+    unit = guard.get("unit") or ""
+    line = guard.get("line")
+    line = None if line is None else float(line)
+    counted = guard.get("counted")
+    item = {"name": name, "unit": guard.get("unit"), "counted": counted,
+            "description": None, "value": None, "line": line,
+            "better": guard.get("better"), "kept": None, "note": None}
+    if counted is None:
+        item["note"] = GUARD_UNCOUNTED
+        return item, f"守る指標「{name}」は, {GUARD_UNCOUNTED}"
+
+    # 向きは守る指標の答え (無ければ量の向き). 線があれば守れたか
+    count = GUARD_COUNTS[kind][counted]
+    better = guard.get("better") or count["better"]
+    value = guard_value(counted, flag, part, decision, actual)
+    item.update(description=count["description"], value=value,
+                better=better)
+    if value is None:
+        item["note"] = "数える行が無い"
+        return item, (f"守る指標「{name}」({count['description']}) は, "
+                      "数える行が無いので数えなかった")
+    # 割合 (0 から 1) は値も線も % で書く
+    scale, mark = (100, " %") if counted.endswith("_rate") else (1, "")
+    text = f"{amount_text(scale * value)}{mark}" + (
+        f" {unit}" if unit else ""
+    )
+    if line is None:
+        return item, (f"守る指標「{name}」({count['description']}) は, "
+                      f"この方針で {text} (守る線は無い)")
+    item["kept"] = bool(value <= line if better == "lower" else
+                        value >= line)
+    side = "以下" if better == "lower" else "以上"
+    verdict = "守れた" if item["kept"] else "守れなかった"
+    sentence = (
+        f"守る指標「{name}」({count['description']}) は, この方針で "
+        f"{text} (守る線は {amount_text(scale * line)}{mark} {side}. "
+        f"{verdict})"
+    )
+
+    return item, sentence
+
+
 def backtest(
     bundle: Union[str, Path, Bundle],
     source: Union[str, Path, pd.DataFrame, Data], decision: dict,
     options: Optional[dict] = None, count: Optional[Any] = None,
-    group: Any = "auto"
+    group: Any = "auto", guard: Optional[dict] = None
 ) -> dict:
     """
     目的の列が分かる過去のデータで, 方針を取っていた場合の実際の得と損を
@@ -1845,6 +2042,10 @@ def backtest(
         差の幅を選び直すまとまり. "auto" は時刻でずらす一式なら時刻の
         列 (同じ時刻の系列どうしは似ているので, 行ごとでは幅が狭く出る),
         他は行ごと. None は行ごと. 列の名前か, 行ごとの値の並びも書ける
+    guard: Optional[dict] = None
+        守る指標 (問題の設定の受け渡しの guard の name, unit, better,
+        line, measure と, 数える量の名前 counted. counted は
+        GUARD_COUNTS の型ごとの名前で, None なら数えない)
 
     Returns
     ----------
@@ -1852,7 +2053,9 @@ def backtest(
         rows (数えた行), policies (方針ごとの実際の得 (正) と損 (負) の
         合計), gaps (この方針と他の方針の差の合計と 90 % の幅),
         group (幅を選び直したまとまりの名前と数. 行ごとなら None),
-        sentences, decision
+        guard (守る指標の名前, 単位, 数える量, 値, 線, 向き, 守れたか.
+        数えないなら値と守れたかは None で note に理由. 渡さなければ
+        None), sentences, decision
 
     Raises
     ----------
@@ -1877,6 +2080,9 @@ def backtest(
     errors = check_decision(decision, bundle, with_current=False)
     if errors:
         raise ValueError("意思決定の決め方の誤り: " + " / ".join(errors))
+    errors = check_guard(guard, str(decision["type"]))
+    if errors:
+        raise ValueError("守る指標の誤り: " + " / ".join(errors))
     table = predict(bundle, source, options)
     target = bundle.dataset.info.get("target")
     if target not in table.columns:
@@ -1910,9 +2116,10 @@ def backtest(
     ) if kind == "quantity" else (
         label_text(part[target]) == str(decision["positive"])
     ).to_numpy()
+    flags = policies_of(kind, part, decision, current)
     rows = {
         name: realized(kind, flag, part, decision, actual)
-        for name, flag in policies_of(kind, part, decision, current).items()
+        for name, flag in flags.items()
     }
     policies = {name: float(values.sum()) for name, values in rows.items()}
     gaps = {
@@ -1952,6 +2159,12 @@ def backtest(
             "得は行動の効果の仮定のもとでの値 (行動しなかった過去の結果"
             "しか分からないため)"
         )
+    guarded = None
+    if guard is not None:
+        guarded, sentence = guard_result(
+            guard, kind, flags["この方針"], part, decision, actual
+        )
+        sentences.append(sentence)
     rule = decision.get("current")
     if isinstance(rule, dict) and current is not None and current[1]:
         sentences.append(
@@ -1968,6 +2181,7 @@ def backtest(
             "name": group_name,
             "count": int(groups.max()) + 1,
         },
+        "guard": guarded,
         "sentences": sentences,
         "decision": decision,
     }
