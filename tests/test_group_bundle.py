@@ -545,12 +545,12 @@ def test_group_summary(tmp_path: Path, group_run: Path) -> None:
     assert BASELINE in result["sentences"][2]
     assert list(result["frame"]["decision"][-2:]) == ["", "予測なし"]
 
-    # 書き出しは版 1 で, 読んだ表からも群の要約を作れる (CSV を通した
-    # 数は丸めの差まで)
+    # 書き出しは割り当てない行の群の番号の欠けの型を残す版 3 で, 読んだ表
+    # からも群の要約を作れる (CSV を通した数は丸めの差まで)
     out = tmp_path / "result"
     write_result(result, out)
     loaded = read_result(out)
-    assert loaded["format_version"] == 1
+    assert loaded["format_version"] == 3
     again = group_summary(root, loaded["frame"])
     assert [list(row) for row in again] == [list(row) for row in rows]
     for mine, theirs in zip(again, rows):
@@ -632,7 +632,7 @@ def test_group_representatives(tmp_path: Path, group_run: Path) -> None:
     out = tmp_path / "result"
     write_result(result, out)
     loaded = read_result(out)
-    assert loaded["format_version"] == 1
+    assert loaded["format_version"] == 3
     assert loaded["summary"]["representatives"] == (
         result["summary"]["representatives"]
     )
@@ -785,3 +785,60 @@ def test_group_bundle_errors(
                     group_run / "final_model.pt", form="cluster",
                     procedure={"name": "ddim", "steps": 2, "seed": 0},
                     output_options={"shape": [5]})
+
+
+def test_group_result_keeps_types(tmp_path: Path, group_run: Path) -> None:
+    """
+    数に見える種類の値と欠けのある整数の列を持つ群分けの結果を, 書き出して
+    読み直しても値と群の要約と代表の行が変わらないことを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    group_run: Path
+        実験のディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 番号の顧客 ("0001"), 数に見える地域 ("010". 学習に無い値), 欠けた
+    # 来た回数と, 割り当てない行 (無限の額)
+    root = tmp_path / "bundle"
+    make_group_bundle(root, group_run)
+    new = customer_rows().iloc[1:]
+    new["customer"] = [f"{n:04d}" for n in range(len(new))]
+    new["visits"] = new["visits"].astype(object)
+    new.iloc[3, new.columns.get_loc("visits")] = None
+    new["region"] = new["region"].map(
+        {"north": "010", "south": "020", "east": "030"}
+    )
+    new = pd.concat([new, pd.DataFrame([{"customer": "0999", "spend": np.inf,
+                                         "visits": 1, "region": "030"}])],
+                    ignore_index=True)
+    result = infer(root, new)
+    assert result["frame"]["status"].iloc[-1] == "skipped"
+
+    # 読み直した表の値と, そこから作る群の要約と代表の行は書き出す前と同じ
+    out = tmp_path / "result"
+    write_result(result, out)
+    loaded = read_result(out)
+    assert loaded["format_version"] == 3
+    assert loaded["column_types"] == {
+        "customer": "text", "visits": "integer", "region": "text",
+        "group": "integer"
+    }
+    back = loaded["frame"]
+    for name in ("customer", "region", "visits", "group"):
+        assert back[name].astype(object).where(back[name].notna()).tolist(
+        ) == result["frame"][name].astype(object).where(
+            result["frame"][name].notna()
+        ).tolist()
+    assert back["customer"].iloc[0] == "0000"
+    assert back["region"].iloc[0] == "010"
+    assert str(back["visits"].dtype) == "Int64"
+    assert group_summary(root, back) == result["summary"]["groups"]
+    assert group_representatives(root, back) == (
+        result["summary"]["representatives"]
+    )

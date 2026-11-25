@@ -287,15 +287,19 @@ def test_infer_and_result(tmp_path: Path, rank_run: Path) -> None:
     assert list(result["frame"]["decision"]) == ["", "", "", "",
                                                  "予測なし"]
 
-    # 書き出しは表だけなので結果の版 1
+    # 書き出しは表だけで, 並べられない利用者の順位の欠けの型を残す版 3.
+    # 読み直した順位は欠損を持てる整数
     root = write_result(result, tmp_path / "result")
     meta = yaml.safe_load((root / "result.yaml").read_text())
-    assert meta["format_version"] == 1
+    assert meta["format_version"] == 3
+    assert meta["column_types"] == {"rank": "integer"}
     assert not (root / "artifacts").exists()
     back = read_result(root)
     assert list(back["frame"]["item"].dropna()) == list(
         result["frame"]["item"].dropna()
     )
+    assert str(back["frame"]["rank"].dtype) == "Int64"
+    assert back["frame"]["rank"].tolist() == result["frame"]["rank"].tolist()
 
     # 他の一式の引数は使えない
     with pytest.raises(ValueError, match="結論の決め方"):

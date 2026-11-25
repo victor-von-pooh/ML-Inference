@@ -18,8 +18,19 @@ from ml_inference.predict import (
 from ml_inference.grouping import conclude_groups
 from ml_inference.ranking import conclude_ranking, request_users
 
-# 結果のファイル (result.yaml) の形の版 (表に収まらない中身が無ければ 1)
-RESULT_FORMAT_VERSION = 2
+# 結果のファイル (result.yaml) の形の版 (列の型を残せば 3, 表に収まらない
+# 中身があれば 2, どちらも無ければ 1)
+RESULT_FORMAT_VERSION = 3
+
+# 表に収まらない中身を持つ結果の版
+ARTIFACTS_FORMAT_VERSION = 2
+
+# 列の型の記録の項目と, 型の名前ごとの読み込みの型
+COLUMN_TYPES_KEY = "column_types"
+COLUMN_DTYPES = {"text": str, "integer": "Int64"}
+
+# 欠損を持てる整数 (Int64) の範囲
+INT64 = np.iinfo(np.int64)
 
 # 表に収まらない中身の置き場と, 表の列
 ARTIFACTS_DIR = "artifacts"
@@ -29,9 +40,9 @@ ARTIFACT_COLUMN = "artifact"
 TOKENS_COLUMN = "tokens"
 
 # 書き出すときに result.yaml へ写さない結果の項目 (表, 形, 読んだ場所,
-# 読んだ版と中身の記録)
+# 読んだ版と中身と列の型の記録)
 RESULT_OWN_KEYS = ("frame", "form", "directory", "format_version",
-                   "artifacts")
+                   "artifacts", COLUMN_TYPES_KEY)
 
 
 def source_text(bundle: Bundle, source: Any) -> Optional[str]:
@@ -214,19 +225,24 @@ def write_result(result: dict, path: Union[str, Path]) -> Path:
     else:
         root.mkdir(parents=True, exist_ok=True)
 
-    # 表は表計算のアプリで開ける BOM 付きの UTF-8
+    # 表は表計算のアプリで開ける BOM 付きの UTF-8 (読み直すと値の変わる列
+    # の型を残す)
     frame.to_csv(root / "predictions.csv", index=False, encoding="utf-8-sig")
+    types = column_types(frame, root / "predictions.csv")
 
-    # 表以外の説明 (形の版を先頭に. 中身が無ければ版 1 のまま. 読んだ結果
-    # の版と中身の記録は書き直し)
-    meta: dict[str, Any] = {
-        "format_version": RESULT_FORMAT_VERSION if artifacts else 1
-    }
+    # 表以外の説明 (形の版を先頭に. 型も中身も無ければ版 1 のまま. 読んだ
+    # 結果の版と中身と型の記録は書き直し)
+    version = RESULT_FORMAT_VERSION if types else (
+        ARTIFACTS_FORMAT_VERSION if artifacts else 1
+    )
+    meta: dict[str, Any] = {"format_version": version}
     meta.update({
         k: v for k, v in result.items() if k not in RESULT_OWN_KEYS
     })
     if artifacts:
         meta["artifacts"] = artifacts
+    if types:
+        meta[COLUMN_TYPES_KEY] = types
     (root / "result.yaml").write_text(
         yaml.safe_dump(meta, allow_unicode=True, sort_keys=False),
         encoding="utf-8"
@@ -405,7 +421,89 @@ def artifact_path(root: Union[str, Path], relative: str) -> Path:
     return path
 
 
-def read_predictions(path: Path) -> pd.DataFrame:
+def column_kind(values: pd.Series) -> Optional[str]:
+    """
+    書き出す表の列の, 残す候補の型を返す関数
+
+    Parameters
+    ----------
+    values: pd.Series
+        書き出す表の列
+
+    Returns
+    ----------
+    kind: Optional[str]
+        欠けを除いた値が全て文字なら text, 全て Int64 に収まる整数 (真偽値
+        を除く) なら integer, 他 (値の無い列, 小数, 混ざる列) は None
+    """
+    # 整数の型の列はそのまま, 他は欠けを除いた値の型で見る
+    if pd.api.types.is_bool_dtype(values.dtype):
+        return None
+    if pd.api.types.is_integer_dtype(values.dtype):
+        kind: Optional[str] = "integer"
+        return kind
+    kept = values.dropna()
+    if not len(kept):
+        return None
+    if all(isinstance(v, str) for v in kept):
+        kind = "text"
+    elif all(isinstance(v, (int, np.integer))
+             and not isinstance(v, (bool, np.bool_))
+             and INT64.min <= int(v) <= INT64.max for v in kept):
+        kind = "integer"
+    else:
+        kind = None
+
+    return kind
+
+
+def column_types(frame: pd.DataFrame, path: Path) -> dict[str, str]:
+    """
+    書いた予測の表を型を知らずに読み直すと値の変わる列の型を返す関数
+
+    Parameters
+    ----------
+    frame: pd.DataFrame
+        書き出した表
+    path: Path
+        書いた predictions.csv
+
+    Returns
+    ----------
+    types: dict[str, str]
+        列の名前から型 (text か integer) への対応 (値の変わらない列は除く)
+    """
+    # 候補の列だけを, 型を知らずに読んだ値と比べる (列は位置で引く. 空の
+    # 文字は CSV で欠損と分けられないので比べない)
+    kinds = [column_kind(frame.iloc[:, i]) for i in range(frame.shape[1])]
+    if not any(kinds):
+        return {}
+    plain = read_predictions(path)
+    types = {}
+    for position, kind in enumerate(kinds):
+        if kind is None:
+            continue
+        mine = frame.iloc[:, position].tolist()
+        back = plain.iloc[:, position]
+        if kind == "integer":
+            changed = not pd.api.types.is_integer_dtype(back.dtype) or any(
+                int(a) != int(b) for a, b in zip(mine, back)
+            )
+        else:
+            changed = any(
+                not (isinstance(b, str) and a == b)
+                for a, b in zip(mine, back.tolist())
+                if isinstance(a, str) and a != ""
+            )
+        if changed:
+            types[str(frame.columns[position])] = kind
+
+    return types
+
+
+def read_predictions(
+    path: Path, types: Optional[dict] = None
+) -> pd.DataFrame:
     """
     予測の表を読む関数 (文の出力の文と番号は文字のまま)
 
@@ -413,19 +511,30 @@ def read_predictions(path: Path) -> pd.DataFrame:
     ----------
     path: Path
         predictions.csv
+    types: Optional[dict] = None
+        result.yaml の列の型 (列の名前から text か integer)
 
     Returns
     ----------
     frame: pd.DataFrame
-        予測の表 (空の欄は欠損. 文の出力の予測した行の空の文は空の文字)
+        予測の表 (空の欄は欠損. 文の出力の予測した行の空の文は空の文字.
+        text の列は文字, integer の列は欠損を持てる整数)
     """
     # tokens の列のある表は文の出力なので, 文と番号を文字で読む (番号が 1
     # つの並びや数に見える文を数にしない)
     head = pd.read_csv(path, encoding="utf-8-sig", nrows=0)
     text = TOKENS_COLUMN in head.columns
+    dtype: dict[str, Any] = (
+        {"prediction": str, TOKENS_COLUMN: str} if text else {}
+    )
+
+    # 残した列の型 (表に無い列と知らない型は無視)
+    for name, kind in (types or {}).items():
+        if str(name) in head.columns and kind in COLUMN_DTYPES:
+            dtype[str(name)] = COLUMN_DTYPES[kind]
     frame = pd.read_csv(
         path, encoding="utf-8-sig", keep_default_na=False, na_values=[""],
-        dtype={"prediction": str, TOKENS_COLUMN: str} if text else None
+        dtype=dtype or None
     )
 
     # 予測した行の空の文 (戻すと何も残らない並び) は欠損と分ける
@@ -451,8 +560,9 @@ def read_result(path: Union[str, Path]) -> dict:
     Returns
     ----------
     result: dict
-        result.yaml の中身と, frame (予測と判断の表. 配列は artifact の
-        列の相対パスのまま. 読むのは artifact_path と numpy.load), form
+        result.yaml の中身と, frame (予測と判断の表. column_types の列は
+        その型. 配列は artifact の列の相対パスのまま. 読むのは
+        artifact_path と numpy.load), form
         (配列の出力の形. 無ければ None), directory (読んだ場所. 書き直す
         ときに配列を持ち越すため)
 
@@ -475,7 +585,9 @@ def read_result(path: Union[str, Path]) -> dict:
             f"format_version {version} の結果は, このライブラリ (版 "
             f"{RESULT_FORMAT_VERSION} まで) では読めません"
         )
-    frame = read_predictions(root / "predictions.csv")
+    types = meta.get(COLUMN_TYPES_KEY)
+    frame = read_predictions(root / "predictions.csv",
+                             types if isinstance(types, dict) else None)
     artifacts = meta.get("artifacts") or {}
     if ARTIFACT_COLUMN in frame.columns and artifacts:
         frame[ARTIFACT_COLUMN] = frame[ARTIFACT_COLUMN].fillna("")
