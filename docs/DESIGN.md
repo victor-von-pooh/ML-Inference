@@ -1,62 +1,5 @@
 # 設計
 
-#### 既製の埋め込みの群分けの一式 (版 10. `group` と `ready`)
-
-学習しない既製のモデル (上の「既製のモデルの一式」の出どころ) の分類の最後の層の手前の出力を埋め込みにし, 埋め込みの空間の群の中心に写真を割り当てる一式. 実例は商品の写真を見た目で群に分ける課題. 群の中心, 割り当て, 群の安定性, 群の要約は ML-Quest の群分けの骨組みが成果物のディレクトリに書き, 一式づくりはそれを読んで, 既製のモデルの出どころ (版 6 の `ready`) と一緒に一式にする. 版 10 で書く.
-
-```
-<成果物>/                     # 骨組みが書く (ML-Found の実験ではない)
-├── group_centers.json        # 群の数, 埋め込みを作った既製のモデル, 群の中心
-├── group_assignments.csv     # 写真ごとの群 (path, group, split)
-└── evaluations/
-    ├── group_stability.json  # 群の安定性 (版 9 と同じ形)
-    └── group_summary.json    # 群の要約 (写真の幅と高さ)
-
-<一式>/
-├── inference.yaml
-├── model_spec.yaml           # tv.Model の 1 つのノードの定義 (既製のモデルの一式と同じ)
-├── final_model.pt            # 空の state_dict (重みは写さない)
-└── group_centers.json        # 成果物の写し
-```
-
-```yaml
-format_version: 10
-role: group
-output: {form: cluster}
-target: null
-procedure: null
-model: {spec: model_spec.yaml, weights: final_model.pt, output: null, kind: value, target_scale: null, pretrained: [{node: model, place: source, sha256: 8ec1…, ...}]}
-inputs: {}
-dataset: null
-run: null
-conclusion: {}
-decision: null
-check: null
-uncertainty: null
-ready: {library: torchvision, model: resnet18, weights: IMAGENET1K_V1, input: image, preprocess: {...}, url: ..., file: ..., license: {...}}   # 版 6 と同じ
-group:
-  centers: group_centers.json
-  k: 4
-  columns: [width, height]     # 群の要約の列 (画像の読み込みの表の幅と高さ. 群は写真から作る)
-  features: null               # 符号化した行が無い
-  width: 512                   # 埋め込みの幅 (分類の最後の層の入力の幅)
-  id: path                     # 写真の場所
-  rows: 300                    # 骨組みが群に分けた写真の数
-  stability: {...}             # 版 9 と同じ (比べる相手の名前は baseline)
-  summary: [...]               # 版 9 と同じ形の行 (列は width と height)
-  check: {rows: 300, agreement: 1.0}   # 写真を渡した場合だけ
-```
-
-- **群の中心と安定性を骨組みで作る**: 群の中心 (k-means) と群の安定性 (作り直しの調整ランド指数, シルエット係数, 群ごとの Jaccard 係数) は, 版 9 と同じく学習・評価の段階の骨組みが作り, 一式づくりは読んで写すだけにする. k-means と作り直しはデータに当てはめる学習で, このライブラリは学習を扱わないため (1 の節). 成果物の名前と形, 一式の `group` の欄, 推論の表, 群の要約, 群の代表の行, 結論の文が版 9 と同じになり, 画面と学習の段階 (ML-Dashboard が `evaluations/` を他の評価の表と同じく読む) が群分けを 1 つの形で扱える. 埋め込みは骨組みも推論も同じ既製のモデルの埋め込みの一式 (版 6 の `vector`) の求め方を使うので, 骨組みの群と一式の割り当てが食い違わない
-- **成果物** (版 9 との違い): `group_centers.json` は `encoding` (列の符号化) の代わりに `ready` (`library`, `model`, `weights` と, 埋め込みに使った重みの hash `sha256`. 64 文字の小文字の 16 進) を持つ (どちらか 1 つだけ). `group_assignments.csv` の行を見分ける列は `path` (ML-EDA の画像の読み込みの表の, ディレクトリからの写真の場所) で, 読めた写真だけを読み込みの表の順に書く. `evaluations/group_summary.json` の列は `width` と `height` (読み込みの表の画素の数. 写真そのものは要約の列にできないので, 群ごとの大きさの平均を並べる). 重み (`final_model.pt`), 定義, `run.json` は要らない
-- **作り方**: `make_group_bundle(path, run, name=None, data=None, license=None, batch_size=256, overwrite=False)` (版 9 と同じ関数. `run` の `group_centers.json` が `ready` を持てば版 10 を作る). 出どころの読み方 (`READY_LIBRARIES`) で定義と前処理を作り, 出どころの重みを読んで hash を求め (`make_ready_bundle` と同じ. ライセンスの `license` と `notes` も同じ), 成果物の `sha256` と違えば作らない (群の中心を作った重みと違う重みで割り当てないため). 続けて埋め込みの一式と同じく最後の層を確かめ (上の「既製のモデルの一式」の「埋め込み」), 埋め込みの幅が群の中心の幅と違えば作らない. 割り当ての表の行を見分ける列が `path` でない, 群の要約の列が `width` と `height` でない, 他の成果物の誤り (版 9 と同じ) も作らない. `options` (写真は一式の前処理で読む) と `pretrained` (ライセンスは `license`) は渡せない. 重みはいつも写さない (`copy_weights` は使わない). 版 9 の一式に `license` を渡すのは誤り
-- **確かめ**: `data` に群に分けた写真のディレクトリを渡すと, 一式で割り当て直し, 読めた写真の `path` の並びが割り当ての表と同じなら, 同じ位置の群が同じ割合を `group.check` に残す (99 % より低いと `notes` で知らせる. 枚数か並びが違えば比べずに理由を `notes` に残す. 版 9 と同じ)
-- **読むとき**: 版 9 の決まりに加えて, `ready` は版 6 と同じ形で, 定義の `model` のノードと合い, `model.pretrained` は出どころから読む記録. `group.features` は null, `group.id` は `path`, `group.columns` は `[width, height]`. 一式の `group_centers.json` の `ready` の `library`, `model` と `sha256` が一式の `ready` と `model.pretrained` の hash と違えば誤り. 出どころの重みの hash が記録と違えば推論しない (版 6 と同じ)
-- **推論**: `predict(bundle, 画像のファイルかディレクトリ)` (`infer` も同じ). 写真を一式の前処理で読み (版 6 と同じ. 読めない写真は「画像を読めません (…)」で飛ばす), 埋め込みを最も近い群の中心に割り当てる (距離と同じ距離の扱いは版 9 と同じ). 表は画像の読み込みの表 (`path`, `width`, `height` など) と `status`, `reason`, `group`, `distance`. 表, ML-EDA の `Data`, 読み込みの設定 (`options`) は誤り
-- **群の要約と代表の行**: `group_summary` は版 9 と同じで, 列は `width` と `height` (数の列). `group_representatives` の `values` は `path` と `width`, `height` (画面が群の中心に近い写真を出せるように). 結論, 書き出し, `read_result` から作る要約と代表の行も版 9 と同じ
-- **説明**: `describe_bundle` の `kind` は `group`, `task` は空で, `group` は版 9 と同じ写し, `ready` は版 6 と同じ (重みのファイルの置き場とあるか)
-- **骨組みの側ですること** (ML-Quest の群分けの骨組み. 骨組みの決まりは ML-Quest が持ち, ここはこの一式が読む形との約束): 1. 問題の設定の `library`, `model`, `weights`, `sha256` で `make_ready_bundle(..., form="vector")` の埋め込みの一式を作り, 群に分ける写真のディレクトリを `predict` して, 読めた写真 (`status` が `ok`) の `output` を埋め込みにする (前処理と最後の層を一式と同じにするため). 2. 埋め込みを, まとめるで学習する骨組みと同じ k-means (k-means++ の置き方を変えて繰り返す) で群に分け, 全ての写真を最も近い群の中心に割り当てる (学習しないので分割は無く, `split` は全て `train`). 3. 群の安定性は, まとめるで学習する骨組みと同じ作り直し (`seed` か `sample`) を埋め込みの k-means だけで数え, 比べる相手 (`_baseline`) は前処理の後の写真を小さく縮めた画素をそのまま同じ k-means で分けた群にして, 名前を `baseline` に書く. 4. 群の要約は ML-EDA の `describe_groups` に, 読み込みの表の `width` と `height` を列にし, 群を `labels` で渡して作り, 群ごとの `stability` (Jaccard 係数の平均) を入れる. 5. 上の 4 つの成果物を書き, `make_group_bundle(<一式>, <成果物>, name=..., data=<写真のディレクトリ>)` で一式を作る. `group_centers.json` の `ready` には, 埋め込みの一式の `ready` の `library`, `model`, `weights` (版の決まった名前) と `model.pretrained` の `sha256` を写す
-
 ML-Inference の今の設計と決まりをまとめる. まだやっていないことは [TODO.md](../TODO.md) にある.
 
 ## 1. 役割と位置づけ
@@ -174,7 +117,7 @@ notes: []                      # 作るときの注意 (戻せない変換, 学�
 - 一式を作るときに, 定義から組み立てて重みを読み込み, データセットの見本 (学習用の最初の数件) を推論できるかを確かめる (入力の形, 出力の幅とクラスの数). 確かめられない場合は作らずに誤りを返す
 - 形が合っても, 学習のスクリプトが前処理の外でしたこと (`prepend`, `target_scale`) を書き忘れると, 予測が黙って誤る. そこで, 検証用の分割 (無ければテスト用, 学習用) を一式で推論し, 分類は正解率, 回帰と予測は元の単位の平均絶対誤差を `check` に残す. 実験の監視した指標が同じ分割の同じ指標 (`valid/acc`, `valid/mae` など) で, 最終の重みがベストの場合は記録と比べ, 2 % より離れていれば `notes` で知らせる (作るのは止めない. 学習のスクリプトが指標を元の単位でない値や違う決まりで求めている場合があるため). 比べるのは 5 万行までの分割で, 256 行ずつ読んで推論する. 比べられない場合は 256 行だけで値を残す. 推論に失敗した場合も, 理由を `notes` に残して作る
 - **学習のスクリプトとの指標の名前の約束**: 実験の監視した指標 (`run.json` の `monitor`) は `<分割>/<名前>` の形で, 名前が `acc` か `accuracy` (分類の正解率), `mae` (回帰と予測の元の単位の平均絶対誤差), `iou` (領域), `chamfer` (点群) のときだけ記録と比べる (`METRIC_NAMES`. 領域と点群は下の「版 2 のデータセットの一式」). 損失や RMSE などを監視した実験は比べず, 値だけを残す. 学習のスクリプトはこの名前で step の指標を返すと, 一式の確かめで前処理の外の処理の書き忘れに気付ける (ML-Quest の書き出す骨組みはこの名前を使う)
-- 版の決まりは ML-EDA, ML-ModelControl と同じ. 項目を足す, 消す, 変える場合は版を上げ, 読む側は知っている版より新しい一式を「この版は読めない」とする. 今の版は 10 で, 版 1 から 10 の一式を読む. 版 4 は版 3 に `items` (下の「版 2 のデータセットの一式」) を足した版で, 版 2 のデータセットの一式だけを版 4 で書き, 版 1 のデータセットの一式は版 3 で書く (版 3 までしか知らない読む側も, 今までの一式を読めるように. 古い版で足りるものは古い版で書くのは結果の形の版と同じ決まり. 結果の形の版が何を表すかは下の「書き出し」). 版 5 は版 4 の `dataset` を null にできる版 (データセットを持たない. 下の「雑音だけの一式」) で, 画像とベクトルなどの配列の出力の雑音だけの一式を版 5 で書く (表の出力の雑音だけの一式は版 7). 他の一式は今までと同じ版 (3 か 4) で書くので, 版 4 までしか知らない読む側 (前の ML-Inference を submodule で使う ML-Provide など) は今までの一式をそのまま読み, 版 5 の一式だけを「format_version 5 の一式は … 読めません」で止める. 版 5 の一式が `dataset` か `items` を持つ, `dataset` が null の一式が版 5, 6, 7, 8, 9, 10 のどれでもない, は誤り. 版 6 は版 5 に `ready` (下の「既製のモデルの一式」) を足した版で, 既製のモデルの一式だけを版 6 で書く (他の一式は版 3 から 5 のまま. 版 5 までしか知らない読む側は, 版 6 の一式だけを「format_version 6 の一式は … 読めません」で止める). 版 6 の一式が `ready` を持たない, `ready` を持つ一式が版 6 でない, は誤り. 版 7 は版 6 に出力の形 `table` と列の符号化 (`output.columns`. 下の「表の出力の雑音だけの一式」) を足した版で, 表の出力の雑音だけの一式だけを版 7 で書く (他の雑音だけの一式は版 5 のまま. 版 6 までしか知らない読む側は, 版 7 の一式だけを「format_version 7 の一式は … 読めません」で止める). 出力の形が `table` の一式が版 7 でない, 版 7 の一式の出力の形が `table` でない, 版 7 の一式が `dataset` か `items` を持つ, は誤り. 版 1 は `uncertainty` と `decision` を持たない (外れ方が要る意思決定は, 一式を作り直すよう案内する). 版 1 と 2 は `role`, `output`, `target`, `procedure`, `model.pretrained` を持たず (列の予測の一式は, 版 2 と版 3 でこの 5 つの項目だけが違う), 受け持ちは `predict`, 出力の形はタスクから (分類は `class`, 回帰と予測は `value`), 正解の種類は `column` として読む. 版 2 までしか知らない読む側は, 版 3 の一式を「format_version 3 の一式は … 読めません」で止める. 版 3 の一式が版 2 のデータセットを指す, 版 4 の一式が `items` を持たない, などの食い違いは誤り. 版 8 は版 7 に出力の形 `ranking` と `rank` (下の「並べるの一式」) を足した版で, 並べるの一式だけを版 8 で書く (他の一式は版 3 から 7 のまま. 版 7 までしか知らない読む側は, 版 8 の一式だけを「format_version 8 の一式は … 読めません」で止める). `rank` を持つ一式が版 8 でない, 出力の形が `ranking` の一式が版 8 でない, 版 8 の一式の出力の形が `ranking` でないか `rank` を持たない, は誤り. 版 9 は版 8 に出力の形 `cluster` と `group` (下の「群分けの一式」) を足した版で, 群分けの一式だけを版 9 で書く (他の一式は版 3 から 8 のまま. 版 8 までしか知らない読む側は, 版 9 の一式だけを「format_version 9 の一式は … 読めません」で止める). `group` を持つ一式が版 9 でない, 出力の形が `cluster` の一式が版 9 でない, 版 9 の一式の出力の形が `cluster` でないか `group` を持たない, は誤り. 版 10 は版 9 の群分けの一式に `ready` (下の「既製の埋め込みの群分けの一式」) を持たせた版で, 既製の埋め込みの群分けの一式だけを版 10 で書く (他の群分けの一式は版 9 のまま. 版 9 までしか知らない読む側は, 版 10 の一式だけを「format_version 10 の一式は … 読めません」で止める). `group` と `cluster` の決まりは版 9 と 10 で同じで, `ready` を持つ一式が版 6 でも 10 でもない, 版 10 の一式が `ready` を持たない, 版 9 の一式が `ready` を持つ, は誤り
+- 版の決まりは ML-EDA, ML-ModelControl と同じ. 項目を足す, 消す, 変える場合は版を上げ, 読む側は知っている版より新しい一式を「この版は読めない」とする. 今の版は 10 で, 版 1 から 10 の一式を読む. 版 4 は版 3 に `items` (下の「版 2 のデータセットの一式」) を足した版で, 版 2 のデータセットの一式だけを版 4 で書き, 版 1 のデータセットの一式は版 3 で書く (版 3 までしか知らない読む側も, 今までの一式を読めるように. 古い版で足りるものは古い版で書くのは結果の形の版と同じ決まり. 結果の形の版が何を表すかは下の「書き出し」). 版 5 は版 4 の `dataset` を null にできる版 (データセットを持たない. 下の「雑音だけの一式」) で, 画像とベクトルなどの配列の出力の雑音だけの一式を版 5 で書く (表の出力の雑音だけの一式は版 7). 他の一式は今までと同じ版 (3 か 4) で書くので, 版 4 までしか知らない読む側 (前の ML-Inference を submodule で使う ML-Provide など) は今までの一式をそのまま読み, 版 5 の一式だけを「format_version 5 の一式は … 読めません」で止める. 版 5 の一式が `dataset` か `items` を持つ, `dataset` が null の一式が版 5, 6, 7, 8, 9, 10 のどれでもない, は誤り. 版 6 は版 5 に `ready` (下の「既製のモデルの一式」) を足した版で, 既製のモデルの一式だけを版 6 で書く (他の一式は版 3 から 5 のまま. 版 5 までしか知らない読む側は, 版 6 の一式だけを「format_version 6 の一式は … 読めません」で止める). 版 6 の一式が `ready` を持たない, `ready` を持つ一式が版 6 と 10 のどちらでもない, は誤り. 版 7 は版 6 に出力の形 `table` と列の符号化 (`output.columns`. 下の「表の出力の雑音だけの一式」) を足した版で, 表の出力の雑音だけの一式だけを版 7 で書く (他の雑音だけの一式は版 5 のまま. 版 6 までしか知らない読む側は, 版 7 の一式だけを「format_version 7 の一式は … 読めません」で止める). 出力の形が `table` の一式が版 7 でない, 版 7 の一式の出力の形が `table` でない, 版 7 の一式が `dataset` か `items` を持つ, は誤り. 版 1 は `uncertainty` と `decision` を持たない (外れ方が要る意思決定は, 一式を作り直すよう案内する). 版 1 と 2 は `role`, `output`, `target`, `procedure`, `model.pretrained` を持たず (列の予測の一式は, 版 2 と版 3 でこの 5 つの項目だけが違う), 受け持ちは `predict`, 出力の形はタスクから (分類は `class`, 回帰と予測は `value`), 正解の種類は `column` として読む. 版 2 までしか知らない読む側は, 版 3 の一式を「format_version 3 の一式は … 読めません」で止める. 版 3 の一式が版 2 のデータセットを指す, 版 4 の一式が `items` を持たない, などの食い違いは誤り. 版 8 は版 7 に出力の形 `ranking` と `rank` (下の「並べるの一式」) を足した版で, 並べるの一式だけを版 8 で書く (他の一式は版 3 から 7 のまま. 版 7 までしか知らない読む側は, 版 8 の一式だけを「format_version 8 の一式は … 読めません」で止める). `rank` を持つ一式が版 8 でない, 出力の形が `ranking` の一式が版 8 でない, 版 8 の一式の出力の形が `ranking` でないか `rank` を持たない, は誤り. 版 9 は版 8 に出力の形 `cluster` と `group` (下の「群分けの一式」) を足した版で, 群分けの一式だけを版 9 で書く (他の一式は版 3 から 8 のまま. 版 8 までしか知らない読む側は, 版 9 の一式だけを「format_version 9 の一式は … 読めません」で止める). `group` を持つ一式が版 9 でない, 出力の形が `cluster` の一式が版 9 でない, 版 9 の一式の出力の形が `cluster` でないか `group` を持たない, は誤り. 版 10 は版 9 の群分けの一式に `ready` (下の「既製の埋め込みの群分けの一式」) を持たせた版で, 既製の埋め込みの群分けの一式だけを版 10 で書く (他の群分けの一式は版 9 のまま. 版 9 までしか知らない読む側は, 版 10 の一式だけを「format_version 10 の一式は … 読めません」で止める). `group` と `cluster` の決まりは版 9 と 10 で同じで, `ready` を持つ一式が版 6 でも 10 でもない, 版 10 の一式が `ready` を持たない, 版 9 の一式が `ready` を持つ, は誤り
 - `load_bundle` は重みのファイルがあるかも確かめる (写さない重みの実験を動かすと読めない)
 
 #### 受け持ちと出力の形 (版 3)
@@ -492,6 +435,70 @@ group:
 - **群の代表の行** (`group_representatives(bundle, prediction, count=3)`): 群ごとに, 群の中心に近い順の割り当てた行 (代表の行) を `count` 件まで (群の行が少なければその数だけ) 並べる. 群の要約の行の形は ML-EDA が持つので, 群の要約の行には足さず, 別の並びで返す. 並びは群の番号の順の群ごとの辞書 (`group` (群の番号), `rows` (代表の行の並び)) で, 群の要約と同じく行の無い群も (`rows` が空) 並べ, 割り当てた行が無ければ空の並び (`全体` の行は無い). 代表の行は `row` (予測の表の行の位置. 0 から), `distance` (予測の表の `distance`. 群の中心までの埋め込みの空間の距離), `values` (群を作る列の名前から元の値. 予測の列と同じ名前の列は「(入力)」付きの列の値. 欠けは None, 真偽値と数はそのまま, 他は文字. `result.yaml` に書けるように) の辞書. 同じ距離なら行の位置の小さい行を先にする. 割り当てない行 (`status` が `skipped`) は除く. `count` が 1 以上の整数でない場合, 予測の表に `status`, `group`, `distance` か群を作る列が無い場合は誤り. `read_result` で読んだ表も渡せる
 - **結論と書き出し**: 結論は件数と群の要約 (`summary` は `rows`, `predicted` (割り当てた行の数), `skipped`, `k`, `groups` (上の群の要約), `representatives` (上の群の代表の行. 件数は既定の 3), `stability` (一式の群の安定性の写し). 文は「n 行のうち m 行を k 個の群に割り当てた」(割り当てない行があれば後ろに「 (s 行は割り当てられず)」), 割り当てた行があれば「群 0 a 行 (x %), 群 1 …」, 学習の群の安定性「学習の群の安定性 (種を変えて作り直す, 5 回): 調整ランド指数 0.970 (最も低い 0.950), シルエット係数 0.620. 列の特徴をそのまま k-means で分けた群は 0.990 (0.980), 0.550」. 表の `decision` は割り当てた行が空, 他は「予測なし」). 結論の決め方, 意思決定, 何段も先の予測, 列の効き, たどり直し, 外れ方の測り直しは使えない. 結果は配列を持たないので, 書き出しは結果の形の版 1 か, 列の型を残す版 3 (割り当てない行があり群の番号の列に欠損がある場合, 数に見える種類の値がある場合など) か 4 (数の列に数にできない値が混ざり割り当てない行がある場合など. 下の「書き出し」. `representatives` はまとめの中身なので版は変わらない). `read_result` で読み直した表の群を作る列と群の番号は書き出す前と同じ値になり, 読み直した表から作る群の要約と代表の行は書き出す前と同じになる
 - **説明**: `describe_bundle` の `kind` は `group`, `task` は空で, `group` に `group` の欄の写しが入る (他の一式は `None`)
+
+#### 既製の埋め込みの群分けの一式 (版 10. `group` と `ready`)
+
+学習しない既製のモデル (上の「既製のモデルの一式」の出どころ) の分類の最後の層の手前の出力を埋め込みにし, 埋め込みの空間の群の中心に写真を割り当てる一式. 実例は商品の写真を見た目で群に分ける課題. 群の中心, 割り当て, 群の安定性, 群の要約は ML-Quest の群分けの骨組みが成果物のディレクトリに書き, 一式づくりはそれを読んで, 既製のモデルの出どころ (版 6 の `ready`) と一緒に一式にする. 版 10 で書く.
+
+```
+<成果物>/                     # 骨組みが書く (ML-Found の実験ではない)
+├── group_centers.json        # 群の数, 埋め込みを作った既製のモデル, 群の中心
+├── group_assignments.csv     # 写真ごとの群 (path, group, split. 検証用の写真は valid)
+└── evaluations/
+    ├── group_stability.json  # 群の安定性 (版 9 と同じ形)
+    └── group_summary.json    # 群の要約 (写真の幅と高さ)
+
+<一式>/
+├── inference.yaml
+├── model_spec.yaml           # tv.Model の 1 つのノードの定義 (既製のモデルの一式と同じ)
+├── final_model.pt            # 空の state_dict (重みは写さない)
+└── group_centers.json        # 成果物の写し
+```
+
+```yaml
+format_version: 10
+role: group
+output: {form: cluster}
+target: null
+procedure: null
+model: {spec: model_spec.yaml, weights: final_model.pt, output: null, kind: value, target_scale: null, pretrained: [{node: model, place: source, sha256: 8ec1…, ...}]}
+inputs: {}
+dataset: null
+run: null
+conclusion: {}
+decision: null
+check: null
+uncertainty: null
+ready: {library: torchvision, model: resnet18, weights: IMAGENET1K_V1, input: image, preprocess: {...}, url: ..., file: ..., license: {...}}   # 版 6 と同じ
+group:
+  centers: group_centers.json
+  k: 4
+  columns: [width, height]     # 群の要約の列 (画像の読み込みの表の幅と高さ. 群は写真から作る)
+  features: null               # 符号化した行が無い
+  width: 512                   # 埋め込みの幅 (分類の最後の層の入力の幅)
+  id: path                     # 写真の場所
+  rows: 300                    # 骨組みが群に分けた写真の数
+  stability: {...}             # 版 9 と同じ (比べる相手の名前 baseline は「写真を縮めた画素をそのまま k-means で分けた群」)
+  summary: [...]               # 版 9 と同じ形の行 (列は width と height)
+  check: {rows: 300, agreement: 1.0}   # 写真を渡した場合だけ
+```
+
+- **群の中心と安定性を骨組みで作る**: 群の中心 (k-means) と群の安定性 (作り直しの調整ランド指数, シルエット係数, 群ごとの Jaccard 係数) は, 版 9 と同じく学習・評価の段階の骨組みが作り, 一式づくりは読んで写すだけにする. k-means と作り直しはデータに当てはめる学習で, このライブラリは学習を扱わないため (1 の節). 成果物の名前と形, 一式の `group` の欄, 推論の表, 群の要約, 群の代表の行, 結論の文が版 9 と同じになり, 画面と学習の段階 (ML-Dashboard が `evaluations/` を他の評価の表と同じく読む) が群分けを 1 つの形で扱える. 埋め込みは骨組みも推論も同じ既製のモデルの埋め込みの一式 (版 6 の `vector`) の求め方を使うので, 骨組みの群と一式の割り当てが食い違わない
+- **成果物** (版 9 との違い): `group_centers.json` は `encoding` (列の符号化) の代わりに `ready` (`library`, `model`, `weights` と, 埋め込みに使った重みの hash `sha256`. 64 文字の小文字の 16 進) を持つ (どちらか 1 つだけ). `group_assignments.csv` の行を見分ける列は `path` (ML-EDA の画像の読み込みの表の, ディレクトリからの写真の場所) で, 読めた写真だけを読み込みの表の順に書く (`split` は学習用 `train` か検証用 `valid`). `evaluations/group_summary.json` の列は `width` と `height` (読み込みの表の画素の数. 写真そのものは要約の列にできないので, 群ごとの大きさの平均を並べる). 重み (`final_model.pt`), 定義, `run.json` は要らない
+- **作り方**: `make_group_bundle(path, run, name=None, data=None, options=None, copy_weights=True, overwrite=False, pretrained=None, batch_size=256, license=None)` (版 9 と同じ関数. `run` の `group_centers.json` が `ready` を持てば版 10 を作る). 出どころの読み方 (`READY_LIBRARIES`) で定義と前処理を作り, 出どころの重みを読んで hash を求め (`make_ready_bundle` と同じ. ライセンスの `license` と `notes` も同じ), 成果物の `sha256` と違えば作らない (群の中心を作った重みと違う重みで割り当てないため). 続けて埋め込みの一式と同じく最後の層を確かめ (上の「既製のモデルの一式」の「埋め込み」), 埋め込みの幅が群の中心の幅と違えば作らない. 割り当ての表の行を見分ける列が `path` でない, 群の要約の列が `width` と `height` でない, 他の成果物の誤り (版 9 と同じ) も作らない. `options` (写真は一式の前処理で読む) と `pretrained` (ライセンスは `license`) は渡せない. 重みはいつも写さない (`copy_weights` は使わない). 版 9 の一式に `license` を渡すのは誤り
+- **確かめ**: `data` に群に分けた写真のディレクトリを渡すと, 一式で割り当て直し, 読めた写真の `path` の並びが割り当ての表と同じなら, 同じ位置の群が同じ割合を `group.check` に残す (99 % より低いと `notes` で知らせる. 枚数か並びが違えば比べずに理由を `notes` に残す. 版 9 と同じ)
+- **読むとき**: 版 9 の決まりに加えて, `ready` は版 6 と同じ形で, 定義の `model` のノードと合い, `model.pretrained` は出どころから読む記録. `group.features` は null, `group.id` は `path`, `group.columns` は `[width, height]`. 一式の `group_centers.json` の `ready` の `library`, `model` と `sha256` が一式の `ready` と `model.pretrained` の hash と違えば誤り. 出どころの重みの hash が記録と違えば推論しない (版 6 と同じ)
+- **推論**: `predict(bundle, 画像のファイルかディレクトリ)` (`infer` も同じ). 写真を一式の前処理で読み (版 6 と同じ. 読めない写真は「画像を読めません (…)」で飛ばす), 埋め込みを最も近い群の中心に割り当てる (距離と同じ距離の扱いは版 9 と同じ). 表は画像の読み込みの表 (`path`, `width`, `height` など) と `status`, `reason`, `group`, `distance`. 表, ML-EDA の `Data`, 読み込みの設定 (`options`) は誤り
+- **群の要約と代表の行**: `group_summary` は版 9 と同じで, 列は `width` と `height` (数の列). `group_representatives` の `values` は `path` と `width`, `height` (画面が群の中心に近い写真を出せるように). 結論, 書き出し, `read_result` から作る要約と代表の行も版 9 と同じ
+- **説明**: `describe_bundle` の `kind` は `group`, `task` は空で, `group` は版 9 と同じ写し, `ready` は版 6 と同じ (重みのファイルの置き場とあるか)
+- **骨組みの側ですること** (ML-Quest の群分けの骨組み. 骨組みの決まりは ML-Quest が持ち, ここはこの一式が読む形との約束. 分け方と k-means の数は, まとめるで学習する骨組みと同じ):
+  1. 問題の設定の `library`, `model`, `weights`, `sha256` で `make_ready_bundle(..., form="vector")` の埋め込みの一式を作り, 群に分ける写真のディレクトリを `predict` して, 読めた写真 (`status` が `ok`) の `output` を埋め込みにする (前処理と最後の層を一式と同じにするため)
+  2. 読めた写真を乱数の種で無作為に並べ替え, 2 割 (学習の骨組みの `GROUP_VALID` の 0.2) を検証用 `valid`, 残りを学習用 `train` にする
+  3. 学習用の写真の埋め込みで, k-means の群の中心を決める (k-means++ の置き方を変えて 5 回繰り返し, 群の中心までの二乗距離の和が最も小さいものを使う. 1 回は Lloyd 法で 100 回まで. 点の無い群の中心は動かさない). 全ての読めた写真を最も近い群の中心に割り当て, 割り当ての表に `path`, `group`, `split` を書く
+  4. 群の安定性は, 作り直しを 5 回 (作り直しごとに種を変える) して, 全ての写真の割り当ての調整ランド指数と群ごとの Jaccard 係数を数える. `seed` は学習用の全ての写真で種を変え, `sample` は学習用の写真の 0.8 (学習の骨組みの `group.fraction` の既定と同じ) を引き直す. 作り直すのは k-means だけ. シルエット係数は全ての写真で数える (2000 枚より多ければ無作為に選ぶ)
+  5. 比べる相手 (`_baseline`) は, 前処理の後の (3, crop, crop) の写真をチャンネルごとに 8 × 8 に平均で縮めた 192 の画素の値をそのまま, 上と同じ分け方, k-means, 作り直しで分けた群で, `evaluations/group_stability.json` の `baseline` に「写真を縮めた画素をそのまま k-means で分けた群」と書く (差 `_diff` は埋め込み − そのまま)
+  6. 群の要約は ML-EDA の `describe_groups` に, 読み込みの表の `width` と `height` を列にし, 全ての写真の群を `labels` で渡して作り, 群ごとの `stability` (Jaccard 係数の平均) を入れる
+  7. 上の 4 つの成果物を書き, `make_group_bundle(<一式>, <成果物>, name=..., data=<写真のディレクトリ>)` で一式を作る. `group_centers.json` の `ready` には, 埋め込みの一式の `ready` の `library`, `model`, `weights` (版の決まった名前) と `model.pretrained` の `sha256` を写す
 
 #### 自作の部品 (起動の設定のモジュール. `ml_inference.units`)
 

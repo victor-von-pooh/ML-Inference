@@ -1563,7 +1563,7 @@ def predict_ready(
     ValueError
         画像のファイルかディレクトリでない場合と, 読めない場合
     """
-    # 画像の読み込みと 1 枚ずつの前処理 (読めない画像は理由を付けて飛ばす)
+    # 画像の読み込みと 1 枚ずつの前処理 (読めない画像は理由付きで予測の外)
     frame, images, reasons = read_images(source,
                                          bundle.info["ready"]["preprocess"])
     keep = np.array([not r for r in reasons], dtype=bool)

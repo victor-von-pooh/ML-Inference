@@ -421,7 +421,7 @@ def read_images(
     except Exception as error:
         raise ValueError(f"{path.name} を読めません ({error})") from error
 
-    # 読めない画像は理由を付けて飛ばす
+    # 1 枚ずつの前処理と, 読めない画像の理由
     frame = data.frame.reset_index(drop=True)
     crop = int(preprocess["crop"])
     images = np.zeros((len(frame), 3, crop, crop), dtype=np.float32)

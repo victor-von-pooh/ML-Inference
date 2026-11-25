@@ -20,7 +20,8 @@ PHOTOS = [
     ("d_blue", 2, (30, 10)), ("e_red", 0, (14, 22)), ("f_blue", 2, (18, 18)),
 ]
 
-# 骨組みが書く群の安定性の行
+# 骨組みが書く比べる相手の名前と, 群の安定性の行
+BASELINE = "写真を縮めた画素をそのまま k-means で分けた群"
 STABILITY = {
     "k": 2, "method": "seed", "repeats": 5, "ari": 1.0,
     "ari_baseline": 0.8, "ari_diff": 0.2, "ari_min": 1.0,
@@ -45,7 +46,7 @@ def write_photos(folder: Path, broken: bool = True) -> Path:
     folder: Path
         書いたディレクトリ
     """
-    # 色の濃さを少しずつ変える
+    # 少しずつ違う色の濃さ
     image = pytest.importorskip("PIL.Image")
     folder.mkdir()
     for index, (name, channel, size) in enumerate(PHOTOS):
@@ -58,7 +59,9 @@ def write_photos(folder: Path, broken: bool = True) -> Path:
     return folder
 
 
-def write_artifacts(root: Path, photos: Path, monkeypatch) -> Path:
+def write_artifacts(
+    root: Path, photos: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
     """
     骨組みと同じ手順で, 既製の埋め込みの群分けの成果物を書く関数
 
@@ -78,7 +81,7 @@ def write_artifacts(root: Path, photos: Path, monkeypatch) -> Path:
     folder: Path
         成果物のディレクトリ
     """
-    # 埋め込みの一式で, 読めた写真だけを埋め込む
+    # 埋め込みの一式での, 読めた写真だけの埋め込み
     monkeypatch.setitem(READY_LIBRARIES, "test", tiny_weights)
     embedder = root / "embedder"
     info = make_ready_bundle(embedder, "tiny", "V1", library="test",
@@ -111,7 +114,7 @@ def write_artifacts(root: Path, photos: Path, monkeypatch) -> Path:
         row["stability"] = 1.0
     (folder / "evaluations" / "group_stability.json").write_text(
         json.dumps({"rows": [STABILITY], "epoch": None,
-                    "baseline": "画素をそのまま k-means で分けた群"}),
+                    "baseline": BASELINE}),
         encoding="utf-8"
     )
     (folder / "evaluations" / "group_summary.json").write_text(
@@ -138,7 +141,7 @@ def ready_group(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
     found: dict
         bundle (一式), artifacts (成果物), photos (写真), info
     """
-    # 群に分けた写真を渡して割り当て直す
+    # 群に分けた写真を渡した割り当て直し
     photos = write_photos(tmp_path / "photos")
     artifacts = write_artifacts(tmp_path, photos, monkeypatch)
     bundle = tmp_path / "bundle"
@@ -176,10 +179,10 @@ def test_make_ready_group_bundle(ready_group: dict) -> None:
     assert group["rows"] == 6
     assert group["check"] == {"rows": 6, "agreement": 1.0}
     assert group["stability"]["ari"] == 1.0
-    assert group["stability"]["baseline"] == "画素をそのまま k-means で分けた群"
+    assert group["stability"]["baseline"] == BASELINE
     assert [row["group"] for row in group["summary"]] == [0, 1, "全体"]
 
-    # 説明は群分けの一式で, 出どころと置き場も返す
+    # 群分けの一式の説明と, 出どころと置き場
     description = describe_bundle(ready_group["bundle"])
     assert description["kind"] == "group" and description["task"] == ""
     assert description["group"]["k"] == 2
@@ -202,7 +205,7 @@ def test_predict_ready_group(ready_group: dict, tmp_path: Path) -> None:
     ----------
     None
     """
-    # 赤は群 0, 青は群 1, 読めない写真は飛ばす
+    # 赤は群 0, 青は群 1, 読めない写真は割り当ての外
     bundle = ready_group["bundle"]
     frame = predict(bundle, ready_group["photos"])
     rows = frame.set_index("path")
@@ -216,7 +219,7 @@ def test_predict_ready_group(ready_group: dict, tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="options"):
         predict(bundle, ready_group["photos"], options={"x": 1})
 
-    # 群の要約は写真の幅と高さの平均, 代表の写真は場所も持つ
+    # 写真の幅と高さの平均の群の要約と, 場所付きの代表の写真
     summary = group_summary(bundle, frame)
     assert [row["rows"] for row in summary] == [3, 3, 6]
     assert summary[0]["stability"] == 1.0
@@ -228,7 +231,7 @@ def test_predict_ready_group(ready_group: dict, tmp_path: Path) -> None:
     assert len(groups[1]["rows"]) == 2
 
     # 結論と書き出し. 読み直した表から同じ要約と代表の写真 (距離は文字に
-    # した小数の桁の分だけ違ってよい)
+    # した小数の桁の分の違いまで)
     result = infer(bundle, ready_group["photos"])
     assert result["summary"]["predicted"] == 6
     assert result["sentences"][0] == "7 行のうち 6 行を 2 個の群に割り当てた"\
@@ -274,7 +277,7 @@ def test_ready_group_errors(
         make_group_bundle(tmp_path / "x", artifacts, pretrained={},
                           license=LICENSE)
 
-    # 割り当ての表の行を見分ける列が写真の場所でない
+    # 写真の場所でない, 割り当ての表の行を見分ける列
     file = artifacts / "group_assignments.csv"
     table = pd.read_csv(file)
     table.rename(columns={"path": "row"}).to_csv(file, index=False)
@@ -319,7 +322,7 @@ def test_ready_group_errors(
         load_bundle(bundle)
     inner.write_text(json.dumps(centers), encoding="utf-8")
 
-    # 出どころの重みが入れ替わると, 推論も一式づくりも止まる
+    # 出どころの重みの入れ替わりで止まる推論と一式づくり
     monkeypatch.setitem(SOURCE, "scale", 2.0)
     with pytest.raises(ValueError, match="hash が一式と違います"):
         predict(bundle, ready_group["photos"])

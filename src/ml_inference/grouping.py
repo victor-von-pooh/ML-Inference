@@ -302,7 +302,7 @@ def ready_centers(path: Path) -> bool:
     ready: bool
         読める辞書で ready を持てば True (形の誤りは read_centers で)
     """
-    # 読めないファイルは学習した符号化器のものとして確かめる
+    # 読めないファイルは学習した符号化器のものとしての確かめ
     try:
         loaded = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -941,8 +941,7 @@ def assign_images(
     bundle: Bundle, source: Any, batch_size: int, device: str
 ) -> tuple[pd.DataFrame, list[str], np.ndarray, np.ndarray]:
     """
-    写真を一式の前処理で読み, 既製のモデルの埋め込みを群の中心に割り当てる
-    関数
+    写真を読み, 既製のモデルの埋め込みを群の中心に割り当てる関数
 
     Parameters
     ----------
@@ -966,7 +965,7 @@ def assign_images(
     ValueError
         画像のファイルかディレクトリでない場合と, 読めない場合
     """
-    # 読めない画像は理由を付けて飛ばす
+    # 写真の読み込み (読めない画像は理由付きで割り当ての外)
     frame, images, reasons = read_images(source,
                                          bundle.info["ready"]["preprocess"])
     labels, distance = assign_kept(bundle, images, reasons, batch_size,
@@ -1068,7 +1067,7 @@ def run_sources(run: Union[str, Path]) -> dict:
         成果物が無い場合
     """
     # 重みと定義 (仮のモデルで学習した実験には定義が無い. 既製の埋め込みは
-    # 重みを出どころから読み, 定義も作る)
+    # 重みも定義も出どころから)
     root = Path(run).expanduser().resolve()
     if not root.is_dir():
         raise ValueError(f"実験のディレクトリ {root} がありません")
@@ -1137,8 +1136,8 @@ def data_check(
     found: tuple[Optional[dict], list[str]]
         rows と agreement (比べられなければ None) と注意の文
     """
-    # 既製の埋め込みは読めた写真だけ (骨組みは読めた写真だけを割り当ての表
-    # に書く)
+    # 既製の埋め込みは読めた写真だけ (骨組みの割り当ての表も読めた写真
+    # だけ)
     labels = None
     if bundle.from_ready:
         what = "群に分けた写真"
@@ -1429,7 +1428,7 @@ def make_ready_group(
             f"{width} と違います"
         )
 
-    # 隣の一時ディレクトリに作り, 確かめてから入れ替える (重みは空)
+    # 隣の一時ディレクトリでの作成と, 確かめた後の入れ替え (重みは空)
     writing = final.with_name(f".{final.name}.writing")
     if writing.exists():
         shutil.rmtree(writing)
@@ -1478,7 +1477,7 @@ def make_ready_group(
         }
 
         # 写真を渡した場合は, 割り当て直しと骨組みの割り当ての比べ (読んだ
-        # 重みのモデルをそのまま使う)
+        # 重みのモデルのまま)
         if data is not None:
             building = Bundle(path=writing, info=info, spec=spec,
                               dataset=Dataset(path=writing, info={},
@@ -1554,8 +1553,7 @@ def check_group_bundle(bundle: Bundle) -> None:
 
 def check_ready_centers(bundle: Bundle, found: dict) -> None:
     """
-    既製の埋め込みの群の中心が, 一式の group と ready と合うかを確かめる
-    関数
+    既製の埋め込みの群の中心が一式と合うかを確かめる関数
 
     Parameters
     ----------
