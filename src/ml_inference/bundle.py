@@ -2235,11 +2235,16 @@ def ready_output(form: str, found: dict, built: Any, crop: int) -> dict:
     ValueError
         埋め込みを取り出せない場合
     """
-    # 埋め込みの幅は最後の層の入力を確かめて決める
+    # 埋め込みの幅は, 最後の層の入力を確かめた幅 (確かめた後に hook は
+    # 外す)
     if form == "class":
         output = {"form": "class", "classes": list(found["classes"])}
         return output
-    width = check_head(ReadyEmbedding(built.eval()), crop)
+    embedder = ReadyEmbedding(built.eval())
+    try:
+        width = check_head(embedder, crop)
+    finally:
+        embedder.release()
     output = {"form": "vector", "shape": [width]}
 
     return output

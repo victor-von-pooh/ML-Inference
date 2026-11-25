@@ -421,7 +421,8 @@ def last_linear(model: nn.Module) -> nn.Linear:
     ValueError
         全結合の層が無い場合
     """
-    # torchvision の画像の分類のモデルは分類の層を最後に登録する
+    # 登録の順で最後の全結合の層 (torchvision の画像の分類のモデルの分類
+    # の層)
     heads = [m for m in model.modules() if isinstance(m, nn.Linear)]
     if not heads:
         raise ValueError(
@@ -448,7 +449,22 @@ class ReadyEmbedding(nn.Module):
                 f"埋め込みの幅 {width} と違います"
             )
         self.found: list = []
-        self.head.register_forward_hook(self.keep)
+        self.handle = self.head.register_forward_hook(self.keep)
+
+    def release(self) -> None:
+        """
+        最後の層に付けた hook を外す関数
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        ----------
+        None
+        """
+        # 外した後は埋め込みを取り出せない
+        self.handle.remove()
 
     def keep(self, module: nn.Module, inputs: tuple, output: Any) -> None:
         """
@@ -467,7 +483,7 @@ class ReadyEmbedding(nn.Module):
         ----------
         None
         """
-        # 1 回の推論で 1 度だけ通る
+        # 最後の層の入力 (1 回の推論で 1 度だけ)
         self.found.append(inputs[0])
 
     def pair(self, *inputs: torch.Tensor) -> tuple:
@@ -521,7 +537,7 @@ class ReadyEmbedding(nn.Module):
         embedding: torch.Tensor
             (件数, 幅) の埋め込み
         """
-        # 出力は使わない
+        # 埋め込みだけ (出力は不使用)
         embedding, _ = self.pair(*inputs)
 
         return embedding
@@ -529,8 +545,7 @@ class ReadyEmbedding(nn.Module):
 
 def check_head(embedder: ReadyEmbedding, crop: int) -> int:
     """
-    最後の全結合の層が分類の最後の層 (出力をそのまま作る層) かを確かめる
-    関数
+    最後の全結合の層が, 出力をそのまま作る分類の層かを確かめる関数
 
     乱数の画像で, 最後の層に入力を通した値とモデルの出力が合うかを見る
 

@@ -14,6 +14,7 @@ from ml_inference import (
     load_bundle, make_ready_bundle, predict, read_result,
     write_result
 )
+from ml_inference.predict import empty_output
 from ml_inference.ready import ReadyEmbedding, check_head, prepare_ready
 
 # 出どころの重みの倍率 (入れ替わった出どころを試すため変える)
@@ -434,7 +435,7 @@ class ScaledNet(ReadyNet):
         out: torch.Tensor
             (件数, 3) の 2 倍の logit
         """
-        # 最後の層の後にも処理がある
+        # 最後の層の後の倍率
         out = 2.0 * super().forward(x)
 
         return out
@@ -445,7 +446,7 @@ class PoolNet(nn.Module):
         # 親クラスのコンストラクタを呼び出す
         super(PoolNet, self).__init__()
 
-        # 全結合の層を持たない
+        # 全結合の層の無いモデル
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.flatten = nn.Flatten()
 
@@ -503,7 +504,7 @@ def other_weights(unit: str) -> Any:
         found: dict
             READY_LIBRARIES の関数の結果の形
         """
-        # 部品の他は tiny と同じ
+        # 部品の他は tiny と同じ説明
         found = {**tiny_weights(model, weights), "unit": unit}
 
         return found
@@ -528,7 +529,7 @@ def embedding_bundle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     path: Path
         一式
     """
-    # 出力の形を vector にして作る
+    # 出力の形が vector の一式
     monkeypatch.setitem(READY_LIBRARIES, "test", tiny_weights)
     path = tmp_path / "tiny_embedding"
     make_ready_bundle(path, "tiny", "V1", library="test", license=LICENSE,
@@ -574,7 +575,7 @@ def test_embedding_bundle_returns_penultimate(
     np.testing.assert_allclose(red, [1.0, -1.0, -1.0], atol=1e-5)
     assert rows.loc["d_broken.png", "status"] == "skipped"
 
-    # 結論は件数だけで, 埋め込みは artifacts に書き出して読み直せる
+    # 件数だけの結論と, artifacts に書き出した埋め込みの読み直し
     concluded = infer(embedding_bundle, folder)
     assert concluded["summary"]["predicted"] == 3
     out = tmp_path / "result"
@@ -640,7 +641,17 @@ def test_embedding_bundle_checks(
         with pytest.raises(ValueError, match=message):
             load_bundle(embedding_bundle)
 
-    # 幅が最後の層の入力と違えば, 組み立てるときに止まる
+    # 0 件の出力は (0, 幅). hook を外した後は埋め込みを取り出せない
+    file.write_text(yaml.safe_dump(info, allow_unicode=True),
+                    encoding="utf-8")
+    loaded = load_bundle(embedding_bundle)
+    assert empty_output(loaded).shape == (0, 3)
+    embedder = ReadyEmbedding(loaded.model().model)
+    embedder.release()
+    with pytest.raises(ValueError, match="0 回通りました"):
+        embedder(torch.zeros(1, 3, 8, 8))
+
+    # 最後の層の入力と違う幅は, 組み立てるときの誤り
     changed = {**info, "output": {"form": "vector", "shape": [4]}}
     file.write_text(yaml.safe_dump(changed, allow_unicode=True),
                     encoding="utf-8")
