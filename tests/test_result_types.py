@@ -201,6 +201,40 @@ def test_columns_without_types(tmp_path: Path) -> None:
     assert list(back["frame"].columns) == ["code", "group", "status"]
 
 
+def test_types_by_column_dtype(tmp_path: Path) -> None:
+    """
+    列の型 (文字の型, 区分の型, 値の型の混ざる列, 符号なしの整数) と表の
+    行の名前に依らず, 値の変わる列だけの型が残ることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 行の名前が 0 から始まらない表 (列は書いた順の位置で比べる)
+    frame = pd.DataFrame({
+        "code": pd.Series(["001", None, "1e3"], dtype="str"),
+        "name": pd.Series(["a", "", "b"], dtype="str"),
+        "blank": pd.Series(["", None, ""], dtype=object),
+        "kind": pd.Series(["01", "2", "3"], dtype="category"),
+        "count": pd.Series([1, np.int8(2), None], dtype=object),
+        "flag": pd.Series([1, True, 3], dtype=object),
+        "huge": pd.Series([1, 2 ** 70, 3], dtype=object),
+        "small": pd.Series([1, 2, 3], dtype="uint64"),
+        "status": ["ok", "ok", "skipped"],
+    })
+    frame.index = [7, 8, 9]
+    root = write_result({"frame": frame}, tmp_path / "result")
+    meta = yaml.safe_load((root / "result.yaml").read_text(encoding="utf-8"))
+    assert meta["column_types"] == {
+        "code": "text", "kind": "text", "count": "integer",
+    }
+
+
 def write_raw(root: Path, csv: str, meta: dict) -> Path:
     """
     予測の表と result.yaml を, そのまま書く関数
