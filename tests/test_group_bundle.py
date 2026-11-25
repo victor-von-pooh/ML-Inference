@@ -13,8 +13,9 @@ from ml_modelcontrol import build_model, load_example
 
 import ml_inference.bundle as bundle_module
 from ml_inference import (
-    describe_bundle, group_summary, infer, load_bundle, make_bundle,
-    make_group_bundle, predict, read_result, write_result
+    describe_bundle, group_representatives, group_summary, infer,
+    load_bundle, make_bundle, make_group_bundle, predict, read_result,
+    write_result
 )
 
 # 群の数と, 群ごとの行の数
@@ -563,6 +564,93 @@ def test_group_summary(tmp_path: Path, group_run: Path) -> None:
     assert group_summary(root, prediction.iloc[39:]) == []
     with pytest.raises(ValueError, match="結論の決め方"):
         infer(root, new, rules={"min_confidence": 0.5})
+
+
+def test_group_representatives(tmp_path: Path, group_run: Path) -> None:
+    """
+    群の代表の行が群ごとに中心に近い順で, 割り当てない行を除き, 結論と
+    書き出しに群の要約と並ぶことを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    group_run: Path
+        実験のディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 北の 19 行と南の 2 行 (東の群には行が無い) と, 割り当てない 1 行
+    root = tmp_path / "bundle"
+    make_group_bundle(root, group_run)
+    frame = customer_rows()
+    new = pd.concat([pd.DataFrame([{"customer": "x", "spend": "?",
+                                    "visits": 1, "region": "north"}]),
+                     frame.iloc[1:20], frame.iloc[20:22]],
+                    ignore_index=True)
+    prediction = predict(root, new)
+    groups = group_representatives(root, prediction)
+    assert [entry["group"] for entry in groups] == [0, 1, 2]
+    assert [len(entry["rows"]) for entry in groups] == [3, 2, 0]
+
+    # 群の中で距離の近い順の行の位置と, 予測の表の距離と元の値
+    north = prediction[prediction["group"] == 0]
+    expected = list(north["distance"].sort_values(kind="stable").index[:3])
+    first = groups[0]["rows"]
+    assert [row["row"] for row in first] == expected
+    assert 0 not in [row["row"] for entry in groups for row in entry["rows"]]
+    assert [row["distance"] for row in first] == list(
+        prediction["distance"][expected]
+    )
+    assert first[0]["distance"] <= first[1]["distance"] <= (
+        first[2]["distance"]
+    )
+    place = expected[0]
+    assert first[0]["values"] == {
+        "spend": new["spend"][place], "visits": int(new["visits"][place]),
+        "region": "north",
+    }
+    assert type(first[0]["values"]["visits"]) is int
+
+    # 件数を選べる (群の行が少なければその数だけ)
+    groups = group_representatives(root, prediction, count=30)
+    assert [len(entry["rows"]) for entry in groups] == [19, 2, 0]
+    assert [row["row"] for row in group_representatives(
+        root, prediction, count=1
+    )[0]["rows"]] == expected[:1]
+
+    # 結論は群の要約と並べて既定の 3 件. 書き出して読んだ表からも作れる
+    result = infer(root, new)
+    assert result["summary"]["representatives"] == group_representatives(
+        root, prediction
+    )
+    assert list(result["summary"])[:6] == [
+        "rows", "predicted", "skipped", "k", "groups", "representatives"
+    ]
+    out = tmp_path / "result"
+    write_result(result, out)
+    loaded = read_result(out)
+    assert loaded["format_version"] == 1
+    assert loaded["summary"]["representatives"] == (
+        result["summary"]["representatives"]
+    )
+    again = group_representatives(root, loaded["frame"])
+    assert [[row["row"] for row in entry["rows"]] for entry in again] == [
+        [row["row"] for row in entry["rows"]]
+        for entry in result["summary"]["representatives"]
+    ]
+
+    # 割り当てた行が無ければ空. 件数, 列, 一式の誤り
+    assert group_representatives(root, prediction.iloc[:1]) == []
+    for count in (0, 1.5, True, "3"):
+        with pytest.raises(ValueError, match="1 以上の整数"):
+            group_representatives(root, prediction, count=count)
+    with pytest.raises(ValueError, match="distance"):
+        group_representatives(root, prediction.drop(columns="distance"))
+    with pytest.raises(ValueError, match="region"):
+        group_representatives(root, prediction.drop(columns="region"))
 
 
 def test_group_bundle_errors(
