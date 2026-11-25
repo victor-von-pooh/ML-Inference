@@ -260,13 +260,16 @@ def test_newer_bundle_stops(tmp_path: Path, table_dataset: Path) -> None:
     ----------
     None
     """
-    # 版 10 は読めない. 版 9 は group が要る. 版 8 は rank が要る. 版 7 は
-    # 表の出力だけ. 版 6 は ready が要る. 版 5 は dataset を持てない. 版 4
-    # は items が要る
+    # 版 11 は読めない. 版 10 と 9 は group が要る. 版 8 は rank が要る.
+    # 版 7 は表の出力だけ. 版 6 は ready が要る. 版 5 は dataset を持て
+    # ない. 版 4 は items が要る
     path = table_bundle(tmp_path, table_dataset)
     original = read_info(path)
+    rewrite(path, {**original, "format_version": 11})
+    with pytest.raises(ValueError, match="format_version 11 .*読めません"):
+        load_bundle(path)
     rewrite(path, {**original, "format_version": 10})
-    with pytest.raises(ValueError, match="format_version 10 .*読めません"):
+    with pytest.raises(ValueError, match="版 10 の一式には group"):
         load_bundle(path)
     rewrite(path, {**original, "format_version": 9})
     with pytest.raises(ValueError, match="group"):

@@ -19,7 +19,7 @@ from ml_inference.procedures import (
 )
 from ml_inference.grouping import group_of_bundle, predict_group
 from ml_inference.ranking import predict_rank, rank_of_bundle
-from ml_inference.ready import prepare_ready, weights_file
+from ml_inference.ready import read_images, weights_file
 from ml_inference.tables import decode_table_rows, table_width
 from ml_inference.texts import ids_to_text, text_vocabulary
 
@@ -1563,29 +1563,9 @@ def predict_ready(
     ValueError
         画像のファイルかディレクトリでない場合と, 読めない場合
     """
-    # 画像だけ (表と ML-EDA の Data は渡せない)
-    if not isinstance(source, (str, Path)):
-        raise ValueError(
-            "既製のモデルの一式には画像のファイルかディレクトリの場所を渡して"
-            "ください"
-        )
-    path = Path(source).expanduser()
-    try:
-        data = load_data(path, loader=ITEM_LOADERS["image"])
-    except Exception as error:
-        raise ValueError(f"{path.name} を読めません ({error})") from error
-
-    # 1 枚ずつ一式の前処理 (読めない画像は理由を付けて飛ばす)
-    frame = data.frame.reset_index(drop=True)
-    preprocess = bundle.info["ready"]["preprocess"]
-    crop = int(preprocess["crop"])
-    images = np.zeros((len(frame), 3, crop, crop), dtype=np.float32)
-    reasons = [""] * len(frame)
-    for index in range(len(frame)):
-        try:
-            images[index] = prepare_ready(data.load_item(index), preprocess)
-        except Exception as error:
-            reasons[index] = f"画像を読めません ({error})"
+    # 画像の読み込みと 1 枚ずつの前処理 (読めない画像は理由付きで予測の外)
+    frame, images, reasons = read_images(source,
+                                         bundle.info["ready"]["preprocess"])
     keep = np.array([not r for r in reasons], dtype=bool)
     columns = infer_kept(
         bundle, {"items": images}, keep, reasons, batch_size, device

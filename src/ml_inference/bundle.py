@@ -37,8 +37,8 @@ from ml_inference.weights import (
 # 推論の一式の形の版 (読める最も新しい版. 版 1 のデータセットの一式は
 # 版 3, 版 2 のデータセットの一式は版 4, 雑音だけの一式は版 5 (表の出力は
 # 版 7), 既製のモデルの一式は版 6, 並べるの一式は版 8, 群分けの一式は
-# 版 9 で書く)
-BUNDLE_FORMAT_VERSION = 9
+# 版 9, 既製の埋め込みの群分けの一式は版 10 で書く)
+BUNDLE_FORMAT_VERSION = 10
 COLUMN_BUNDLE_VERSION = 3
 ITEMS_BUNDLE_VERSION = 4
 NOISE_BUNDLE_VERSION = 5
@@ -46,11 +46,15 @@ READY_BUNDLE_VERSION = 6
 TABLE_BUNDLE_VERSION = 7
 RANK_BUNDLE_VERSION = 8
 GROUP_BUNDLE_VERSION = 9
+READY_GROUP_BUNDLE_VERSION = 10
+
+# 群分けの一式の版 (列の符号化か, 既製のモデルの埋め込み)
+GROUP_VERSIONS = (GROUP_BUNDLE_VERSION, READY_GROUP_BUNDLE_VERSION)
 
 # データセットを持たない一式の版
 DATASETLESS_VERSIONS = (
     NOISE_BUNDLE_VERSION, READY_BUNDLE_VERSION, TABLE_BUNDLE_VERSION,
-    RANK_BUNDLE_VERSION, GROUP_BUNDLE_VERSION
+    RANK_BUNDLE_VERSION, GROUP_BUNDLE_VERSION, READY_GROUP_BUNDLE_VERSION
 )
 
 # inference.yaml の一番上の項目
@@ -218,14 +222,14 @@ class Bundle:
         if self.from_items:
             kind = "items"
             return kind
+        if self.from_group:
+            kind = "group"
+            return kind
         if self.from_ready:
             kind = "ready"
             return kind
         if self.from_rank:
             kind = "rank"
-            return kind
-        if self.from_group:
-            kind = "group"
             return kind
         if self.from_noise:
             kind = "noise"
@@ -405,9 +409,13 @@ class Bundle:
         Returns
         ----------
         width: Optional[int]
-            埋め込みの一式は output.shape の幅 (他は None)
+            埋め込みの一式は output.shape の幅, 既製の埋め込みの群分けの
+            一式は group.width (他は None)
         """
-        # 1 件の形は (幅,)
+        # 1 件の形は (幅,). 群分けは群の中心の幅
+        if self.from_group:
+            width = int(self.info["group"]["width"])
+            return width
         shape = self.output_info.get("shape")
         width = int(shape[0]) if self.form == "vector" and isinstance(
             shape, list
@@ -855,9 +863,12 @@ def check_info(info: Any) -> list[str]:
             f"だけで, 版 {TABLE_BUNDLE_VERSION} の一式の出力の形は table "
             "だけです"
         )
-    if info.get("ready") is not None and version != READY_BUNDLE_VERSION:
+    if info.get("ready") is not None and version not in (
+        READY_BUNDLE_VERSION, READY_GROUP_BUNDLE_VERSION
+    ):
         errors.append(
-            f"ready を持つ一式は版 {READY_BUNDLE_VERSION} にしてください"
+            f"ready を持つ一式は版 {READY_BUNDLE_VERSION} にしてください "
+            f"(既製の埋め込みの群分けは版 {READY_GROUP_BUNDLE_VERSION})"
         )
     if version == READY_BUNDLE_VERSION:
         errors.extend(check_ready_info(info))
@@ -876,19 +887,18 @@ def check_info(info: Any) -> list[str]:
         from ml_inference.ranking import check_rank_info
 
         errors.extend(check_rank_info(info))
-    if (output.get("form") == "cluster") != (
-        version == GROUP_BUNDLE_VERSION
-    ):
+    if (output.get("form") == "cluster") != (version in GROUP_VERSIONS):
         errors.append(
-            f"出力の形 cluster は版 {GROUP_BUNDLE_VERSION} の群分けの一式"
-            f"だけで, 版 {GROUP_BUNDLE_VERSION} の一式の出力の形は cluster "
-            "だけです"
+            f"出力の形 cluster は版 {GROUP_BUNDLE_VERSION} と "
+            f"{READY_GROUP_BUNDLE_VERSION} の群分けの一式だけで, この版の一式"
+            "の出力の形は cluster だけです"
         )
-    if info.get("group") is not None and version != GROUP_BUNDLE_VERSION:
+    if info.get("group") is not None and version not in GROUP_VERSIONS:
         errors.append(
-            f"group を持つ一式は版 {GROUP_BUNDLE_VERSION} にしてください"
+            f"group を持つ一式は版 {GROUP_BUNDLE_VERSION} (既製の埋め込みは"
+            f"版 {READY_GROUP_BUNDLE_VERSION}) にしてください"
         )
-    if version == GROUP_BUNDLE_VERSION:
+    if version in GROUP_VERSIONS:
         # 群分けの一式の決まりは群分けのモジュールが持つ
         from ml_inference.grouping import check_group_info
 
@@ -966,6 +976,27 @@ def check_ready_info(info: dict) -> list[str]:
     model = info.get("model") if isinstance(info.get("model"), dict) else {}
     if model.get("target_scale") is not None:
         errors.append("既製のモデルの一式は model.target_scale を持てません")
+    errors.extend(check_sourced(model))
+
+    return errors
+
+
+def check_sourced(model: dict) -> list[str]:
+    """
+    既製のモデルの重みが出どころから読む記録かを確かめる関数
+
+    Parameters
+    ----------
+    model: dict
+        inference.yaml の model
+
+    Returns
+    ----------
+    errors: list[str]
+        誤りの一覧 (無ければ空)
+    """
+    # 重みは写さず, 全てのノードを出どころから
+    errors = []
     records = model.get("pretrained")
     if not isinstance(records, list) or not records or not all(
         isinstance(r, dict) and r.get("place") == "source" for r in records
@@ -2130,20 +2161,7 @@ def make_ready_bundle(
     # 重みの説明 (種類の名前の表と前処理) と, 1 つのノードの定義
     found = READY_LIBRARIES[library](model, weights)
     crop = int(found["preprocess"]["crop"])
-    spec = {
-        "format_version": 1,
-        "name": model,
-        "inputs": {"image": {"shape": [1, 3, crop, crop]}},
-        "nodes": {
-            "model": {
-                "unit": found["unit"], "params": dict(found["params"]),
-                "inputs": "image",
-            }
-        },
-        "outputs": {"logits": "model"},
-    }
-    spec = load_spec(spec)
-    check_units(spec)
+    spec = ready_spec(found, model)
 
     # 出どころの重みを読んで hash を求める (初回は取りに行く)
     record, ready, notes, built = ready_record(
@@ -2208,6 +2226,48 @@ def make_ready_bundle(
     writing.rename(final)
 
     return info
+
+
+def ready_spec(found: dict, model: str) -> dict:
+    """
+    既製のモデルの 1 つのノード (model) の定義を作る関数
+
+    Parameters
+    ----------
+    found: dict
+        出どころの重みの説明 (READY_LIBRARIES の関数の結果)
+    model: str
+        モデルの名前
+
+    Returns
+    ----------
+    spec: dict
+        前処理の後の画像を入力にし, 出どころの部品の出力を logits にする
+        定義
+
+    Raises
+    ----------
+    ValueError
+        部品が登録されていない場合と, 定義が誤りの場合
+    """
+    # 入力は前処理の後の (3, crop, crop) の画像
+    crop = int(found["preprocess"]["crop"])
+    spec = {
+        "format_version": 1,
+        "name": model,
+        "inputs": {"image": {"shape": [1, 3, crop, crop]}},
+        "nodes": {
+            "model": {
+                "unit": found["unit"], "params": dict(found["params"]),
+                "inputs": "image",
+            }
+        },
+        "outputs": {"logits": "model"},
+    }
+    spec = load_spec(spec)
+    check_units(spec)
+
+    return spec
 
 
 def ready_output(form: str, found: dict, built: Any, crop: int) -> dict:

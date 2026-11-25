@@ -2,7 +2,9 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 import numpy as np
+import pandas as pd
 import torch
+from ml_eda import load_data
 from torch import nn
 
 # 既製のモデルの一式の入力の項目の種類と, 出力の形 (class は種類の予測,
@@ -15,6 +17,9 @@ READY_FORMS = ("class", "vector")
 HEAD_SAMPLES = 2
 HEAD_SEED = 0
 HEAD_TOLERANCE = 1e-4
+
+# 画像のファイルかディレクトリの読み込み (ML-EDA の読み込みの名前)
+IMAGE_LOADER = "image_folder"
 
 # ready の欄
 READY_KEYS = (
@@ -377,6 +382,58 @@ def prepare_ready(image: np.ndarray, preprocess: dict) -> np.ndarray:
     array = ((part - mean) / std).transpose(2, 0, 1).astype(np.float32)
 
     return array
+
+
+def read_images(
+    source: Any, preprocess: dict
+) -> tuple[pd.DataFrame, np.ndarray, list[str]]:
+    """
+    画像のファイルかディレクトリを読み, 1 枚ずつ前処理をかける関数
+
+    Parameters
+    ----------
+    source: Any
+        画像のファイルかディレクトリの場所
+    preprocess: dict
+        ready.preprocess
+
+    Returns
+    ----------
+    found: tuple[pd.DataFrame, np.ndarray, list[str]]
+        読み込みの表 (path など. 添字は 0 から), (件数, 3, crop, crop) の
+        float32 (読めない画像は 0), 画像ごとの読めない理由 (読めた画像は
+        空)
+
+    Raises
+    ----------
+    ValueError
+        画像のファイルかディレクトリの場所でない場合と, 読めない場合
+    """
+    # 画像だけ (表と ML-EDA の Data は渡せない)
+    if not isinstance(source, (str, Path)):
+        raise ValueError(
+            "既製のモデルの一式には画像のファイルかディレクトリの場所を渡して"
+            "ください"
+        )
+    path = Path(source).expanduser()
+    try:
+        data = load_data(path, loader=IMAGE_LOADER)
+    except Exception as error:
+        raise ValueError(f"{path.name} を読めません ({error})") from error
+
+    # 1 枚ずつの前処理と, 読めない画像の理由
+    frame = data.frame.reset_index(drop=True)
+    crop = int(preprocess["crop"])
+    images = np.zeros((len(frame), 3, crop, crop), dtype=np.float32)
+    reasons = [""] * len(frame)
+    for index in range(len(frame)):
+        try:
+            images[index] = prepare_ready(data.load_item(index), preprocess)
+        except Exception as error:
+            reasons[index] = f"画像を読めません ({error})"
+    found = (frame, images, reasons)
+
+    return found
 
 
 def weights_file(ready: dict) -> Path:
