@@ -378,10 +378,10 @@ def test_given_types_text_output(tmp_path: Path) -> None:
     assert kept(table["tokens"]) == ["5", "", None]
 
 
-def test_text_output_form(tmp_path: Path) -> None:
+def test_text_without_tokens(tmp_path: Path) -> None:
     """
-    tokens の列の無い古い文の結果も, output_form が text なら予測を文字で
-    読み, 予測した行の空の文を空の文字にすることを確かめる関数
+    tokens の列の無い古い文の結果は文の出力と見分けず, 呼び手が
+    override_types で予測を文字で読めることを確かめる関数
 
     Parameters
     ----------
@@ -393,13 +393,12 @@ def test_text_output_form(tmp_path: Path) -> None:
     None
     """
     # 番号 1 つの予測, 空の文 (予測した行), 予測しなかった行
-    csv = "status,prediction\nok,5\nok,\nskipped,\n"
-    root = write_raw(tmp_path / "text", csv,
+    root = write_raw(tmp_path / "text",
+                     "status,prediction\nok,5\nok,\nskipped,\n",
                      {"format_version": 1, "output_form": "text"})
     table = read_result(root)["frame"]
-    assert kept(table["prediction"]) == ["5", "", None]
-
-    # 出力の形の無い結果は, 文の出力として読まない
-    root = write_raw(tmp_path / "plain", csv, {"format_version": 1})
-    table = read_result(root)["frame"]
     assert kept(table["prediction"]) == [5.0, None, None]
+
+    # 呼び手の強い型で文字にでき, 空の文は欠損のまま (戻すのは呼び手)
+    table = read_result(root, override_types={"prediction": "text"})
+    assert kept(table["frame"]["prediction"]) == ["5", None, None]
