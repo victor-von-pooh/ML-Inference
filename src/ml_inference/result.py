@@ -243,8 +243,7 @@ def write_result(result: dict, path: Union[str, Path]) -> Path:
     # 表は表計算のアプリで開ける BOM 付きの UTF-8 (読み直すと値の変わる列
     # の型を残す)
     frame.to_csv(root / "predictions.csv", index=False, encoding="utf-8-sig")
-    types = column_types(frame, root / "predictions.csv")
-    rows = mixed_rows(frame, root / "predictions.csv", types)
+    types, rows = column_types(frame, root / "predictions.csv")
 
     # 表以外の説明 (形の版を先頭に. 混ざる列があれば版 4, 型も中身も無け
     # れば版 1 のまま. 読んだ結果の版と中身と型の記録は書き直し)
@@ -493,13 +492,12 @@ def value_kind(value: Any) -> Optional[str]:
     Returns
     ----------
     kind: Optional[str]
-        空でない文字は text, 整数 (真偽値を除く) は integer, 有限の小数は
-        float, 空の文字は空の文字, 他 (真偽値, 無限の小数, 配列など) は
-        None
+        文字 (空の文字も) は text, 整数 (真偽値を除く) は integer, 有限の
+        小数は float, 他 (真偽値, 無限の小数, 配列など) は None
     """
     # 真偽値は整数の子なので先に除く
     if isinstance(value, str):
-        return "text" if value else ""
+        return "text"
     if isinstance(value, (bool, np.bool_)):
         return None
     if isinstance(value, (int, np.integer)):
@@ -525,14 +523,14 @@ def mixed_kind(kept: np.ndarray) -> Optional[str]:
         文字と整数と有限の小数のうち 2 つ以上の種類だけなら mixed, 他は
         None
     """
-    # 空の文字は欠けに戻るので種類に数えない
+    # 空の文字も文字の種類に数える (空の文字と整数の列の整数を, 小数に
+    # 読まないため)
     kinds = set()
     for value in kept:
         kind = value_kind(value)
         if kind is None:
             return None
-        if kind:
-            kinds.add(kind)
+        kinds.add(kind)
 
     return MIXED if len(kinds) >= 2 else None
 
@@ -605,50 +603,32 @@ def same_mixed(mine: list, back: list) -> bool:
     return True
 
 
-def mixed_rows(
-    frame: pd.DataFrame, path: Path, types: dict[str, str]
-) -> dict[str, list[int]]:
+def mixed_text_rows(mine: list, written: pd.Series) -> Optional[list]:
     """
-    混ざる列の数に見える文字の行の位置を返す関数 (戻らない列は型を外す)
+    混ざる列の数に見える文字の行の位置を返す関数
 
     Parameters
     ----------
-    frame: pd.DataFrame
-        書き出した表
-    path: Path
-        書いた predictions.csv
-    types: dict[str, str]
-        column_types の対応 (値ごとの型に戻らない混ざる列は除く)
+    mine: list
+        書き出した列の値
+    written: pd.Series
+        書いた predictions.csv から文字で読んだ同じ位置の列
 
     Returns
     ----------
-    rows: dict[str, list[int]]
-        列の名前から, 数に見える文字の値の行の位置 (0 から) の並びへの
-        対応 (その行の無い列は除く)
+    rows: Optional[list]
+        数に見える文字の値の行の位置 (0 から) の並び. 値ごとの型に戻して
+        書いた値と同じにならない列は None
     """
-    # 混ざる列だけを文字で読み直し, 値ごとの型に戻して書いた値と比べる
-    # (列は位置で引く)
-    positions = [i for i in range(frame.shape[1])
-                 if types.get(str(frame.columns[i])) == MIXED]
-    if not positions:
-        return {}
-    plain = pd.read_csv(path, encoding="utf-8-sig", keep_default_na=False,
-                        na_values=[""], dtype=str)
-    rows = {}
-    for position in positions:
-        name = str(frame.columns[position])
-        mine = frame.iloc[:, position].tolist()
-        written = plain.iloc[:, position]
-        text = [
-            i for i, (a, b) in enumerate(zip(mine, written.tolist()))
-            if isinstance(a, str) and isinstance(b, str)
-            and (INTEGER_TEXT.fullmatch(b) or FLOAT_TEXT.fullmatch(b))
-        ]
-        back = mixed_values(written, set(text)).tolist()
-        if not same_mixed(mine, back):
-            del types[name]
-        elif text:
-            rows[name] = text
+    # 数に見える文字の行を残した上で値ごとの型に戻し, 書いた値と比べる
+    rows = [
+        i for i, (a, b) in enumerate(zip(mine, written.tolist()))
+        if isinstance(a, str) and isinstance(b, str)
+        and (INTEGER_TEXT.fullmatch(b) or FLOAT_TEXT.fullmatch(b))
+    ]
+    back = mixed_values(written, set(rows)).tolist()
+    if not same_mixed(mine, back):
+        return None
 
     return rows
 
@@ -691,19 +671,14 @@ def column_changed(mine: pd.Series, back: pd.Series, kind: str) -> bool:
     back: pd.Series
         型を知らずに読み直した同じ位置の列
     kind: str
-        残す候補の型 (text か integer か mixed)
+        残す候補の型 (text か integer)
 
     Returns
     ----------
     changed: bool
-        mixed は常に, integer は読み直した列が整数の型でないか値が違う場合, text は空で
+        integer は読み直した列が整数の型でないか値が違う場合, text は空で
         ない文字の値が文字のまま同じ値で読めない場合に True
     """
-    # 混ざる列は値の種類が 2 つ以上あるので, 1 つの型で読み直す列では
-    # どれかの種類の値が必ず変わる
-    if kind == MIXED:
-        return True
-
     # 整数は読み直した列の型と値をまとめて比べる (読み直した列が整数の型
     # なら欠損は無い. int64 でない整数の型と長さの違う列は 1 件ずつ)
     if kind == "integer":
@@ -742,9 +717,12 @@ def column_changed(mine: pd.Series, back: pd.Series, kind: str) -> bool:
     return bool(mine.ne(back).any())
 
 
-def column_types(frame: pd.DataFrame, path: Path) -> dict[str, str]:
+def column_types(
+    frame: pd.DataFrame, path: Path
+) -> tuple[dict[str, str], dict[str, list]]:
     """
-    書いた予測の表を型を知らずに読み直すと値の変わる列の型を返す関数
+    書いた予測の表を型を知らずに読み直すと値の変わる列の型と, 混ざる列の
+    数に見える文字の行の位置を返す関数
 
     Parameters
     ----------
@@ -757,22 +735,35 @@ def column_types(frame: pd.DataFrame, path: Path) -> dict[str, str]:
     ----------
     types: dict[str, str]
         列の名前から型 (text か integer か mixed) への対応 (値の変わらない
-        列は除く)
+        列と, 値ごとの型に戻らない混ざる列は除く)
+    rows: dict[str, list]
+        混ざる列の名前から, 数に見える文字の値の行の位置 (0 から) の並び
+        への対応 (その行の無い列は除く)
     """
     # 候補の列だけを, 型を知らずに読んだ値と列ごとに比べる (列は位置で
-    # 引く)
+    # 引く. 混ざる列は値の種類が 2 つ以上あり 1 つの型で読むとどれかの
+    # 種類が必ず変わるので, 同じ 1 回の読み込みで文字で読み, 値ごとの型に
+    # 戻せるかを比べる)
     kinds = [column_kind(frame.iloc[:, i]) for i in range(frame.shape[1])]
     if not any(kinds):
-        return {}
-    plain = read_predictions(path)
-    types = {}
+        return {}, {}
+    mixed = {str(frame.columns[i]): "text"
+             for i, kind in enumerate(kinds) if kind == MIXED}
+    plain = read_predictions(path, mixed)
+    types, rows = {}, {}
     for position, kind in enumerate(kinds):
-        if kind is not None and column_changed(
-            frame.iloc[:, position], plain.iloc[:, position], kind
-        ):
-            types[str(frame.columns[position])] = kind
+        name = str(frame.columns[position])
+        mine, back = frame.iloc[:, position], plain.iloc[:, position]
+        if kind == MIXED:
+            text = mixed_text_rows(mine.tolist(), back)
+            if text is not None:
+                types[name] = kind
+            if text:
+                rows[name] = text
+        elif kind is not None and column_changed(mine, back, kind):
+            types[name] = kind
 
-    return types
+    return types, rows
 
 
 def given_types(types: Optional[dict], name: str) -> dict[str, Any]:

@@ -452,7 +452,8 @@ def test_mixed_columns_round_trip(tmp_path: Path) -> None:
     ----------
     None
     """
-    # 数にできない値の混ざる額, 数に見える文字の混ざる利用者, 整数と小数
+    # 数にできない値の混ざる額, 数に見える文字の混ざる利用者, 整数と小数,
+    # 空の文字と整数, 欠けに見える文字と大きな整数
     frame = pd.DataFrame({
         "spend": pd.Series([962.8, "abc", 12, None, "1.5", 1e20, ""],
                            dtype=object),
@@ -460,6 +461,9 @@ def test_mixed_columns_round_trip(tmp_path: Path) -> None:
                            "x 1"], dtype=object),
         "both": pd.Series([1, 2.5, None, np.float64(-0.0), 3, 4, 5],
                           dtype=object),
+        "blank": pd.Series(["", 1, 2, None, 3, 4, 5], dtype=object),
+        "texts": pd.Series(["-0", "NA", "nan", "inf", 2 ** 70, -7, "a"],
+                           dtype=object),
         "code": ["001", "002", "003", "004", "005", "006", "007"],
         "status": ["ok", "skipped", "ok", "ok", "ok", "ok", "ok"],
     })
@@ -468,9 +472,12 @@ def test_mixed_columns_round_trip(tmp_path: Path) -> None:
     meta = yaml.safe_load((root / "result.yaml").read_text(encoding="utf-8"))
     assert meta["format_version"] == 4
     assert meta["column_types"] == {
-        "spend": "mixed", "user": "mixed", "both": "mixed", "code": "text",
+        "spend": "mixed", "user": "mixed", "both": "mixed",
+        "blank": "mixed", "texts": "mixed", "code": "text",
     }
-    assert meta["text_rows"] == {"spend": [4], "user": [2, 3, 5]}
+    assert meta["text_rows"] == {
+        "spend": [4], "user": [2, 3, 5], "texts": [0]
+    }
 
     # 数は数 (整数と小数を分けて), 文字は文字のまま (空の文字は欠けに)
     back = read_result(root)
@@ -479,28 +486,41 @@ def test_mixed_columns_round_trip(tmp_path: Path) -> None:
     assert pd.isna(table["spend"].iloc[3]) and pd.isna(table["spend"].iloc[6])
     assert table["spend"].iloc[4] == "1.5" and table["spend"].iloc[5] == 1e20
     assert table["user"].tolist() == ["u1", 5, "007", "+3", -2, "1e3", "x 1"]
-    for name in ("spend", "user", "both"):
+    assert kept(table["blank"]) == [None, 1, 2, None, 3, 4, 5]
+    assert table["texts"].tolist() == [
+        "-0", "NA", "nan", "inf", 2 ** 70, -7, "a"
+    ]
+    for name in ("spend", "user", "both", "blank", "texts"):
         for a, b in zip(frame[name], table[name]):
             if pd.isna(a) or a == "":
                 assert pd.isna(b), name
+                continue
+            if isinstance(a, str):
+                kind = str
+            elif isinstance(a, float):
+                kind = float
             else:
-                assert type(b) is (str if isinstance(a, str) else (
-                    float if isinstance(a, float) else int)), (name, a, b)
-                assert a == b, name
+                kind = int
+            assert type(b) is kind and a == b, (name, a, b)
     assert table["code"].tolist() == frame["code"].tolist()
 
-    # 読んで書き直しても同じ記録と値
+    # 読んで書き直しても同じ記録と値 (空の文字が欠けに戻った列は, 欠けの
+    # ある整数の列として残る)
     again = write_result(back, tmp_path / "again")
     other = read_result(again)
-    assert other["column_types"] == meta["column_types"]
+    assert other["column_types"] == {**meta["column_types"],
+                                     "blank": "integer"}
     assert other["text_rows"] == meta["text_rows"]
-    pd.testing.assert_frame_equal(other["frame"], table)
+    assert kept(other["frame"]["blank"]) == kept(table["blank"])
+    pd.testing.assert_frame_equal(other["frame"].drop(columns="blank"),
+                                  table.drop(columns="blank"))
 
 
 def test_mixed_columns_not_kept(tmp_path: Path) -> None:
     """
     値ごとの型で戻せない混ざる列 (真偽値, 無限の小数, float32, 配列を
-    含む列) は残さず, 版 3 までのまま今までどおり読めることを確かめる関数
+    含む列) は残さず, 版 3 までのまま今までどおり文字で読めることを確かめる
+    関数
 
     Parameters
     ----------
@@ -517,7 +537,7 @@ def test_mixed_columns_not_kept(tmp_path: Path) -> None:
         "huge": pd.Series(["a", np.inf, 1], dtype=object),
         "half": pd.Series(["a", np.float32(0.1), 1], dtype=object),
         "list": pd.Series(["a", [1], 1], dtype=object),
-        "blank": pd.Series(["", 1, 2], dtype=object),
+        "both": pd.Series([True, 1, 2], dtype=object),
         "code": ["001", "002", "003"],
         "status": ["ok", "ok", "ok"],
     })
@@ -525,7 +545,12 @@ def test_mixed_columns_not_kept(tmp_path: Path) -> None:
     back = read_result(root)
     assert back["format_version"] == 3 and "text_rows" not in back
     assert back["column_types"] == {"code": "text"}
-    assert back["frame"]["half"].tolist() == ["a", "0.1", "1"]
+    table = back["frame"]
+    assert table["flag"].tolist() == ["a", "True", "1"]
+    assert table["huge"].tolist() == ["a", "inf", "1"]
+    assert table["half"].tolist() == ["a", "0.1", "1"]
+    assert table["list"].tolist() == ["a", "[1]", "1"]
+    assert table["both"].tolist() == ["True", "1", "2"]
 
     # 数に見える文字の無い混ざる列は, 行の記録を持たない
     frame = pd.DataFrame({"spend": pd.Series([1.5, "abc"], dtype=object),
@@ -569,9 +594,10 @@ def test_mixed_columns_given_types(tmp_path: Path) -> None:
         read_result(root, override_types={"spend": "mixed"})
 
     # 壊れた行の記録 (並びでない, 整数でない位置) は無視する
-    for rows in ({"spend": "1"}, {"spend": ["1", True]}, ["spend"]):
+    cases = ({"spend": "1"}, {"spend": ["1", True]}, ["spend"])
+    for number, rows in enumerate(cases):
         broken = write_raw(
-            tmp_path / f"broken{len(str(rows))}",
+            tmp_path / f"broken{number}",
             "spend,status\n962.8,ok\n001,skipped\n",
             {"format_version": 4, "column_types": {"spend": "mixed"},
              "text_rows": rows},
