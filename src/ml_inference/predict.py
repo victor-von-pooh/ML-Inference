@@ -17,6 +17,7 @@ from ml_inference.items import (
 from ml_inference.procedures import (
     get_procedure, make_generator, run_procedure, start_noise
 )
+from ml_inference.anomaly import anomaly_of_bundle, predict_anomaly
 from ml_inference.grouping import group_of_bundle, predict_group
 from ml_inference.ranking import predict_rank, rank_of_bundle
 from ml_inference.ready import read_images, weights_file
@@ -1229,7 +1230,8 @@ def predict(
         prediction (分類は confidence と p:<クラス> も) か output の列
         (表の出力は列の符号化の列. 並べるの一式は利用者と順位ごとの user,
         status, reason, rank, item, score. 群分けの一式は元の列と status,
-        reason, group, distance)
+        reason, group, distance. 異常の度合いの一式は元の列と status,
+        reason, score, rank, column, column_share)
 
     Raises
     ----------
@@ -1257,6 +1259,10 @@ def predict(
         )
     if bundle.from_group:
         result = predict_group(bundle, source, options, batch_size, device)
+        return result
+    if bundle.from_anomaly:
+        result = predict_anomaly(bundle, source, options, batch_size,
+                                 device)
         return result
     if bundle.from_items:
         result = predict_items(bundle, source, batch_size, device)
@@ -1796,8 +1802,14 @@ def describe_bundle(bundle: Union[str, Path, Bundle]) -> dict:
     if not isinstance(bundle, Bundle):
         bundle = load_bundle(bundle)
     info = bundle.info
-    dataset = bundle.dataset.info
-    column = dataset.get("target")
+    model = info.get("model") or {}
+    # (異常の度合いの一式は前処理だけのデータセット. 目的の列は異常の
+    # 正解で, 推論では使わない)
+    prepared = bundle.cache["anomaly_dataset"] if bundle.from_anomaly else (
+        bundle.dataset
+    )
+    dataset = prepared.info
+    column = None if bundle.from_anomaly else dataset.get("target")
     description: dict[str, Any] = {
         "path": str(bundle.path),
         "name": info.get("name"),
@@ -1809,14 +1821,14 @@ def describe_bundle(bundle: Union[str, Path, Bundle]) -> dict:
         "features": [item["name"] for item in dataset.get("features", [])],
         "text_column": dataset.get("text_column"),
         "reading": options_of(bundle),
-        "steps": [s["op"] for s in bundle.dataset.recipe.get("steps", [])],
+        "steps": [s["op"] for s in prepared.recipe.get("steps", [])],
         "item_steps": [
-            s["op"] for s in bundle.dataset.recipe.get("item_steps", [])
+            s["op"] for s in prepared.recipe.get("item_steps", [])
         ],
         "model": {
             "name": bundle.spec.get("name"),
             "inputs": bundle.input_plan(),
-            "output": info["model"].get("output"),
+            "output": model.get("output"),
             "kind": bundle.output_kind,
         },
         "run": info.get("run"),
@@ -1839,7 +1851,7 @@ def describe_bundle(bundle: Union[str, Path, Bundle]) -> dict:
         "column_output": bundle.column_output,
         "target_info": target_of(bundle),
         "procedure": bundle.procedure,
-        "pretrained": list(info["model"].get("pretrained") or []),
+        "pretrained": list(model.get("pretrained") or []),
         "pretrained_warnings": list(
             bundle.cache.get("pretrained_warnings") or []
         ),
@@ -1847,6 +1859,7 @@ def describe_bundle(bundle: Union[str, Path, Bundle]) -> dict:
         "ready": ready_of_bundle(bundle),
         "rank": rank_of_bundle(bundle),
         "group": group_of_bundle(bundle),
+        "anomaly": anomaly_of_bundle(bundle),
     }
 
     return description

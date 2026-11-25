@@ -10,6 +10,7 @@ import pandas as pd
 import yaml
 from ml_eda import Data
 
+from ml_inference.anomaly import conclude_anomaly
 from ml_inference.bundle import Bundle, inside, load_bundle
 from ml_inference.conclude import conclude, conclude_outputs, origin_sentence
 from ml_inference.decision import decide
@@ -152,6 +153,12 @@ def infer(
         merged.pop("threshold", None)
     merged = {k: v for k, v in merged.items() if v is not None}
 
+    # 異常の度合いの一式は, 度合いの要約と度合いの上位から回す振り分け
+    if bundle.from_anomaly:
+        result = infer_anomaly(bundle, source, given, options, batch_size,
+                               device, forecast, decision)
+        return result
+
     # 列の出力でない一式は, 推論と件数だけ (並べるの一式は利用者の人数,
     # 群分けの一式は群の要約も)
     if not bundle.column_output:
@@ -203,6 +210,67 @@ def infer(
         "bundle": {"name": bundle.info.get("name"), "path": str(bundle.path)},
         "source": str(source) if isinstance(source, (str, Path)) else None,
         "created_at": dt.datetime.now().astimezone().isoformat(),
+        **conclusion,
+    }
+
+    return result
+
+
+def infer_anomaly(
+    bundle: Bundle, source: Any, given: dict, options: Optional[dict],
+    batch_size: int, device: str, forecast: bool, decision: Optional[dict]
+) -> dict:
+    """
+    異常の度合いの一式で新しい行の度合いを出し, 要約と振り分けまで出す
+    関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        異常の度合いの一式
+    source: Any
+        表のファイル, 表, 表の Data
+    given: dict
+        渡した結論の決め方 (使えないので空だけ)
+    options: Optional[dict]
+        読み込みの設定
+    batch_size: int
+        1 回に渡す行の数
+    device: str
+        使うデバイス
+    forecast: bool
+        何段も先の予測 (使えないので False だけ)
+    decision: Optional[dict]
+        振り分けの決め方 (省略すると一式の既定. 空の辞書で振り分けない)
+
+    Returns
+    ----------
+    result: dict
+        bundle, source, created_at, form, frame (振り分けると action の列
+        も), summary, sentences, rules (空), (振り分けると) decision
+
+    Raises
+    ----------
+    ValueError
+        結論の決め方か何段も先の予測を渡した場合と, 振り分けの決め方に
+        誤りがある場合
+    """
+    # 結論の決め方と何段も先の予測は誤り
+    if given or forecast:
+        bundle.require_column("結論の決め方と何段も先の予測")
+    prediction = predict(bundle, source, options, batch_size, device)
+    conclusion = conclude_anomaly(bundle, prediction)
+    if decision is None:
+        decision = bundle.info.get("decision")
+    if decision:
+        decided = decide(bundle, conclusion["frame"], decision)
+        conclusion["frame"] = decided.pop("frame")
+        conclusion["decision"] = decided
+    result = {
+        "bundle": {"name": bundle.info.get("name"), "path": str(bundle.path)},
+        "source": source_text(bundle, source),
+        "created_at": dt.datetime.now().astimezone().isoformat(),
+        "form": bundle.form,
         **conclusion,
     }
 

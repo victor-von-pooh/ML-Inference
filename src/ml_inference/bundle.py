@@ -37,8 +37,9 @@ from ml_inference.weights import (
 # 推論の一式の形の版 (読める最も新しい版. 版 1 のデータセットの一式は
 # 版 3, 版 2 のデータセットの一式は版 4, 雑音だけの一式は版 5 (表の出力は
 # 版 7), 既製のモデルの一式は版 6, 並べるの一式は版 8, 群分けの一式は
-# 版 9, 既製の埋め込みの群分けの一式は版 10 で書く)
-BUNDLE_FORMAT_VERSION = 10
+# 版 9, 既製の埋め込みの群分けの一式は版 10, 異常の度合いの一式は版 11
+# で書く)
+BUNDLE_FORMAT_VERSION = 11
 COLUMN_BUNDLE_VERSION = 3
 ITEMS_BUNDLE_VERSION = 4
 NOISE_BUNDLE_VERSION = 5
@@ -47,6 +48,7 @@ TABLE_BUNDLE_VERSION = 7
 RANK_BUNDLE_VERSION = 8
 GROUP_BUNDLE_VERSION = 9
 READY_GROUP_BUNDLE_VERSION = 10
+ANOMALY_BUNDLE_VERSION = 11
 
 # 群分けの一式の版 (列の符号化か, 既製のモデルの埋め込み)
 GROUP_VERSIONS = (GROUP_BUNDLE_VERSION, READY_GROUP_BUNDLE_VERSION)
@@ -54,7 +56,8 @@ GROUP_VERSIONS = (GROUP_BUNDLE_VERSION, READY_GROUP_BUNDLE_VERSION)
 # データセットを持たない一式の版
 DATASETLESS_VERSIONS = (
     NOISE_BUNDLE_VERSION, READY_BUNDLE_VERSION, TABLE_BUNDLE_VERSION,
-    RANK_BUNDLE_VERSION, GROUP_BUNDLE_VERSION, READY_GROUP_BUNDLE_VERSION
+    RANK_BUNDLE_VERSION, GROUP_BUNDLE_VERSION, READY_GROUP_BUNDLE_VERSION,
+    ANOMALY_BUNDLE_VERSION
 )
 
 # inference.yaml の一番上の項目
@@ -62,7 +65,7 @@ TOP_KEYS = (
     "format_version", "name", "created_at", "role", "output", "target",
     "procedure", "model", "inputs", "dataset", "run", "conclusion",
     "decision", "check", "uncertainty", "notes", "items", "ready",
-    "calibrate", "rank", "group"
+    "calibrate", "rank", "group", "anomaly"
 )
 
 # 出力の扱い方
@@ -216,9 +219,12 @@ class Bundle:
             table, timeseries, image, text, pointcloud, audio, items
             (版 2 のデータセットの一式), noise (雑音だけの一式), ready
             (既製のモデルの一式), rank (並べるの一式), group (群分けの
-            一式)
+            一式), anomaly (異常の度合いの一式)
         """
         # 版 2 のデータセットの一式はファイルの組, 雑音だけの一式は雑音
+        if self.from_anomaly:
+            kind = "anomaly"
+            return kind
         if self.from_items:
             kind = "items"
             return kind
@@ -272,9 +278,11 @@ class Bundle:
             dataset が null の一式 (版 5) なら True
         """
         # dataset が null で, 既製のモデルの一式でも並べるの一式でも群分け
-        # の一式でもない一式 (版 5 と, 表の出力の版 7)
+        # の一式でも異常の度合いの一式でもない一式 (版 5 と, 表の出力の
+        # 版 7)
         noise = self.info.get("dataset") is None and not (
             self.from_ready or self.from_rank or self.from_group
+            or self.from_anomaly
         )
 
         return noise
@@ -337,6 +345,26 @@ class Bundle:
         group = self.info.get("group") is not None
 
         return group
+
+    @property
+    def from_anomaly(self) -> bool:
+        """
+        行ごとの異常の度合いを出す一式かを返す関数
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        ----------
+        anomaly: bool
+            anomaly (度合いの決め方と前処理のレシピ) を持つ一式 (版 11)
+            なら True
+        """
+        # 版 11 の anomaly の有無
+        anomaly = self.info.get("anomaly") is not None
+
+        return anomaly
 
     @property
     def mask_values(self) -> Optional[list[int]]:
@@ -455,10 +483,12 @@ class Bundle:
         Returns
         ----------
         column: bool
-            class, value, distribution なら True
+            class, value, distribution なら True (異常の度合いの一式は
+            False)
         """
-        # 1 行に 1 つのクラスか値
-        column = self.form in COLUMN_FORMS
+        # 1 行に 1 つのクラスか値 (異常の度合いは確率でも目的の列の値でも
+        # ない)
+        column = self.form in COLUMN_FORMS and not self.from_anomaly
 
         return column
 
@@ -495,8 +525,11 @@ class Bundle:
         kind: str
             logits, probabilities, value のどれか
         """
-        # 書かれていなければ, 出力の形の既定 (分類は logits, 値は value)
-        kind = self.info["model"].get("kind") or FORM_KINDS[self.form][0]
+        # 書かれていなければ, 出力の形の既定 (分類は logits, 値は value.
+        # モデルを持たない一式も)
+        kind = (self.info.get("model") or {}).get("kind") or FORM_KINDS[
+            self.form
+        ][0]
 
         return kind
 
@@ -569,7 +602,12 @@ class Bundle:
             列の出力でない一式の場合
         """
         # 結論と意思決定は 1 行に 1 つのクラスか値が前提. 既製のモデルの
-        # 一式は測るデータを持たない
+        # 一式は測るデータを持たない. 異常の度合いは確率でない
+        if self.from_anomaly:
+            raise ValueError(
+                f"異常の度合いの一式には {what} を使えません (使えるのは度合い"
+                "の上位から回す振り分け {type: triage, capacity} だけ)"
+            )
         if self.from_ready:
             raise ValueError(
                 f"既製のモデルの一式はデータセットと外れ方の記録を持たない"
@@ -802,7 +840,13 @@ def check_info(info: Any) -> list[str]:
     if not isinstance(version, int) or isinstance(version, bool):
         errors.append("format_version が整数ではありません")
     model = info.get("model")
-    if not isinstance(model, dict) or not model.get("spec") or (
+    distance = version == ANOMALY_BUNDLE_VERSION and isinstance(
+        info.get("anomaly"), dict
+    ) and info["anomaly"].get("score") == "distance"
+    if model is None and distance:
+        # 距離に基づく度合いの一式はモデル無し
+        pass
+    elif not isinstance(model, dict) or not model.get("spec") or (
         not model.get("weights")
     ):
         errors.append("model に spec と weights が要ります")
@@ -903,6 +947,15 @@ def check_info(info: Any) -> list[str]:
         from ml_inference.grouping import check_group_info
 
         errors.extend(check_group_info(info))
+    if info.get("anomaly") is not None and version != ANOMALY_BUNDLE_VERSION:
+        errors.append(
+            f"anomaly を持つ一式は版 {ANOMALY_BUNDLE_VERSION} にしてください"
+        )
+    if version == ANOMALY_BUNDLE_VERSION:
+        # 異常の度合いの一式の決まりは異常のモジュールが持つ
+        from ml_inference.anomaly import check_anomaly_info
+
+        errors.extend(check_anomaly_info(info))
 
     return errors
 
@@ -1423,8 +1476,12 @@ def load_bundle(path: Union[str, Path]) -> Bundle:
 
     # モデルの定義 (部品は登録簿から引くだけ. 名前から何も読み込まない)
     # と前処理 (データセットの説明とレシピ)
-    spec = load_spec(inside(root, str(info["model"]["spec"])))
-    check_units(spec)
+    if info.get("model") is None:
+        # 距離に基づく度合いの一式はモデル無し
+        spec: dict = {"name": None, "inputs": {}, "outputs": {}}
+    else:
+        spec = load_spec(inside(root, str(info["model"]["spec"])))
+        check_units(spec)
     if info.get("dataset") is None:
         # 雑音だけの一式と既製のモデルの一式は説明とレシピが空の
         # データセット
@@ -1442,12 +1499,12 @@ def load_bundle(path: Union[str, Path]) -> Bundle:
             f"(入力: {', '.join(spec['inputs'])})"
         )
     bundle = Bundle(path=root, info=info, dataset=dataset, spec=spec)
-    if not bundle.weights_path.is_file():
+    if info.get("model") is not None and not bundle.weights_path.is_file():
         raise FileNotFoundError(
             f"重み {bundle.weights_path} がありません (実験のディレクトリを"
             "動かしたか消した場合は, 一式を作り直してください)"
         )
-    kind = info["model"].get("kind")
+    kind = (info.get("model") or {}).get("kind")
     form = bundle.form
     if info.get("output") is None:
         classify = bundle.task == "classification"
@@ -1456,7 +1513,9 @@ def load_bundle(path: Union[str, Path]) -> Bundle:
                 f"model.kind {kind} は {bundle.task} に使えません (分類は "
                 "logits か probabilities, 回帰と予測は value)"
             )
-    elif form in FORM_TASKS and bundle.task not in FORM_TASKS[form]:
+    elif form in FORM_TASKS and not bundle.from_anomaly and (
+        bundle.task not in FORM_TASKS[form]
+    ):
         raise ValueError(
             f"出力の形 {form} は {bundle.task or 'タスクの無い'} の"
             f"データセットに使えません ({', '.join(FORM_TASKS[form])} だけ)"
@@ -1479,6 +1538,10 @@ def load_bundle(path: Union[str, Path]) -> Bundle:
         from ml_inference.grouping import check_group_bundle
 
         check_group_bundle(bundle)
+    if bundle.from_anomaly:
+        from ml_inference.anomaly import check_anomaly_bundle
+
+        check_anomaly_bundle(bundle)
     if info.get("calibrate") is not None:
         classes = bundle.classes if (
             bundle.form == "class" and not bundle.from_ready
@@ -1487,7 +1550,7 @@ def load_bundle(path: Union[str, Path]) -> Bundle:
         if errors:
             raise ValueError("inference.yaml の誤り: " + " / ".join(errors))
     names = set(node_items(spec))
-    for record in info["model"].get("pretrained") or []:
+    for record in (info.get("model") or {}).get("pretrained") or []:
         if record["node"] not in names:
             raise ValueError(
                 f"model.pretrained の {record['node']} はモデルの定義の"
