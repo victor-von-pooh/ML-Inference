@@ -1,5 +1,7 @@
 import datetime as dt
+import math
 from pathlib import Path
+import re
 import shutil
 from typing import Any, Optional, Union
 
@@ -18,9 +20,12 @@ from ml_inference.predict import (
 from ml_inference.grouping import conclude_groups
 from ml_inference.ranking import conclude_ranking, request_users
 
-# 結果のファイル (result.yaml) の形の版 (列の型を残せば 3, 表に収まらない
-# 中身があれば 2, どちらも無ければ 1)
-RESULT_FORMAT_VERSION = 3
+# 結果のファイル (result.yaml) の形の版 (混ざる列を残せば 4, 列の型を
+# 残せば 3, 表に収まらない中身があれば 2, どれも無ければ 1)
+RESULT_FORMAT_VERSION = 4
+
+# 列の型を残す結果の版 (混ざる列の無い結果)
+COLUMN_TYPES_FORMAT_VERSION = 3
 
 # 表に収まらない中身を持つ結果の版
 ARTIFACTS_FORMAT_VERSION = 2
@@ -28,6 +33,16 @@ ARTIFACTS_FORMAT_VERSION = 2
 # 列の型の記録の項目と, 型の名前ごとの読み込みの型
 COLUMN_TYPES_KEY = "column_types"
 COLUMN_DTYPES = {"text": str, "integer": "Int64"}
+
+# 数と文字の混ざる列の型の名前と, 数に見える文字の行の位置の記録の項目
+MIXED = "mixed"
+TEXT_ROWS_KEY = "text_rows"
+
+# 混ざる列の値の書き方 (整数は符号と数字だけ, 小数は小数点か指数を持つ数)
+INTEGER_TEXT = re.compile(r"[+-]?[0-9]+")
+FLOAT_TEXT = re.compile(
+    r"[+-]?(?:[0-9]+\.[0-9]*|\.[0-9]+|[0-9]+(?=[eE]))(?:[eE][+-]?[0-9]+)?"
+)
 
 # 欠損を持てる整数 (Int64) の範囲
 INT64 = np.iinfo(np.int64)
@@ -40,9 +55,9 @@ ARTIFACT_COLUMN = "artifact"
 TOKENS_COLUMN = "tokens"
 
 # 書き出すときに result.yaml へ写さない結果の項目 (表, 形, 読んだ場所,
-# 読んだ版と中身と列の型の記録)
+# 読んだ版と中身と列の型と数に見える文字の行の記録)
 RESULT_OWN_KEYS = ("frame", "form", "directory", "format_version",
-                   "artifacts", COLUMN_TYPES_KEY)
+                   "artifacts", COLUMN_TYPES_KEY, TEXT_ROWS_KEY)
 
 
 def source_text(bundle: Bundle, source: Any) -> Optional[str]:
@@ -228,13 +243,16 @@ def write_result(result: dict, path: Union[str, Path]) -> Path:
     # 表は表計算のアプリで開ける BOM 付きの UTF-8 (読み直すと値の変わる列
     # の型を残す)
     frame.to_csv(root / "predictions.csv", index=False, encoding="utf-8-sig")
-    types = column_types(frame, root / "predictions.csv")
+    types, rows = column_types(frame, root / "predictions.csv")
 
-    # 表以外の説明 (形の版を先頭に. 型も中身も無ければ版 1 のまま. 読んだ
-    # 結果の版と中身と型の記録は書き直し)
-    version = RESULT_FORMAT_VERSION if types else (
-        ARTIFACTS_FORMAT_VERSION if artifacts else 1
-    )
+    # 表以外の説明 (形の版を先頭に. 混ざる列があれば版 4, 型も中身も無け
+    # れば版 1 のまま. 読んだ結果の版と中身と型の記録は書き直し)
+    if MIXED in types.values():
+        version = RESULT_FORMAT_VERSION
+    elif types:
+        version = COLUMN_TYPES_FORMAT_VERSION
+    else:
+        version = ARTIFACTS_FORMAT_VERSION if artifacts else 1
     meta: dict[str, Any] = {"format_version": version}
     meta.update({
         k: v for k, v in result.items() if k not in RESULT_OWN_KEYS
@@ -243,6 +261,8 @@ def write_result(result: dict, path: Union[str, Path]) -> Path:
         meta["artifacts"] = artifacts
     if types:
         meta[COLUMN_TYPES_KEY] = types
+    if rows:
+        meta[TEXT_ROWS_KEY] = rows
     (root / "result.yaml").write_text(
         yaml.safe_dump(meta, allow_unicode=True, sort_keys=False),
         encoding="utf-8"
@@ -434,7 +454,8 @@ def column_kind(values: pd.Series) -> Optional[str]:
     ----------
     kind: Optional[str]
         欠けを除いた値が全て文字なら text, 全て Int64 に収まる整数 (真偽値
-        を除く) なら integer, 他 (値の無い列, 小数, 混ざる列) は None
+        を除く) なら integer, 文字と整数と有限の小数の 2 つ以上の種類だけ
+        なら mixed, 他 (値の無い列, 小数, 真偽値などの混ざる列) は None
     """
     # 欠けを除いた値の型で見る (値の無い列と真偽値の列は残さない. 整数の
     # 型の列も Int64 に収まる値だけ. 値の型は列ごとにまとめて見る)
@@ -447,15 +468,196 @@ def column_kind(values: pd.Series) -> Optional[str]:
         kind = "text"
     else:
         kept = np.asarray(kept, dtype=object)
-        kind = {"string": "text", "integer": "integer"}.get(
-            pd.api.types.infer_dtype(kept, skipna=False)
-        )
+        inferred = pd.api.types.infer_dtype(kept, skipna=False)
+        kind = {"string": "text", "integer": "integer"}.get(inferred)
+        if inferred.startswith("mixed"):
+            kind = mixed_kind(kept)
     if kind == "integer" and not (
         INT64.min <= int(kept.min()) and int(kept.max()) <= INT64.max
     ):
         kind = None
 
     return kind
+
+
+def value_kind(value: Any) -> Optional[str]:
+    """
+    混ざる列の 1 つの値の種類を返す関数
+
+    Parameters
+    ----------
+    value: Any
+        欠けでない値
+
+    Returns
+    ----------
+    kind: Optional[str]
+        文字 (空の文字も) は text, 整数 (真偽値を除く) は integer, 有限の
+        小数は float, 他 (真偽値, 無限の小数, 配列など) は None
+    """
+    # 真偽値は整数の子なので先に除く
+    if isinstance(value, str):
+        return "text"
+    if isinstance(value, (bool, np.bool_)):
+        return None
+    if isinstance(value, (int, np.integer)):
+        return "integer"
+    if isinstance(value, (float, np.floating)) and math.isfinite(value):
+        return "float"
+
+    return None
+
+
+def mixed_kind(kept: np.ndarray) -> Optional[str]:
+    """
+    値の種類の混ざる列が, 値ごとの型で戻せる混ざる列かを返す関数
+
+    Parameters
+    ----------
+    kept: np.ndarray
+        欠けを除いた列の値 (object)
+
+    Returns
+    ----------
+    kind: Optional[str]
+        文字と整数と有限の小数のうち 2 つ以上の種類だけなら mixed, 他は
+        None
+    """
+    # 空の文字も文字の種類に数える (空の文字と整数の列の整数を, 小数に
+    # 読まないため)
+    kinds = set()
+    for value in kept:
+        kind = value_kind(value)
+        if kind is None:
+            return None
+        kinds.add(kind)
+
+    return MIXED if len(kinds) >= 2 else None
+
+
+def mixed_values(values: pd.Series, text: set) -> pd.Series:
+    """
+    文字で読んだ混ざる列を, 値ごとの型に戻す関数
+
+    Parameters
+    ----------
+    values: pd.Series
+        文字で読んだ列 (欠けは欠損)
+    text: set
+        数に見えても文字のままにする行の位置
+
+    Returns
+    ----------
+    values: pd.Series
+        整数の書き方の値は整数, 小数の書き方の値は小数, 他は文字の列
+        (object)
+    """
+    # 書き方で数と分けられない文字は, 残した行の位置で見分ける
+    back = []
+    for position, value in enumerate(values.tolist()):
+        if not isinstance(value, str) or position in text:
+            back.append(value)
+        elif INTEGER_TEXT.fullmatch(value):
+            back.append(int(value))
+        elif FLOAT_TEXT.fullmatch(value):
+            back.append(float(value))
+        else:
+            back.append(value)
+
+    return pd.Series(back, index=values.index, name=values.name,
+                     dtype=object)
+
+
+def same_mixed(mine: list, back: list) -> bool:
+    """
+    混ざる列の書いた値と読み直した値が, 同じ種類と値かを返す関数
+
+    Parameters
+    ----------
+    mine: list
+        書き出した列の値
+    back: list
+        値ごとの型に戻して読み直した列の値
+
+    Returns
+    ----------
+    same: bool
+        全ての値の種類と値が同じ (欠けと空の文字は欠損で読めれば同じ)
+        なら True
+    """
+    # 欠けと空の文字は欠損に戻る (空の文字は CSV で欠損と分けられない).
+    # NumPy の値は Python の値に直して比べる (float32 と Python の小数を
+    # 比べると float32 の精度で比べるため)
+    if len(mine) != len(back):
+        return False
+    cast = {"text": str, "integer": int, "float": float}
+    for a, b in zip(mine, back):
+        if pd.isna(a) or a == "":
+            if not pd.isna(b):
+                return False
+            continue
+        kind = value_kind(a)
+        if pd.isna(b) or kind != value_kind(b) or cast[kind](a) != b:
+            return False
+
+    return True
+
+
+def mixed_text_rows(mine: list, written: pd.Series) -> Optional[list]:
+    """
+    混ざる列の数に見える文字の行の位置を返す関数
+
+    Parameters
+    ----------
+    mine: list
+        書き出した列の値
+    written: pd.Series
+        書いた predictions.csv から文字で読んだ同じ位置の列
+
+    Returns
+    ----------
+    rows: Optional[list]
+        数に見える文字の値の行の位置 (0 から) の並び. 値ごとの型に戻して
+        書いた値と同じにならない列は None
+    """
+    # 数に見える文字の行を残した上で値ごとの型に戻し, 書いた値と比べる
+    rows = [
+        i for i, (a, b) in enumerate(zip(mine, written.tolist()))
+        if isinstance(a, str) and isinstance(b, str)
+        and (INTEGER_TEXT.fullmatch(b) or FLOAT_TEXT.fullmatch(b))
+    ]
+    back = mixed_values(written, set(rows)).tolist()
+    if not same_mixed(mine, back):
+        return None
+
+    return rows
+
+
+def text_positions(rows: Any, name: str) -> set:
+    """
+    result.yaml の数に見える文字の行の記録から, 列の行の位置を返す関数
+
+    Parameters
+    ----------
+    rows: Any
+        result.yaml の text_rows (列の名前から位置の並びへの対応)
+    name: str
+        列の名前
+
+    Returns
+    ----------
+    positions: set
+        行の位置 (並びでない記録と整数でない位置は無視)
+    """
+    # 壊れた記録は無視する (知らない型の名前と同じ扱い)
+    values = rows.get(name) if isinstance(rows, dict) else None
+    if not isinstance(values, list):
+        return set()
+    positions = {
+        v for v in values if isinstance(v, int) and not isinstance(v, bool)
+    }
+
+    return positions
 
 
 def column_changed(mine: pd.Series, back: pd.Series, kind: str) -> bool:
@@ -515,9 +717,12 @@ def column_changed(mine: pd.Series, back: pd.Series, kind: str) -> bool:
     return bool(mine.ne(back).any())
 
 
-def column_types(frame: pd.DataFrame, path: Path) -> dict[str, str]:
+def column_types(
+    frame: pd.DataFrame, path: Path
+) -> tuple[dict[str, str], dict[str, list]]:
     """
-    書いた予測の表を型を知らずに読み直すと値の変わる列の型を返す関数
+    書いた予測の表を型を知らずに読み直すと値の変わる列の型と, 混ざる列の
+    数に見える文字の行の位置を返す関数
 
     Parameters
     ----------
@@ -529,22 +734,36 @@ def column_types(frame: pd.DataFrame, path: Path) -> dict[str, str]:
     Returns
     ----------
     types: dict[str, str]
-        列の名前から型 (text か integer) への対応 (値の変わらない列は除く)
+        列の名前から型 (text か integer か mixed) への対応 (値の変わらない
+        列と, 値ごとの型に戻らない混ざる列は除く)
+    rows: dict[str, list]
+        混ざる列の名前から, 数に見える文字の値の行の位置 (0 から) の並び
+        への対応 (その行の無い列は除く)
     """
     # 候補の列だけを, 型を知らずに読んだ値と列ごとに比べる (列は位置で
-    # 引く)
+    # 引く. 混ざる列は値の種類が 2 つ以上あり 1 つの型で読むとどれかの
+    # 種類が必ず変わるので, 同じ 1 回の読み込みで文字で読み, 値ごとの型に
+    # 戻せるかを比べる)
     kinds = [column_kind(frame.iloc[:, i]) for i in range(frame.shape[1])]
     if not any(kinds):
-        return {}
-    plain = read_predictions(path)
-    types = {}
+        return {}, {}
+    mixed = {str(frame.columns[i]): "text"
+             for i, kind in enumerate(kinds) if kind == MIXED}
+    plain = read_predictions(path, mixed)
+    types, rows = {}, {}
     for position, kind in enumerate(kinds):
-        if kind is not None and column_changed(
-            frame.iloc[:, position], plain.iloc[:, position], kind
-        ):
-            types[str(frame.columns[position])] = kind
+        name = str(frame.columns[position])
+        mine, back = frame.iloc[:, position], plain.iloc[:, position]
+        if kind == MIXED:
+            text = mixed_text_rows(mine.tolist(), back)
+            if text is not None:
+                types[name] = kind
+            if text:
+                rows[name] = text
+        elif kind is not None and column_changed(mine, back, kind):
+            types[name] = kind
 
-    return types
+    return types, rows
 
 
 def given_types(types: Optional[dict], name: str) -> dict[str, Any]:
@@ -589,7 +808,8 @@ def given_types(types: Optional[dict], name: str) -> dict[str, Any]:
 def read_predictions(
     path: Path, types: Optional[dict] = None,
     override_types: Optional[dict] = None,
-    fallback_types: Optional[dict] = None
+    fallback_types: Optional[dict] = None,
+    text_rows: Optional[dict] = None
 ) -> pd.DataFrame:
     """
     予測の表を読む関数 (文の出力の文と番号は文字のまま)
@@ -599,18 +819,21 @@ def read_predictions(
     path: Path
         predictions.csv
     types: Optional[dict] = None
-        result.yaml の列の型 (列の名前から text か integer)
+        result.yaml の列の型 (列の名前から text か integer か mixed)
     override_types: Optional[dict] = None
         呼び手の列の型 (types と文の出力の文と番号より強く当てる)
     fallback_types: Optional[dict] = None
         呼び手の列の型 (types に無い列だけに, 文の出力の文と番号より
         弱く当てる)
+    text_rows: Optional[dict] = None
+        result.yaml の混ざる列の数に見える文字の行の位置
 
     Returns
     ----------
     frame: pd.DataFrame
         予測の表 (空の欄は欠損. 文の出力の予測した行の空の文は空の文字.
-        text の列は文字, integer の列は欠損を持てる整数)
+        text の列は文字, integer の列は欠損を持てる整数, mixed の列は
+        値ごとの型)
 
     Raises
     ----------
@@ -621,8 +844,9 @@ def read_predictions(
     # 呼び手の強い型. 表に無い列と知らない残した型は無視)
     strong = given_types(override_types, "override_types")
     weak = given_types(fallback_types, "fallback_types")
-    kept = {str(name): COLUMN_DTYPES[kind]
-            for name, kind in (types or {}).items() if kind in COLUMN_DTYPES}
+    known = {**COLUMN_DTYPES, MIXED: str}
+    kept = {str(name): known[kind]
+            for name, kind in (types or {}).items() if kind in known}
     head = pd.read_csv(path, encoding="utf-8-sig", nrows=0)
     columns = set(head.columns)
     dtype: dict[str, Any] = {
@@ -641,6 +865,14 @@ def read_predictions(
         path, encoding="utf-8-sig", keep_default_na=False, na_values=[""],
         dtype=dtype or None
     )
+
+    # 混ざる列は文字で読んでから値ごとの型に戻す (呼び手の強い型を当てた
+    # 列は除く)
+    for name, kind in (types or {}).items():
+        name = str(name)
+        if kind == MIXED and name in columns and name not in strong:
+            frame[name] = mixed_values(frame[name],
+                                       text_positions(text_rows, name))
 
     # 予測した行の空の文 (戻すと何も残らない並び) は欠損と分ける (呼び手
     # が文字でない型を強く当てた列は除く)
@@ -677,7 +909,7 @@ def read_result(
     ----------
     result: dict
         result.yaml の中身と, frame (予測と判断の表. column_types の列は
-        その型. 配列は artifact の列の相対パスのまま. 読むのは
+        その型. mixed の列は値ごとの型. 配列は artifact の列の相対パスのまま. 読むのは
         artifact_path と numpy.load), form
         (配列の出力の形. 無ければ None), directory (読んだ場所. 書き直す
         ときに配列を持ち越すため)
@@ -705,7 +937,7 @@ def read_result(
     types = meta.get(COLUMN_TYPES_KEY)
     frame = read_predictions(
         root / "predictions.csv", types if isinstance(types, dict) else None,
-        override_types, fallback_types
+        override_types, fallback_types, meta.get(TEXT_ROWS_KEY)
     )
     artifacts = meta.get("artifacts") or {}
     if ARTIFACT_COLUMN in frame.columns and artifacts:
