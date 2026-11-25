@@ -437,26 +437,82 @@ def column_kind(values: pd.Series) -> Optional[str]:
         を除く) なら integer, 他 (値の無い列, 小数, 混ざる列) は None
     """
     # 欠けを除いた値の型で見る (値の無い列と真偽値の列は残さない. 整数の
-    # 型の列も Int64 に収まる値だけ)
+    # 型の列も Int64 に収まる値だけ. 値の型は列ごとにまとめて見る)
     kept = values.dropna()
     if not len(kept) or pd.api.types.is_bool_dtype(values.dtype):
         return None
     if pd.api.types.is_integer_dtype(values.dtype):
-        inside = INT64.min <= int(kept.min()) and (
-            int(kept.max()) <= INT64.max
-        )
-        kind: Optional[str] = "integer" if inside else None
-        return kind
-    if all(isinstance(v, str) for v in kept):
-        kind = "text"
-    elif all(isinstance(v, (int, np.integer))
-             and not isinstance(v, (bool, np.bool_))
-             and INT64.min <= int(v) <= INT64.max for v in kept):
         kind = "integer"
+    elif isinstance(values.dtype, pd.StringDtype):
+        kind = "text"
     else:
+        kept = np.asarray(kept, dtype=object)
+        kind = {"string": "text", "integer": "integer"}.get(
+            pd.api.types.infer_dtype(kept, skipna=False)
+        )
+    if kind == "integer" and not (
+        INT64.min <= int(kept.min()) and int(kept.max()) <= INT64.max
+    ):
         kind = None
 
     return kind
+
+
+def column_changed(mine: pd.Series, back: pd.Series, kind: str) -> bool:
+    """
+    書いた列の値が, 型を知らずに読み直すと変わるかを返す関数
+
+    Parameters
+    ----------
+    mine: pd.Series
+        書き出した表の列 (column_kind が kind を返した列)
+    back: pd.Series
+        型を知らずに読み直した同じ位置の列
+    kind: str
+        残す候補の型 (text か integer)
+
+    Returns
+    ----------
+    changed: bool
+        integer は読み直した列が整数の型でないか値が違う場合, text は空で
+        ない文字の値が文字のまま同じ値で読めない場合に True
+    """
+    # 整数は読み直した列の型と値をまとめて比べる (読み直した列が整数の型
+    # なら欠損は無い. int64 でない整数の型と長さの違う列は 1 件ずつ)
+    if kind == "integer":
+        if not pd.api.types.is_integer_dtype(back.dtype):
+            return True
+        if back.dtype != np.int64 or len(mine) != len(back):
+            return any(int(a) != int(b) for a, b in zip(mine, back))
+        return bool(
+            (mine.to_numpy(dtype=np.int64) != back.to_numpy()).any()
+        )
+
+    # 文字は空でない文字の値だけを, 読み直した値が文字で同じかで比べる
+    # (空の文字は CSV で欠損と分けられない. 長さの違う列は 1 件ずつ)
+    if len(mine) != len(back):
+        return any(
+            not (isinstance(b, str) and a == b)
+            for a, b in zip(mine.tolist(), back.tolist())
+            if isinstance(a, str) and a != ""
+        )
+    if not isinstance(mine.dtype, pd.StringDtype):
+        mine = mine.astype(object)
+    mine = mine.reset_index(drop=True)
+    back = back.reset_index(drop=True)
+    keep = (mine.notna() & mine.ne("")).to_numpy(dtype=bool)
+    if not keep.any():
+        return False
+    mine, back = mine[keep], back[keep]
+    if isinstance(back.dtype, pd.StringDtype):
+        if back.isna().any():
+            return True
+    elif pd.api.types.infer_dtype(
+        np.asarray(back, dtype=object), skipna=False
+    ) != "string":
+        return True
+
+    return bool(mine.ne(back).any())
 
 
 def column_types(frame: pd.DataFrame, path: Path) -> dict[str, str]:
@@ -475,29 +531,17 @@ def column_types(frame: pd.DataFrame, path: Path) -> dict[str, str]:
     types: dict[str, str]
         列の名前から型 (text か integer) への対応 (値の変わらない列は除く)
     """
-    # 候補の列だけを, 型を知らずに読んだ値と比べる (列は位置で引く. 空の
-    # 文字は CSV で欠損と分けられないので比べない)
+    # 候補の列だけを, 型を知らずに読んだ値と列ごとに比べる (列は位置で
+    # 引く)
     kinds = [column_kind(frame.iloc[:, i]) for i in range(frame.shape[1])]
     if not any(kinds):
         return {}
     plain = read_predictions(path)
     types = {}
     for position, kind in enumerate(kinds):
-        if kind is None:
-            continue
-        mine = frame.iloc[:, position].tolist()
-        back = plain.iloc[:, position]
-        if kind == "integer":
-            changed = not pd.api.types.is_integer_dtype(back.dtype) or any(
-                int(a) != int(b) for a, b in zip(mine, back)
-            )
-        else:
-            changed = any(
-                not (isinstance(b, str) and a == b)
-                for a, b in zip(mine, back.tolist())
-                if isinstance(a, str) and a != ""
-            )
-        if changed:
+        if kind is not None and column_changed(
+            frame.iloc[:, position], plain.iloc[:, position], kind
+        ):
             types[str(frame.columns[position])] = kind
 
     return types
