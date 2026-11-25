@@ -1307,8 +1307,12 @@ def group_representatives(
         raise ValueError(
             f"代表の行の件数は 1 以上の整数にしてください ({count!r})"
         )
-    if "distance" not in prediction.columns:
-        raise ValueError("予測の表に distance の列がありません")
+    missing = [c for c in ("status", "group", "distance")
+               if c not in prediction.columns]
+    if missing:
+        raise ValueError(
+            f"予測の表に {', '.join(missing)} の列がありません"
+        )
     group = bundle.info["group"]
     columns = {name: frame_column(prediction, name)
                for name in group["columns"]}

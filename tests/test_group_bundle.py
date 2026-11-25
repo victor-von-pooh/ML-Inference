@@ -647,10 +647,63 @@ def test_group_representatives(tmp_path: Path, group_run: Path) -> None:
     for count in (0, 1.5, True, "3"):
         with pytest.raises(ValueError, match="1 以上の整数"):
             group_representatives(root, prediction, count=count)
-    with pytest.raises(ValueError, match="distance"):
-        group_representatives(root, prediction.drop(columns="distance"))
+    for name in ("status", "group", "distance"):
+        with pytest.raises(ValueError, match=f"{name} の列がありません"):
+            group_representatives(root, prediction.drop(columns=name))
     with pytest.raises(ValueError, match="region"):
         group_representatives(root, prediction.drop(columns="region"))
+
+    # 種類の列の欠けた行も代表に入り, 値は None
+    gap = frame.iloc[40:60].reset_index(drop=True)
+    gap["region"] = None
+    found = group_representatives(root, predict(root, gap), count=30)
+    assert sum(len(entry["rows"]) for entry in found) == 20
+    assert all(row["values"]["region"] is None
+               for entry in found for row in entry["rows"])
+
+
+def test_group_representatives_input_names(
+    tmp_path: Path, group_run: Path
+) -> None:
+    """
+    予測の列と同じ名前の列を群を作る列に持つ一式で, 代表の行の値が
+    「(入力)」付きの列の元の値になることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    group_run: Path
+        実験のディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 群を作る列 region を status に置き換えた実験
+    renamed = {"region": "status"}
+    centers = json.loads((group_run / "group_centers.json").read_text())
+    categories = centers["encoding"]["categories"]
+    categories["status"] = categories.pop("region")
+    (group_run / "group_centers.json").write_text(json.dumps(centers))
+    path = group_run / "evaluations" / "group_summary.json"
+    evaluation = json.loads(path.read_text())
+    evaluation["rows"] = [{renamed.get(k, k): v for k, v in row.items()}
+                          for row in evaluation["rows"]]
+    path.write_text(json.dumps(evaluation))
+    root = tmp_path / "bundle"
+    make_group_bundle(root, group_run)
+
+    # 値は「(入力)」付きの列から, 鍵は群を作る列の名前
+    frame = customer_rows().rename(columns=renamed)
+    prediction = predict(root, frame)
+    assert "status (入力)" in prediction.columns
+    found = group_representatives(root, prediction)
+    first = found[0]["rows"][0]
+    assert list(first["values"]) == ["spend", "visits", "status"]
+    assert first["values"]["status"] == frame["status"][first["row"]]
+    assert {row["values"]["status"] for entry in found
+            for row in entry["rows"]} == {"north", "south", "east"}
 
 
 def test_group_bundle_errors(
