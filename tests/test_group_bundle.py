@@ -831,10 +831,9 @@ def test_group_result_keeps_types(tmp_path: Path, group_run: Path) -> None:
     }
     back = loaded["frame"]
     for name in ("customer", "region", "visits", "group"):
-        assert back[name].astype(object).where(back[name].notna()).tolist(
-        ) == result["frame"][name].astype(object).where(
-            result["frame"][name].notna()
-        ).tolist()
+        assert [None if pd.isna(v) else v for v in back[name]] == [
+            None if pd.isna(v) else v for v in result["frame"][name]
+        ], name
     assert back["customer"].iloc[0] == "0000"
     assert back["region"].iloc[0] == "010"
     assert str(back["visits"].dtype) == "Int64"
