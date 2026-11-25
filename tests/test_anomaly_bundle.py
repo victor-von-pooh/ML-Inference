@@ -13,7 +13,7 @@ from ml_eda import export_dataset, load_data, load_dataset
 from ml_modelcontrol import build_model, load_example
 
 import ml_inference.bundle as bundle_module
-from ml_inference.anomaly import read_scorer
+from ml_inference.anomaly import distance_parts, read_scorer
 from ml_inference import (
     backtest, check_decision, decide, describe_bundle, infer, load_bundle,
     make_anomaly_bundle, predict, read_result, read_reviews, record_review,
@@ -110,7 +110,7 @@ def skeleton_parts(
     parts: np.ndarray
         (行の数, 列の数) の float64
     """
-    # 自己符号化器は float32 の二乗誤差, 距離は float64 の積
+    # 自己符号化器は float32 の二乗誤差, 距離は白色化した差の二乗
     if score == "autoencoder":
         with torch.no_grad():
             tensor = torch.tensor(x)
@@ -119,7 +119,8 @@ def skeleton_parts(
             parts = ((recon - tensor) ** 2).double().numpy()
         return parts
     diff = x.astype(np.float64) - np.asarray(distance["center"])
-    parts = diff * (diff @ np.asarray(distance["precision"]))
+    values, vectors = np.linalg.eigh(np.asarray(distance["precision"]))
+    parts = (diff @ (vectors * np.sqrt(values)) @ vectors.T) ** 2
 
     return parts
 
@@ -305,6 +306,7 @@ def test_anomaly_bundle(tmp_path: Path, raw: Path, score: str) -> None:
     ok = frame[frame["status"] == "ok"]
     assert sorted(ok["rank"].tolist()) == list(range(1, len(ok) + 1))
     assert set(ok["column"]) <= set(FEATURES)
+    assert ok["column_share"].between(0, 1).all()
     if score == "distance":
         top = ok.sort_values("rank").head(ANOMALIES)
         assert set(top["reading_id"]) == {
@@ -577,6 +579,48 @@ def test_skeleton_output(tmp_path: Path) -> None:
     assert info["anomaly"]["check"]["agreement"] == 1.0
     frame = predict(tmp_path / "bundle", rows)
     assert frame.loc[frame["rank"] == 1, "reading_id"].tolist() == ["r07"]
+
+    # 負の非対角成分のある精度行列でも, 最も外れた列の割合は 1 以下
+    assert scorer["distance"]["precision"][0][1] < 0
+    assert frame["column_share"].between(0, 1).all()
+
+
+def test_distance_parts_share() -> None:
+    """
+    距離の列ごとの分が 0 以上で, 和が二乗の距離になることを確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 負の非対角成分のある精度行列と, 要素ごとの積なら列の分が負になる行
+    precision = np.array([[2.0, -1.5, 0.3], [-1.5, 2.0, -0.4],
+                          [0.3, -0.4, 1.0]])
+    distance = {"center": [0.5, -0.5, 0.0], "precision": precision.tolist()}
+    x = np.array([[3.0, 1.0, 0.2], [0.5, -0.5, 0.0], [-2.0, 4.0, 1.0],
+                  [1.0, 1.0, -3.0]], dtype=np.float32)
+    diff = x.astype(np.float64) - np.asarray(distance["center"])
+    products = diff * (diff @ precision)
+    assert (products < 0).any()
+
+    # 列の分は 0 以上で, 行の和は二乗の距離のまま
+    parts = distance_parts(x, distance)
+    assert (parts >= 0).all()
+    np.testing.assert_allclose(
+        parts.sum(1), np.einsum("ij,jk,ik->i", diff, precision, diff),
+        rtol=1e-12, atol=1e-12
+    )
+
+    # 外れた行の割合は 0 から 1 の間で, 列の割合の和は 1
+    totals = parts.sum(1)
+    shares = parts[totals > 0] / totals[totals > 0, None]
+    assert ((shares >= 0) & (shares <= 1)).all()
+    np.testing.assert_allclose(shares.sum(1), 1.0)
+    assert totals[1] == 0
 
 
 def test_reviews_at_once(tmp_path: Path, raw: Path) -> None:
