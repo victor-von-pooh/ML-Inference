@@ -1539,7 +1539,7 @@ def predict_ready(
     bundle: Bundle, source: Any, batch_size: int, device: str
 ) -> pd.DataFrame:
     """
-    既製のモデルの一式で, 画像ごとの種類の予測を返す関数
+    既製のモデルの一式で, 画像ごとの種類の予測か埋め込みを返す関数
 
     Parameters
     ----------
@@ -1555,8 +1555,8 @@ def predict_ready(
     Returns
     ----------
     result: pd.DataFrame
-        読み込みの表 (path など) と, status, reason, prediction,
-        confidence, p:<種類> の列
+        読み込みの表 (path など) と, status, reason と, 種類の予測は
+        prediction, confidence, p:<種類>, 埋め込みは output の列
 
     Raises
     ----------
