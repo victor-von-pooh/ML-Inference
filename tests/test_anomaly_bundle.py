@@ -414,7 +414,9 @@ def test_anomaly_reviews(tmp_path: Path, raw: Path) -> None:
                      "reviewed_at": "2026-11-26T09:30:00+09:00"}
     second = record_review(place, "r001", "normal", " 佐藤 ")
     assert second["reviewer"] == "佐藤"
-    assert dt.datetime.fromisoformat(second["reviewed_at"]).utcoffset()
+    assert dt.datetime.fromisoformat(
+        second["reviewed_at"]
+    ).utcoffset() is not None
 
     # 書いた順に文字で読み直し, 同じ場所に書き直しても残る
     reviews = read_reviews(place)
