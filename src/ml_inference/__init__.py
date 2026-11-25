@@ -1,5 +1,6 @@
 from importlib import metadata
 
+from ml_inference.anomaly import make_anomaly_bundle
 from ml_inference.baseline import (
     BASELINE_TYPES, check_baseline, current_from_baseline
 )
@@ -37,6 +38,7 @@ from ml_inference.remeasure import remeasure, restore_uncertainty
 from ml_inference.result import (
     RESULT_FORMAT_VERSION, artifact_path, infer, read_result, write_result
 )
+from ml_inference.reviews import read_reviews, record_review
 from ml_inference.samples import make_sample_bundle
 from ml_inference.units import UnregisteredUnitError, register_units
 
@@ -87,6 +89,7 @@ __all__ = [
     "infer",
     "load_bundle",
     "load_policy",
+    "make_anomaly_bundle",
     "make_bundle",
     "make_generator",
     "make_group_bundle",
@@ -99,7 +102,9 @@ __all__ = [
     "rank_metrics",
     "read_policy_spec",
     "read_result",
+    "read_reviews",
     "read_source",
+    "record_review",
     "register_procedure",
     "register_units",
     "remeasure",

@@ -1,0 +1,40 @@
+{
+  "format_version": 1,
+  "score": "distance",
+  "recipe": "anomaly_recipe.yaml",
+  "scores": "anomaly_scores.csv",
+  "features": [
+    "temp",
+    "vibration"
+  ],
+  "id": "reading_id",
+  "capacity": 2,
+  "k": 2,
+  "normal": {
+    "rows": 6,
+    "mean": 0.8316009753763124,
+    "p50": 1.039414774212555,
+    "p90": 1.0394147742125552,
+    "p95": 1.0394147742125552,
+    "p99": 1.0394147742125552,
+    "max": 1.0394147742125552
+  },
+  "model": null,
+  "distance": {
+    "center": [
+      0.0,
+      0.0
+    ],
+    "precision": [
+      [
+        2.0788295484251105,
+        -0.4149360376098024
+      ],
+      [
+        -0.4149360376098024,
+        2.07882954842511
+      ]
+    ],
+    "ridge": 0.001
+  }
+}
