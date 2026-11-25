@@ -227,7 +227,8 @@ def test_predict_ready_group(ready_group: dict, tmp_path: Path) -> None:
     assert first["values"]["path"].endswith("red.png")
     assert len(groups[1]["rows"]) == 2
 
-    # 結論と書き出し. 読み直した表から同じ要約と代表の写真
+    # 結論と書き出し. 読み直した表から同じ要約と代表の写真 (距離は文字に
+    # した小数の桁の分だけ違ってよい)
     result = infer(bundle, ready_group["photos"])
     assert result["summary"]["predicted"] == 6
     assert result["sentences"][0] == "7 行のうち 6 行を 2 個の群に割り当てた"\
@@ -236,7 +237,13 @@ def test_predict_ready_group(ready_group: dict, tmp_path: Path) -> None:
     write_result(result, out)
     again = read_result(out)["frame"]
     assert group_summary(bundle, again) == summary
-    assert group_representatives(bundle, again, count=2) == groups
+    found = group_representatives(bundle, again, count=2)
+    assert [[(r["row"], r["values"]) for r in g["rows"]] for g in found] == [
+        [(r["row"], r["values"]) for r in g["rows"]] for g in groups
+    ]
+    assert [r["distance"] for g in found for r in g["rows"]] == pytest.approx(
+        [r["distance"] for g in groups for r in g["rows"]]
+    )
 
 
 def test_ready_group_errors(
