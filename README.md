@@ -14,6 +14,7 @@
 - **並べるの一式**: 利用者と品物の 2 塔のモデル (ML-Quest の並べるの骨組みの実験) から, 品物の埋め込みを索引に持つ一式を作り, 利用者ごとに上位 K 件の品物と点数を返す. 前に反応した品物を除くかを選べ, 後の反応から Recall@K と NDCG を数える
 - **群分けの一式**: 表の行の埋め込みと群の中心 (ML-Quest のまとめるの骨組みの実験) から, 列の符号化と群の安定性を持つ一式を作り, 新しい行を最も近い群に割り当てて, 群ごとの件数と特徴 (群の要約) と, 群の中心に近い行 (代表の行) を返す. 既製のモデルの埋め込みで写真を群に分ける一式も作れる
 - **異常の度合いの一式**: 正常の行が多い表の度合いの決め方 (ML-Quest の異常の検知の骨組みの実験. 自己符号化器か距離に基づく度合い) から一式を作り, 新しい行の異常の度合いを出して, 度合いの上位から人が確かめる件数の上限まで人の確認に回す. 人が確かめた結果は 1 件ごとに結果の隣に記録する
+- **効果の一式**: 無作為に配った記録から学んだ, 処置の群と対照の群の 2 つの予測 (ML-Quest の効果の見積もりの骨組みの実験) から一式を作り, 新しい行の効果 (クーポンを配ったときに買う確率がどれだけ上がるか) を見積もって, 効果の高い順に配る数の上限まで配る. 実験の Qini の係数と上位 K 割の効果の差を結論に写し, 処置と結果のある表では数え直す
 - **見本の一式**: 表か文のデータから小さなモデルをその場で学習し, 画面で操作を試すための一式を作る
 
 前処理は [ML-EDA](https://github.com/victor-von-pooh/ML-EDA), モデルの組み立ては [ML-ModelControl](https://github.com/victor-von-pooh/ML-ModelControl) を使い, [ML-Found](https://github.com/victor-von-pooh/ML-Found) で学習した重みを読む.
@@ -22,7 +23,7 @@
 
 | 相手 | 使うもの |
 | --- | --- |
-| ML-Provide (推論) | 推論の一式の作成と確かめ (並べるの一式は `make_rank_bundle` と `rank_metrics`, 群分けの一式は `make_group_bundle`, `group_summary`, `group_representatives`, 異常の度合いの一式は `make_anomaly_bundle`), 人の確認の記録 (`record_review`, `read_reviews`), 版 2 のデータセットの説明 (`describe_items`), 予測と同じデータの読み込み (`read_source`), 正解の種類と出どころ (`target_of`, `origin_sentence`), 結論 (決め方の項目 `RULE_KEYS`, 件数だけの結論 `conclude_outputs`, まとめからの文 `summary_sentences`), 撮影の深度から点 (`backproject`), 意思決定, 先の予測と列の効き, 方策の一式. 自作の繰り返しの手順 (`register_procedure`, `PROCEDURES`) と自作の部品 (`register_units`) の登録. 問題の設定 (ML-Quest) の損得と今のやり方は, 画面が引数で渡す |
+| ML-Provide (推論) | 推論の一式の作成と確かめ (並べるの一式は `make_rank_bundle` と `rank_metrics`, 群分けの一式は `make_group_bundle`, `group_summary`, `group_representatives`, 異常の度合いの一式は `make_anomaly_bundle`, 効果の一式は `make_uplift_bundle`), 人の確認の記録 (`record_review`, `read_reviews`), 版 2 のデータセットの説明 (`describe_items`), 予測と同じデータの読み込み (`read_source`), 正解の種類と出どころ (`target_of`, `origin_sentence`), 結論 (決め方の項目 `RULE_KEYS`, 件数だけの結論 `conclude_outputs`, まとめからの文 `summary_sentences`), 撮影の深度から点 (`backproject`), 意思決定, 先の予測と列の効き, 方策の一式. 自作の繰り返しの手順 (`register_procedure`, `PROCEDURES`) と自作の部品 (`register_units`) の登録. 問題の設定 (ML-Quest) の損得と今のやり方は, 画面が引数で渡す |
 | ML-Found の学習のスクリプト (ML-Quest の骨組みを含む) | 学習の後に `make_bundle` で実験のディレクトリの中に一式を作る |
 
 ## 導入
@@ -281,6 +282,25 @@ write_result(result, "results/sensors")
 # 人が確かめた結果を 1 件ずつ足し, 読み直す
 record_review("results/sensors", "r0042", "anomaly", "山田")
 read_reviews("results/sensors")   # id, judgment, reviewer, reviewed_at の表
+```
+
+### 効果の上位から配る (一式の版 12)
+
+効果の見積もりの実験 (効果の決め方 `uplift_estimator.json`, 前処理のレシピの写し `uplift_recipe.yaml`, 行ごとの効果 `uplift_effects.csv`, 重み `final_model.pt` と定義 `model_spec.yaml`) から一式を作る. 学習に使った元の表を渡すと, 一式で出した効果を実験の効果と比べる. 配る判断は損得のしきい値でなく, 効果の高い順に配る数の上限 (`budget`) まで配る (効果が 0 以下の行は配らない). 効果は無作為に配った記録を前提にした見積もりなので, 配った効果は配る相手を無作為に分けた試験で確かめる.
+
+```python
+from ml_inference import infer, make_uplift_bundle, write_result
+
+make_uplift_bundle("bundles/coupons", "outputs/purchased_uplift/run",
+                   data="data/coupons.csv")
+
+# 行ごとの効果 (元の列と status, reason, effect, treated, control, rank) と,
+# 効果の上位から 500 件に配る列 action
+result = infer("bundles/coupons", "customers.csv",
+               decision={"type": "treat", "budget": 500})
+result["summary"]["evaluations"]  # 実験の Qini の係数と上位 K 割の効果の差
+result["decision"]["sentences"]   # ['効果の高い順に 500 件に配る ...', ...]
+write_result(result, "results/coupons")
 ```
 
 ### 何段も先を予測する
