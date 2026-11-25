@@ -545,12 +545,14 @@ def test_group_summary(tmp_path: Path, group_run: Path) -> None:
     assert BASELINE in result["sentences"][2]
     assert list(result["frame"]["decision"][-2:]) == ["", "予測なし"]
 
-    # 書き出しは割り当てない行の群の番号の欠けの型を残す版 3 で, 読んだ表
-    # からも群の要約を作れる (CSV を通した数は丸めの差まで)
+    # 書き出しは割り当てない行の群の番号の欠けの型と, 数にできない値の
+    # 混ざる額を残す版 4 で, 読んだ表からも群の要約を作れる (CSV を通した
+    # 数は丸めの差まで)
     out = tmp_path / "result"
     write_result(result, out)
     loaded = read_result(out)
-    assert loaded["format_version"] == 3
+    assert loaded["format_version"] == 4
+    assert loaded["column_types"]["spend"] == "mixed"
     again = group_summary(root, loaded["frame"])
     assert [list(row) for row in again] == [list(row) for row in rows]
     for mine, theirs in zip(again, rows):
@@ -632,11 +634,12 @@ def test_group_representatives(tmp_path: Path, group_run: Path) -> None:
     out = tmp_path / "result"
     write_result(result, out)
     loaded = read_result(out)
-    assert loaded["format_version"] == 3
+    assert loaded["format_version"] == 4
     assert loaded["summary"]["representatives"] == (
         result["summary"]["representatives"]
     )
     again = group_representatives(root, loaded["frame"])
+    assert same_values(again, result["summary"]["representatives"])
     assert [[row["row"] for row in entry["rows"]] for entry in again] == [
         [row["row"] for row in entry["rows"]]
         for entry in result["summary"]["representatives"]
@@ -870,6 +873,52 @@ def test_group_result_keeps_types(tmp_path: Path, group_run: Path) -> None:
     assert back["customer"].iloc[0] == "0000"
     assert back["region"].iloc[0] == "010"
     assert str(back["visits"].dtype) == "Int64"
+    assert same_values(group_summary(root, back),
+                       result["summary"]["groups"])
+    assert same_values(group_representatives(root, back),
+                       result["summary"]["representatives"])
+
+
+def test_group_result_keeps_mixed(tmp_path: Path, group_run: Path) -> None:
+    """
+    数の列に数にできない値が混ざり割り当てない行を持つ群分けの結果を, 書き
+    出して読み直しても値と群の要約と代表の行が変わらないことを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    group_run: Path
+        実験のディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 額に数にできない値 (割り当てない行) と数に見える文字の混ざる表
+    root = tmp_path / "bundle"
+    make_group_bundle(root, group_run)
+    new = customer_rows().iloc[1:].reset_index(drop=True)
+    new["spend"] = new["spend"].astype(object)
+    new.loc[2, "spend"] = "abc"
+    new.loc[5, "spend"] = "1.5"
+    result = infer(root, new)
+    status = result["frame"]["status"]
+    assert status.iloc[2] == "skipped" and (status == "skipped").sum() == 1
+    assert result["summary"]["representatives"]
+
+    # 読み直した額は値ごとの型のまま (数は数, 文字は文字)
+    out = tmp_path / "result"
+    write_result(result, out)
+    loaded = read_result(out)
+    assert loaded["format_version"] == 4
+    assert loaded["column_types"]["spend"] == "mixed"
+    assert loaded["text_rows"] == {"spend": [5]}
+    back = loaded["frame"]
+    assert back["spend"].tolist() == result["frame"]["spend"].tolist()
+    assert [type(v) for v in back["spend"]] == [
+        type(v) for v in result["frame"]["spend"]
+    ]
     assert same_values(group_summary(root, back),
                        result["summary"]["groups"])
     assert same_values(group_representatives(root, back),
