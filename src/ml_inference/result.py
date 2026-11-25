@@ -436,15 +436,17 @@ def column_kind(values: pd.Series) -> Optional[str]:
         欠けを除いた値が全て文字なら text, 全て Int64 に収まる整数 (真偽値
         を除く) なら integer, 他 (値の無い列, 小数, 混ざる列) は None
     """
-    # 整数の型の列はそのまま, 他は欠けを除いた値の型で見る
-    if pd.api.types.is_bool_dtype(values.dtype):
+    # 欠けを除いた値の型で見る (値の無い列と真偽値の列は残さない. 整数の
+    # 型の列も Int64 に収まる値だけ)
+    kept = values.dropna()
+    if not len(kept) or pd.api.types.is_bool_dtype(values.dtype):
         return None
     if pd.api.types.is_integer_dtype(values.dtype):
-        kind: Optional[str] = "integer"
+        inside = INT64.min <= int(kept.min()) and (
+            int(kept.max()) <= INT64.max
+        )
+        kind: Optional[str] = "integer" if inside else None
         return kind
-    kept = values.dropna()
-    if not len(kept):
-        return None
     if all(isinstance(v, str) for v in kept):
         kind = "text"
     elif all(isinstance(v, (int, np.integer))

@@ -150,3 +150,51 @@ def test_types_with_artifacts(tmp_path: Path) -> None:
     assert again["column_types"] == {"id": "text"}
     assert np.allclose(np.load(copied / "artifacts" / "000000.npy"),
                        np.arange(3.0))
+
+
+def test_columns_without_types(tmp_path: Path) -> None:
+    """
+    Int64 に収まらない整数の列, 全てが欠けの列, 0 行の表は型を残さず, 読み
+    直せることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # Int64 に収まらない符号なしの整数と欠けの列は残さず, 読み直せる
+    frame = pd.DataFrame({
+        "big": pd.array([2 ** 63, None], dtype="UInt64"),
+        "status": ["ok", "ok"],
+    })
+    root = write_result({"frame": frame}, tmp_path / "big")
+    back = read_result(root)
+    assert back["format_version"] == 1 and "column_types" not in back
+    assert back["frame"]["status"].tolist() == ["ok", "ok"]
+
+    # 全てが欠けの列 (整数の型, 文字) は残さない
+    frame = pd.DataFrame({
+        "empty": pd.array([None, None], dtype="Int64"),
+        "blank": pd.Series([None, None], dtype=object),
+        "status": ["ok", "skipped"],
+    })
+    root = write_result({"frame": frame}, tmp_path / "empty")
+    back = read_result(root)
+    assert back["format_version"] == 1 and "column_types" not in back
+    assert back["frame"]["empty"].isna().all()
+
+    # 0 行の表も版 1 のまま
+    frame = pd.DataFrame({
+        "code": pd.Series([], dtype=object),
+        "group": pd.array([], dtype="Int64"),
+        "status": pd.Series([], dtype=object),
+    })
+    root = write_result({"frame": frame}, tmp_path / "zero")
+    back = read_result(root)
+    assert back["format_version"] == 1 and "column_types" not in back
+    assert len(back["frame"]) == 0
+    assert list(back["frame"].columns) == ["code", "group", "status"]
