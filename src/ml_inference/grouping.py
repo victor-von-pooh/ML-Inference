@@ -70,6 +70,9 @@ SKIPPED = "skipped"
 # 割り当てない行の理由
 NOT_FINITE = "埋め込みに数でない値があります"
 
+# 群ごとに返す代表の行の既定の件数
+REPRESENTATIVES = 3
+
 
 def is_whole(value: Any, lowest: int) -> bool:
     """
@@ -1237,6 +1240,107 @@ def group_summary(
     return rows
 
 
+def plain_value(value: Any) -> Any:
+    """
+    表の値を, result.yaml に書ける値にする関数
+
+    Parameters
+    ----------
+    value: Any
+        表の 1 つの値
+
+    Returns
+    ----------
+    plain: Any
+        欠けは None, 真偽値と数はそのまま (numpy の値は Python の値),
+        他は文字
+    """
+    # 欠け, numpy の値, 真偽値と数, 他 (並びの値は文字)
+    if pd.api.types.is_scalar(value) and pd.isna(value):
+        return None
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, (bool, int, float, str)):
+        return value
+    plain = str(value)
+
+    return plain
+
+
+def group_representatives(
+    bundle: Union[str, Path, Bundle], prediction: pd.DataFrame,
+    count: int = REPRESENTATIVES
+) -> list[dict]:
+    """
+    群ごとに, 群の中心に近い順の割り当てた行 (代表の行) を返す関数
+
+    Parameters
+    ----------
+    bundle: Union[str, Path, Bundle]
+        群分けの一式かそのディレクトリ
+    prediction: pd.DataFrame
+        predict の表 (read_result で読んだ表も)
+    count: int = REPRESENTATIVES
+        群ごとの代表の行の件数の上限
+
+    Returns
+    ----------
+    groups: list[dict]
+        群の番号の順の group と rows (row (予測の表の行の位置),
+        distance, values (群を作る列の元の値)) の辞書. 割り当てた行が
+        無ければ空
+
+    Raises
+    ----------
+    ValueError
+        群分けの一式でない場合, 件数が 1 以上の整数でない場合, 表に列が
+        無い場合
+    """
+    # 割り当てた行だけ
+    if not isinstance(bundle, Bundle):
+        bundle = load_bundle(bundle)
+    if not bundle.from_group:
+        raise ValueError(
+            "group_representatives は群分けの一式だけに使えます"
+        )
+    if not is_whole(count, 1):
+        raise ValueError(
+            f"代表の行の件数は 1 以上の整数にしてください ({count!r})"
+        )
+    missing = [c for c in ("status", "group", "distance")
+               if c not in prediction.columns]
+    if missing:
+        raise ValueError(
+            f"予測の表に {', '.join(missing)} の列がありません"
+        )
+    group = bundle.info["group"]
+    columns = {name: frame_column(prediction, name)
+               for name in group["columns"]}
+    positions = np.flatnonzero((prediction["status"] == OK).to_numpy())
+    if positions.size == 0:
+        return []
+
+    # 群ごとに距離の近い順 (同じ距離なら行の位置の順)
+    labels = np.array([int(v) for v in prediction["group"].iloc[positions]])
+    distance = pd.to_numeric(
+        prediction["distance"].iloc[positions], errors="coerce"
+    ).to_numpy(dtype=float)
+    groups = []
+    for key in range(group["k"]):
+        inside_group = np.flatnonzero(labels == key)
+        order = inside_group[np.argsort(distance[inside_group],
+                                        kind="stable")][:count]
+        rows = [{
+            "row": int(positions[n]),
+            "distance": float(distance[n]),
+            "values": {name: plain_value(column.iloc[positions[n]])
+                       for name, column in columns.items()},
+        } for n in order]
+        groups.append({"group": key, "rows": rows})
+
+    return groups
+
+
 def stability_sentence(stability: dict) -> str:
     """
     一式の群の安定性を述べる文を返す関数
@@ -1284,7 +1388,7 @@ def conclude_groups(bundle: Bundle, prediction: pd.DataFrame) -> dict:
     conclusion: dict
         frame (decision を足した表. 割り当てた行は空, しなかった行は
         予測なし), summary (rows, predicted, skipped, k, groups,
-        stability), sentences, rules (空)
+        representatives, stability), sentences, rules (空)
     """
     # 割り当てたかと, 群ごとの行の数
     frame = prediction.copy()
@@ -1296,6 +1400,7 @@ def conclude_groups(bundle: Bundle, prediction: pd.DataFrame) -> dict:
         "rows": int(len(frame)), "predicted": int(ok.sum()),
         "skipped": int(len(frame) - ok.sum()), "k": group["k"],
         "groups": groups,
+        "representatives": group_representatives(bundle, prediction),
         "stability": copy.deepcopy(group["stability"]),
     }
     head = (f"{summary['rows']:,} 行のうち {summary['predicted']:,} 行を "
