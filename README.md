@@ -12,7 +12,7 @@
 - **方策の一式**: ML-Found が書き出す強化学習の方策を読み, 観測から行動と守り (行動の範囲, 止める条件, 外れたときの動き) の結果を返す. 実機では動かさない
 - **既製のモデルの一式**: 学習しない既製のモデル (torchvision の学習済みの画像の分類など) を, 重みの版と hash を固定し, 種類の名前の表と前処理を持たせて一式にする. 種類の予測の他に, 分類の最後の層の手前の出力を埋め込みとして返せる
 - **並べるの一式**: 利用者と品物の 2 塔のモデル (ML-Quest の並べるの骨組みの実験) から, 品物の埋め込みを索引に持つ一式を作り, 利用者ごとに上位 K 件の品物と点数を返す. 前に反応した品物を除くかを選べ, 後の反応から Recall@K と NDCG を数える
-- **群分けの一式**: 表の行の埋め込みと群の中心 (ML-Quest のまとめるの骨組みの実験) から, 列の符号化と群の安定性を持つ一式を作り, 新しい行を最も近い群に割り当てて, 群ごとの件数と特徴 (群の要約) と, 群の中心に近い行 (代表の行) を返す
+- **群分けの一式**: 表の行の埋め込みと群の中心 (ML-Quest のまとめるの骨組みの実験) から, 列の符号化と群の安定性を持つ一式を作り, 新しい行を最も近い群に割り当てて, 群ごとの件数と特徴 (群の要約) と, 群の中心に近い行 (代表の行) を返す. 既製のモデルの埋め込みで写真を群に分ける一式も作れる
 - **見本の一式**: 表か文のデータから小さなモデルをその場で学習し, 画面で操作を試すための一式を作る
 
 前処理は [ML-EDA](https://github.com/victor-von-pooh/ML-EDA), モデルの組み立ては [ML-ModelControl](https://github.com/victor-von-pooh/ML-ModelControl) を使い, [ML-Found](https://github.com/victor-von-pooh/ML-Found) で学習した重みを読む.
@@ -240,6 +240,22 @@ group_representatives("bundles/customers", frame, count=5)   # 群ごとに中�
 result = infer("bundles/customers", "new_customers.csv")
 result["sentences"]   # ['500 行のうち 500 行を 4 個の群に割り当てた', '群 0 ...', '学習の群の安定性 ...']
 result["summary"]["representatives"]   # 群ごとの代表の行 (既定の 3 件. 群の要約 result["summary"]["groups"] と並ぶ)
+```
+
+### 写真を既製の埋め込みで群に分ける (一式の版 10)
+
+学習しない torchvision の画像の分類のモデルの, 分類の最後の層の手前の出力 (埋め込み) で写真を群に分ける一式も作れる. 群の中心, 割り当て, 群の安定性と群の要約は ML-Quest の群分けの骨組みが成果物のディレクトリに書き (`group_centers.json` は列の符号化の代わりに既製のモデルの名前と重みの hash を持つ), 一式は重みを写さず出どころから読んで hash で確かめる.
+
+```python
+from ml_inference import group_representatives, make_group_bundle, predict
+
+# 骨組みの成果物と, 群に分けた写真 (割り当て直して比べる)
+make_group_bundle("bundles/products", "outputs/grouping",
+                  data="data/photos")
+
+# 写真ごとの群 (path, width, height などと status, reason, group, distance の表)
+frame = predict("bundles/products", "new_photos/")
+group_representatives("bundles/products", frame)   # 群ごとに中心に近い写真 (path, width, height)
 ```
 
 ### 何段も先を予測する

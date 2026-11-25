@@ -14,10 +14,14 @@ from ml_eda import Data, Dataset, describe_groups, load_data
 from ml_modelcontrol import dump_spec, load_spec
 
 from ml_inference.bundle import (
-    GROUP_BUNDLE_VERSION, Bundle, bundle_notes, inside, load_bundle,
-    plan_weights, run_summary
+    GROUP_BUNDLE_VERSION, READY_GROUP_BUNDLE_VERSION, Bundle, bundle_notes,
+    check_sourced, inside, load_bundle, plan_weights, ready_record,
+    ready_spec, run_summary
 )
 from ml_inference.conclude import NO_PREDICTION
+from ml_inference.ready import (
+    READY_LIBRARIES, ReadyEmbedding, check_head, check_ready, read_images
+)
 from ml_inference.units import check_units
 
 # モデルの入力と出力の名前 (ML-Quest のまとめるの骨組みと, ML-ModelControl
@@ -72,6 +76,14 @@ NOT_FINITE = "埋め込みに数でない値があります"
 
 # 群ごとに返す代表の行の既定の件数
 REPRESENTATIVES = 3
+
+# 既製の埋め込みの群分けの, 行を見分ける列と群の要約の列 (ML-EDA の画像の
+# 読み込みの表の列. 写真の場所と, 幅と高さの画素の数)
+READY_ID = "path"
+READY_COLUMNS = ("width", "height")
+
+# 群の中心のファイルの, 埋め込みを作った既製のモデルの欄
+CENTERS_READY_KEYS = ("library", "model", "weights", "sha256")
 
 
 def is_whole(value: Any, lowest: int) -> bool:
@@ -196,7 +208,9 @@ def read_centers(path: Path) -> dict:
     Returns
     ----------
     found: dict
-        k, encoding, centers ((群の数, 幅) の float64 の配列)
+        k, encoding (列の符号化. 既製の埋め込みは None), ready (埋め込みを
+        作った既製のモデル. 列の符号化は None), centers ((群の数, 幅) の
+        float64 の配列)
 
     Raises
     ----------
@@ -215,7 +229,13 @@ def read_centers(path: Path) -> dict:
     k = loaded.get("k")
     if not is_whole(k, 2):
         errors.append("k (群の数) は 2 以上の整数にしてください")
-    errors.extend(check_encoding(loaded.get("encoding")))
+    if ("encoding" in loaded) == ("ready" in loaded):
+        errors.append("encoding (列の符号化) か ready (埋め込みを作った既製"
+                      "のモデル) のどちらか 1 つが要ります")
+    elif "encoding" in loaded:
+        errors.extend(check_encoding(loaded["encoding"]))
+    else:
+        errors.extend(check_centers_ready(loaded["ready"]))
     try:
         centers = np.asarray(loaded.get("centers"), dtype=np.float64)
     except (TypeError, ValueError):
@@ -227,9 +247,69 @@ def read_centers(path: Path) -> dict:
                       "ください")
     if errors:
         raise ValueError(f"{path.name} の誤り: " + " / ".join(errors))
-    found = {"k": int(k), "encoding": loaded["encoding"], "centers": centers}
+    found = {"k": int(k), "encoding": loaded.get("encoding"),
+             "ready": loaded.get("ready"), "centers": centers}
 
     return found
+
+
+def check_centers_ready(ready: Any) -> list[str]:
+    """
+    群の中心のファイルの, 埋め込みを作った既製のモデルの欄を確かめる関数
+
+    Parameters
+    ----------
+    ready: Any
+        group_centers.json の ready
+
+    Returns
+    ----------
+    errors: list[str]
+        誤りの一覧 (無ければ空)
+    """
+    # 出どころ, モデル, 重みの名前と, 重みの hash
+    if not isinstance(ready, dict):
+        return ["ready は library, model, weights, sha256 の辞書にして"
+                "ください"]
+    errors = []
+    unknown = [str(k) for k in ready if k not in CENTERS_READY_KEYS]
+    if unknown:
+        errors.append(f"ready に知らない欄があります: {', '.join(unknown)}")
+    for key in ("library", "model", "weights"):
+        if not isinstance(ready.get(key), str) or not ready.get(key):
+            errors.append(f"ready.{key} に名前の文字が要ります")
+    sha256 = ready.get("sha256")
+    if not isinstance(sha256, str) or len(sha256) != 64 or any(
+        c not in "0123456789abcdef" for c in sha256
+    ):
+        errors.append("ready.sha256 は重みの hash (64 文字の小文字の 16 進)"
+                      "にしてください")
+
+    return errors
+
+
+def ready_centers(path: Path) -> bool:
+    """
+    群の中心のファイルが既製の埋め込みのものかを返す関数
+
+    Parameters
+    ----------
+    path: Path
+        group_centers.json
+
+    Returns
+    ----------
+    ready: bool
+        読める辞書で ready を持てば True (形の誤りは read_centers で)
+    """
+    # 読めないファイルは学習した符号化器のものとして確かめる
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    ready = isinstance(loaded, dict) and "ready" in loaded
+
+    return ready
 
 
 def read_assignments(path: Path, k: int) -> tuple[Optional[str], pd.Series]:
@@ -414,10 +494,11 @@ def check_group_info(info: dict) -> list[str]:
         誤りの一覧 (無ければ空)
     """
     # group が要り, データセット, items, 手順, 正解, 意思決定を持たない
+    version = info.get("format_version")
+    ready = version == READY_GROUP_BUNDLE_VERSION
     group = info.get("group")
     if not isinstance(group, dict):
-        return [f"版 {GROUP_BUNDLE_VERSION} の一式には group (列の符号化と"
-                "群の中心) が要ります"]
+        return [f"版 {version} の一式には group (群の中心) が要ります"]
     errors = []
     unknown = [str(k) for k in group if k not in GROUP_KEYS]
     if unknown:
@@ -428,7 +509,7 @@ def check_group_info(info: dict) -> list[str]:
                       "ください")
     if not is_whole(group.get("k"), 2):
         errors.append("group.k は 2 以上の整数にしてください")
-    for key in ("features", "width", "rows"):
+    for key in ("width", "rows") if ready else ("features", "width", "rows"):
         if not is_whole(group.get(key), 1):
             errors.append(f"group.{key} は 1 以上の整数にしてください")
     columns = group.get("columns")
@@ -450,9 +531,11 @@ def check_group_info(info: dict) -> list[str]:
     ):
         errors.append("group.check は rows と agreement の辞書か null に"
                       "してください")
+    if ready:
+        errors.extend(check_ready_group(info))
     held = [k for k in ("dataset", "items", "procedure", "decision",
-                        "check", "uncertainty", "target", "ready",
-                        "calibrate", "rank")
+                        "check", "uncertainty", "target", "calibrate",
+                        "rank", *(() if ready else ("ready",)))
             if info.get(k) is not None]
     if held:
         errors.append(
@@ -463,13 +546,49 @@ def check_group_info(info: dict) -> list[str]:
         errors.append("群分けの一式は結論の決め方の既定値を持てません")
     if info.get("inputs"):
         errors.append("群分けの一式の inputs は空にしてください (入力は "
-                      "符号化した行の特徴 x に決まっています)")
+                      "符号化した行の特徴 x か画像に決まっています)")
     if info.get("role") != "group":
         errors.append("群分けの一式の role は group にしてください")
     model = info.get("model") if isinstance(info.get("model"), dict) else {}
     if model.get("target_scale") is not None or model.get("output"):
         errors.append("群分けの一式は model.target_scale と model.output を"
                       "持てません")
+
+    return errors
+
+
+def check_ready_group(info: dict) -> list[str]:
+    """
+    既製の埋め込みの群分けの一式 (版 10) の ready と group を確かめる関数
+
+    Parameters
+    ----------
+    info: dict
+        inference.yaml の中身
+
+    Returns
+    ----------
+    errors: list[str]
+        誤りの一覧 (無ければ空)
+    """
+    # ready が要り, 重みは出どころから. 符号化した行の幅を持たず, 行を
+    # 見分ける列と群の要約の列は画像の読み込みの表の列
+    if info.get("ready") is None:
+        return [f"版 {READY_GROUP_BUNDLE_VERSION} の一式には ready (既製の"
+                "モデルの出どころと前処理) が要ります"]
+    errors = check_ready(info["ready"])
+    model = info.get("model") if isinstance(info.get("model"), dict) else {}
+    errors.extend(check_sourced(model))
+    group = info["group"]
+    if group.get("features") is not None:
+        errors.append("既製の埋め込みの群分けの一式の group.features は null"
+                      "にしてください")
+    if group.get("id") != READY_ID:
+        errors.append(f"既製の埋め込みの群分けの一式の group.id は "
+                      f"{READY_ID} にしてください")
+    if group.get("columns") != list(READY_COLUMNS):
+        errors.append("既製の埋め込みの群分けの一式の group.columns は "
+                      f"[{', '.join(READY_COLUMNS)}] にしてください")
 
     return errors
 
@@ -585,21 +704,25 @@ def encode_rows(
 
 
 def embed(
-    model: Any, features: np.ndarray, batch_size: int, device: str
+    model: Any, features: np.ndarray, batch_size: int, device: str,
+    named: bool = True
 ) -> np.ndarray:
     """
-    符号化した行の埋め込みを, まとまりごとに求める関数
+    符号化した行か前処理した画像の埋め込みを, まとまりごとに求める関数
 
     Parameters
     ----------
     model: Any
         組み立てたモデル
     features: np.ndarray
-        (件数, 符号化した行の幅) の float32
+        (件数, 符号化した行の幅) か (件数, 3, crop, crop) の float32
     batch_size: int
-        1 回に渡す行の数
+        1 回に渡す件数
     device: str
         使うデバイス
+    named: bool = True
+        出力が名前の辞書 (embedding を使う) か. 既製のモデルの埋め込みは
+        False (出力が埋め込み)
 
     Returns
     ----------
@@ -618,11 +741,14 @@ def embed(
         chunk = torch.from_numpy(features[start:start + batch_size])
         with torch.no_grad():
             out = model(chunk.to(device))
-        if not isinstance(out, dict) or EMBEDDING_OUTPUT not in out:
+        if named and (
+            not isinstance(out, dict) or EMBEDDING_OUTPUT not in out
+        ):
             raise ValueError(
                 f"モデルの出力に {EMBEDDING_OUTPUT} がありません"
             )
-        found = out[EMBEDDING_OUTPUT].detach().double().cpu().numpy()
+        out = out[EMBEDDING_OUTPUT] if named else out
+        found = out.detach().double().cpu().numpy()
         if found.ndim != 2 or len(found) != len(chunk):
             raise ValueError(
                 f"埋め込みの形 {tuple(found.shape)} が (件数, 幅) では"
@@ -756,15 +882,47 @@ def assign_frame(
         )
     encoding = bundle.cache["group_encoding"]
     features, reasons = encode_rows(frame, encoding)
+    labels, distance = assign_kept(bundle, features, reasons, batch_size,
+                                   device)
+    assigned = (reasons, labels, distance)
 
-    # 割り当てる行だけの埋め込み (数でない埋め込みの行は割り当ての外)
-    labels = np.full(len(frame), -1, dtype=np.int64)
-    distance = np.full(len(frame), math.nan)
+    return assigned
+
+
+def assign_kept(
+    bundle: Bundle, features: np.ndarray, reasons: list[str],
+    batch_size: int, device: str
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    割り当てる件の埋め込みを, 最も近い群の中心に割り当てる関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        群分けの一式
+    features: np.ndarray
+        モデルの入力 (符号化した行か前処理した画像)
+    reasons: list[str]
+        件ごとの割り当てない理由 (数でない埋め込みの件に理由を足す)
+    batch_size: int
+        1 回に渡す件数
+    device: str
+        使うデバイス
+
+    Returns
+    ----------
+    assigned: tuple[np.ndarray, np.ndarray]
+        群の番号 (割り当てない件は -1) と距離 (割り当てない件は NaN)
+    """
+    # 割り当てる件だけの埋め込み (数でない埋め込みの件は割り当ての外)
+    labels = np.full(len(features), -1, dtype=np.int64)
+    distance = np.full(len(features), math.nan)
     keep = np.array([not r for r in reasons], dtype=bool)
     if keep.any():
         model = bundle.model().to(device)
         try:
-            points = embed(model, features[keep], batch_size, device)
+            points = embed(model, features[keep], batch_size, device,
+                           named=not bundle.from_ready)
         finally:
             model.to("cpu")
         finite = np.isfinite(points).all(1)
@@ -774,7 +932,46 @@ def assign_frame(
         found, near = assign(points[finite], bundle.cache["group_centers"])
         labels[rows[finite]] = found
         distance[rows[finite]] = near
-    assigned = (reasons, labels, distance)
+    assigned = (labels, distance)
+
+    return assigned
+
+
+def assign_images(
+    bundle: Bundle, source: Any, batch_size: int, device: str
+) -> tuple[pd.DataFrame, list[str], np.ndarray, np.ndarray]:
+    """
+    写真を一式の前処理で読み, 既製のモデルの埋め込みを群の中心に割り当てる
+    関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        既製の埋め込みの群分けの一式
+    source: Any
+        画像のファイルかディレクトリ
+    batch_size: int
+        1 回に渡す枚数
+    device: str
+        使うデバイス
+
+    Returns
+    ----------
+    assigned: tuple[pd.DataFrame, list[str], np.ndarray, np.ndarray]
+        読み込みの表 (path など), 写真ごとの割り当てない理由 (読めない
+        画像も), 群の番号, 距離
+
+    Raises
+    ----------
+    ValueError
+        画像のファイルかディレクトリでない場合と, 読めない場合
+    """
+    # 読めない画像は理由を付けて飛ばす
+    frame, images, reasons = read_images(source,
+                                         bundle.info["ready"]["preprocess"])
+    labels, distance = assign_kept(bundle, images, reasons, batch_size,
+                                   device)
+    assigned = (frame, reasons, labels, distance)
 
     return assigned
 
@@ -791,9 +988,11 @@ def predict_group(
     bundle: Bundle
         群分けの一式
     source: Any
-        表のファイル, 表, 表の ML-EDA の Data
+        表のファイル, 表, 表の ML-EDA の Data (既製の埋め込みは画像の
+        ファイルかディレクトリ)
     options: Optional[dict] = None
-        ファイルの読み込みの設定 (load_data に渡す)
+        ファイルの読み込みの設定 (load_data に渡す. 既製の埋め込みは使え
+        ない)
     batch_size: int = 256
         1 回に渡す行の数
     device: str = "cpu"
@@ -802,18 +1001,28 @@ def predict_group(
     Returns
     ----------
     result: pd.DataFrame
-        元の列 (予測の列と同じ名前は「(入力)」付き) と, status, reason,
-        group (Int64), distance
+        元の列 (既製の埋め込みは画像の読み込みの表. 予測の列と同じ名前は
+        「(入力)」付き) と, status, reason, group (Int64), distance
 
     Raises
     ----------
     ValueError
-        表でない場合と, 群を作る列が無い場合
+        表 (既製の埋め込みは画像) でない場合と, 群を作る列が無い場合
     """
-    # 表の読み込みと割り当て
-    frame = read_table(source, options, "群に割り当てる表")
-    reasons, labels, distance = assign_frame(bundle, frame, batch_size,
-                                             device)
+    # 表 (既製の埋め込みは写真) の読み込みと割り当て
+    if bundle.from_ready:
+        if options:
+            raise ValueError(
+                "既製の埋め込みの群分けの一式は画像を一式の前処理で読むので, "
+                "読み込みの設定 (options) は使えません"
+            )
+        frame, reasons, labels, distance = assign_images(
+            bundle, source, batch_size, device
+        )
+    else:
+        frame = read_table(source, options, "群に割り当てる表")
+        reasons, labels, distance = assign_frame(bundle, frame, batch_size,
+                                                 device)
 
     # 元の列の後ろに予測の列 (同じ名前の元の列は「(入力)」)
     added = list(GROUP_FRAME_COLUMNS)
@@ -833,18 +1042,22 @@ def predict_group(
 
 def run_sources(run: Union[str, Path]) -> dict:
     """
-    群分けの実験のディレクトリから, 一式に要るものを読む関数
+    群分けの実験のディレクトリ (既製の埋め込みは成果物のディレクトリ) から,
+    一式に要るものを読む関数
 
     Parameters
     ----------
     run: Union[str, Path]
-        ML-Found の実験のディレクトリ
+        ML-Found の実験のディレクトリか, 骨組みが既製の埋め込みの群分けの
+        成果物を書いたディレクトリ
 
     Returns
     ----------
     sources: dict
-        weights, spec, centers_file (写すファイル), centers (read_centers),
-        id, assignments, stability, summary, columns, run (実験の状態)
+        weights, spec (既製の埋め込みは None), centers_file (写すファイル),
+        centers (read_centers), ready (埋め込みを作った既製のモデル. 列の
+        符号化は None), id, assignments, stability, summary, columns, run
+        (実験の状態. 既製の埋め込みは None)
 
     Raises
     ----------
@@ -854,34 +1067,45 @@ def run_sources(run: Union[str, Path]) -> dict:
     FileNotFoundError
         成果物が無い場合
     """
-    # 重みと定義 (仮のモデルで学習した実験には定義が無い)
+    # 重みと定義 (仮のモデルで学習した実験には定義が無い. 既製の埋め込みは
+    # 重みを出どころから読み, 定義も作る)
     root = Path(run).expanduser().resolve()
     if not root.is_dir():
         raise ValueError(f"実験のディレクトリ {root} がありません")
-    weights = root / "final_model.pt"
-    if not weights.is_file():
+    ready = ready_centers(root / CENTERS_FILE)
+    weights = None if ready else root / "final_model.pt"
+    if weights is not None and not weights.is_file():
         raise ValueError(f"重み {weights} がありません")
-    spec = root / "model_spec.yaml"
-    if not spec.is_file():
+    spec = None if ready else root / "model_spec.yaml"
+    if spec is not None and not spec.is_file():
         raise ValueError(
             f"モデルの定義 {spec} がありません (仮のモデルで学習した実験"
             "は一式にできません. 定義を置いて学習し直してください)"
         )
 
-    # 列の符号化と群の中心, 割り当て, 群の安定性と群の要約
+    # 列の符号化 (か既製のモデル) と群の中心, 割り当て, 群の安定性と
+    # 群の要約
     centers = read_centers(root / CENTERS_FILE)
     k = centers["k"]
     key, assignments = read_assignments(root / ASSIGNMENT_FILE, k)
+    if ready and key != READY_ID:
+        raise ValueError(
+            f"既製の埋め込みの群の割り当ての表の行を見分ける列は {READY_ID} "
+            f"(写真の場所) にしてください (今は {key or ROW_KEY})"
+        )
     stability = stability_of(read_evaluation(root / STABILITY_FILE), k)
-    names = [*centers["encoding"]["numeric"],
-             *centers["encoding"]["categories"]]
+    names = list(READY_COLUMNS) if ready else [
+        *centers["encoding"]["numeric"], *centers["encoding"]["categories"]
+    ]
     summary, columns = summary_of(read_evaluation(root / SUMMARY_FILE), k,
                                   names)
     sources = {
         "weights": weights, "spec": spec, "centers_file": root / CENTERS_FILE,
-        "centers": centers, "id": key, "assignments": assignments,
-        "stability": stability, "summary": summary, "columns": columns,
-        "run": run_summary(root),
+        "centers": centers, "ready": centers["ready"], "id": key,
+        "assignments": assignments, "stability": stability,
+        "summary": summary,
+        "columns": list(READY_COLUMNS) if ready else columns,
+        "run": None if ready else run_summary(root),
     }
 
     return sources
@@ -899,7 +1123,8 @@ def data_check(
     bundle: Bundle
         作っている一式
     data: Any
-        学習に使った表 (ファイル, 表, 表の Data)
+        学習に使った表 (ファイル, 表, 表の Data. 既製の埋め込みは群に分けた
+        写真のディレクトリ)
     options: Optional[dict]
         ファイルの読み込みの設定
     sources: dict
@@ -912,26 +1137,40 @@ def data_check(
     found: tuple[Optional[dict], list[str]]
         rows と agreement (比べられなければ None) と注意の文
     """
+    # 既製の埋め込みは読めた写真だけ (骨組みは読めた写真だけを割り当ての表
+    # に書く)
+    labels = None
+    if bundle.from_ready:
+        what = "群に分けた写真"
+        frame, reasons, labels, _ = assign_images(bundle, data, batch_size,
+                                                  "cpu")
+        read = np.array([r in ("", NOT_FINITE) for r in reasons],
+                        dtype=bool)
+        frame, labels = frame[read].reset_index(drop=True), labels[read]
+    else:
+        what = "学習の表"
+        frame = read_table(data, options, what)
+
     # 比べるのは, 行の数と行を見分ける列の値の並びがそろう場合だけ
-    frame = read_table(data, options, "学習の表")
     expected = sources["assignments"]
     if len(frame) != len(expected):
-        note = (f"学習の表の行の数 {len(frame)} が, 実験の群の割り当ての行の"
+        note = (f"{what}の行の数 {len(frame)} が, 実験の群の割り当ての行の"
                 f"数 {len(expected)} と違うので, 割り当て直しを比べません")
         return None, [note]
     key = sources["id"]
     if key is not None and (key not in frame.columns or list(
         frame[key].astype(str)
     ) != list(map(str, expected.index))):
-        note = (f"学習の表の行を見分ける列 {key} の値の並びが実験の群の割り"
+        note = (f"{what}の行を見分ける列 {key} の値の並びが実験の群の割り"
                 "当てと違うので, 割り当て直しを比べません")
         return None, [note]
-    _, labels, _ = assign_frame(bundle, frame, batch_size, "cpu")
+    if labels is None:
+        _, labels, _ = assign_frame(bundle, frame, batch_size, "cpu")
     agreement = float((labels == expected.to_numpy()).mean())
     notes = []
     if agreement < AGREEMENT:
         notes.append(
-            f"学習の表を一式で割り当て直した群が, 実験の群の割り当てと "
+            f"{what}を一式で割り当て直した群が, 実験の群の割り当てと "
             f"{agreement * 100:.1f} % しか同じになりません (列の符号化か重み"
             "が学習と違う可能性があります)"
         )
@@ -945,10 +1184,11 @@ def make_group_bundle(
     name: Optional[str] = None, data: Any = None,
     options: Optional[dict] = None, copy_weights: bool = True,
     overwrite: bool = False, pretrained: Optional[dict] = None,
-    batch_size: int = 256
+    batch_size: int = 256, license: Optional[dict] = None
 ) -> dict:
     """
-    新しい行を群に割り当てる一式を, 群分けの実験から作る関数
+    新しい行 (既製の埋め込みは写真) を群に割り当てる一式を, 群分けの実験
+    (既製の埋め込みは骨組みの成果物) から作る関数
 
     Parameters
     ----------
@@ -958,21 +1198,29 @@ def make_group_bundle(
         ML-Found の実験のディレクトリ (final_model.pt, model_spec.yaml,
         group_centers.json, group_assignments.csv, evaluations の
         group_stability.json と group_summary.json を使い, 実験の状態を
-        記録する)
+        記録する). 既製の埋め込みは, ready を持つ group_centers.json と
+        他の 3 つの成果物のディレクトリ
     name: Optional[str] = None
         一式の名前 (省略するとディレクトリの名前)
     data: Any = None
-        学習に使った表 (渡すと割り当て直して実験の割り当てと比べる)
+        学習に使った表 (既製の埋め込みは群に分けた写真のディレクトリ.
+        渡すと割り当て直して実験の割り当てと比べる)
     options: Optional[dict] = None
-        data のファイルの読み込みの設定 (load_data に渡す)
+        data のファイルの読み込みの設定 (load_data に渡す. 既製の埋め込み
+        は使えない)
     copy_weights: bool = True
-        重みを一式に写すか (写さない場合は絶対パスで指す)
+        重みを一式に写すか (写さない場合は絶対パスで指す. 既製の埋め込みは
+        いつも写さない)
     overwrite: bool = False
         既にある一式を置き換えるか
     pretrained: Optional[dict] = None
-        ノードの名前ごとの重みのライセンスの情報 (make_bundle と同じ)
+        ノードの名前ごとの重みのライセンスの情報 (make_bundle と同じ. 既製
+        の埋め込みは license)
     batch_size: int = 256
         1 回に渡す行の数
+    license: Optional[dict] = None
+        既製のモデルの重みのライセンスの情報 (make_ready_bundle と同じ.
+        既製の埋め込みだけ)
 
     Returns
     ----------
@@ -999,8 +1247,25 @@ def make_group_bundle(
     if batch_size < 1:
         raise ValueError("batch_size は 1 以上にしてください")
 
-    # 実験の成果物と, 入力と出力の約束
+    # 実験の成果物 (既製の埋め込みは別の作り方)
     sources = run_sources(run)
+    if sources["ready"] is not None:
+        if options or pretrained is not None:
+            raise ValueError(
+                "既製の埋め込みの群分けの一式には, 読み込みの設定 (options) "
+                "と pretrained を渡せません (写真は一式の前処理で読み, "
+                "ライセンスの情報は license で渡す)"
+            )
+        info = make_ready_group(final, sources, name, data, license,
+                                batch_size)
+        return info
+    if license is not None:
+        raise ValueError(
+            "license は既製の埋め込みの群分けの一式だけに渡せます (学習した"
+            "重みのライセンスは pretrained)"
+        )
+
+    # 入力と出力の約束
     centers = sources["centers"]
     features = encoding_width(centers["encoding"])
     spec_dict = load_spec(sources["spec"])
@@ -1100,6 +1365,145 @@ def make_group_bundle(
     return info
 
 
+def make_ready_group(
+    final: Path, sources: dict, name: Optional[str], data: Any,
+    license: Optional[dict], batch_size: int
+) -> dict:
+    """
+    既製の埋め込みの群分けの一式 (版 10) を, 骨組みの成果物から作る関数
+
+    Parameters
+    ----------
+    final: Path
+        作るディレクトリ
+    sources: dict
+        run_sources の結果 (ready を持つもの)
+    name: Optional[str]
+        一式の名前 (省略するとディレクトリの名前)
+    data: Any
+        群に分けた写真のディレクトリ (渡すと割り当て直して比べる)
+    license: Optional[dict]
+        重みのライセンスの情報 (省略すると pretrained_info で読む)
+    batch_size: int
+        1 回に渡す枚数
+
+    Returns
+    ----------
+    info: dict
+        書き出した inference.yaml の中身
+
+    Raises
+    ----------
+    ValueError
+        出どころ, モデル, 重みの名前が無い場合, 重みの hash が群の中心を
+        作ったものと違う場合, 埋め込みを取り出せない場合, 埋め込みの幅が
+        群の中心と違う場合
+    """
+    # 出どころの重みの説明, 1 つのノードの定義, 出どころの重みの hash
+    wanted = sources["ready"]
+    library, model = wanted["library"], wanted["model"]
+    if library not in READY_LIBRARIES:
+        raise ValueError(
+            f"既製のモデルの出どころ {library} はありません (出どころ: "
+            f"{', '.join(READY_LIBRARIES)})"
+        )
+    found = READY_LIBRARIES[library](model, wanted["weights"])
+    spec = ready_spec(found, model)
+    record, ready, notes, built = ready_record(spec, found, library, model,
+                                               license)
+    if record["sha256"] != wanted["sha256"]:
+        raise ValueError(
+            f"{library} の {model} の重み {record['pinned_revision']} の hash "
+            f"({record['sha256'][:12]}…) が, 群の中心を作った重みの hash "
+            f"({wanted['sha256'][:12]}…) と違います"
+        )
+
+    # 分類の最後の層の手前の出力の幅と, 群の中心の幅
+    centers = sources["centers"]
+    width = int(centers["centers"].shape[1])
+    embedder = ReadyEmbedding(built.eval())
+    found_width = check_head(embedder, int(ready["preprocess"]["crop"]))
+    if found_width != width:
+        raise ValueError(
+            f"既製のモデルの埋め込みの幅 {found_width} が, 群の中心の幅 "
+            f"{width} と違います"
+        )
+
+    # 隣の一時ディレクトリに作り, 確かめてから入れ替える (重みは空)
+    writing = final.with_name(f".{final.name}.writing")
+    if writing.exists():
+        shutil.rmtree(writing)
+    writing.mkdir(parents=True)
+    try:
+        dump_spec(spec, writing / "model_spec.yaml")
+        torch.save({}, writing / "final_model.pt")
+        shutil.copy(sources["centers_file"], writing / CENTERS_FILE)
+        info = {
+            "format_version": READY_GROUP_BUNDLE_VERSION,
+            "name": name or final.name,
+            "created_at": dt.datetime.now().astimezone().isoformat(),
+            "role": "group",
+            "output": {"form": "cluster"},
+            "target": None,
+            "procedure": None,
+            "model": {
+                "spec": "model_spec.yaml",
+                "weights": "final_model.pt",
+                "output": None,
+                "kind": "value",
+                "target_scale": None,
+                "pretrained": [record],
+            },
+            "inputs": {},
+            "dataset": None,
+            "run": None,
+            "conclusion": {},
+            "decision": None,
+            "check": None,
+            "uncertainty": None,
+            "notes": notes,
+            "ready": ready,
+            "group": {
+                "centers": CENTERS_FILE,
+                "k": centers["k"],
+                "columns": list(READY_COLUMNS),
+                "features": None,
+                "width": width,
+                "id": READY_ID,
+                "rows": len(sources["assignments"]),
+                "stability": sources["stability"],
+                "summary": sources["summary"],
+                "check": None,
+            },
+        }
+
+        # 写真を渡した場合は, 割り当て直しと骨組みの割り当ての比べ (読んだ
+        # 重みのモデルをそのまま使う)
+        if data is not None:
+            building = Bundle(path=writing, info=info, spec=spec,
+                              dataset=Dataset(path=writing, info={},
+                                              frames={}, recipe={}))
+            building.cache["model"] = embedder
+            building.cache["group_centers"] = centers["centers"]
+            checked, more = data_check(building, data, None, sources,
+                                       batch_size)
+            info["group"]["check"] = checked
+            info["notes"].extend(more)
+        (writing / "inference.yaml").write_text(
+            yaml.safe_dump(info, allow_unicode=True, sort_keys=False),
+            encoding="utf-8"
+        )
+        load_bundle(writing)
+    except Exception:
+        shutil.rmtree(writing, ignore_errors=True)
+        raise
+    if final.exists():
+        shutil.rmtree(final)
+    writing.rename(final)
+
+    return info
+
+
 def check_group_bundle(bundle: Bundle) -> None:
     """
     読んだ群分けの一式の定義と群の中心が group の欄と合うかを確かめる関数
@@ -1120,10 +1524,20 @@ def check_group_bundle(bundle: Bundle) -> None:
     ValueError
         定義, 列の符号化, 群の中心の大きさが group の欄と違う場合
     """
-    # 群の数, 列, 符号化した行の幅, 埋め込みの幅
+    # 群の数, 列, 符号化した行の幅, 埋め込みの幅 (既製の埋め込みは
+    # 埋め込みを作った既製のモデル)
     group = bundle.info["group"]
     found = read_centers(inside(bundle.path, group["centers"]))
+    if bundle.from_ready:
+        check_ready_centers(bundle, found)
+        bundle.cache["group_encoding"] = None
+        bundle.cache["group_centers"] = found["centers"]
+        return
     encoding = found["encoding"]
+    if encoding is None:
+        raise ValueError(
+            f"{group['centers']} に列の符号化 (encoding) がありません"
+        )
     names = [*encoding["numeric"], *encoding["categories"]]
     width = found["centers"].shape[1]
     if (found["k"], encoding_width(encoding), width) != (
@@ -1136,6 +1550,53 @@ def check_group_bundle(bundle: Bundle) -> None:
     check_group_spec(bundle.spec, group["features"])
     bundle.cache["group_encoding"] = encoding
     bundle.cache["group_centers"] = found["centers"]
+
+
+def check_ready_centers(bundle: Bundle, found: dict) -> None:
+    """
+    既製の埋め込みの群の中心が, 一式の group と ready と合うかを確かめる
+    関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        読んだ一式
+    found: dict
+        read_centers の結果
+
+    Returns
+    ----------
+    None
+
+    Raises
+    ----------
+    ValueError
+        群の中心が既製の埋め込みのものでない場合, 群の数と幅が group と
+        違う場合, 埋め込みを作った既製のモデルと重みが一式と違う場合
+    """
+    # 群の数と幅, 出どころとモデルの名前, 重みの hash
+    group = bundle.info["group"]
+    wanted = found["ready"]
+    if wanted is None:
+        raise ValueError(
+            f"{group['centers']} に埋め込みを作った既製のモデル (ready) が"
+            "ありません"
+        )
+    if (found["k"], found["centers"].shape[1]) != (group["k"],
+                                                     group["width"]):
+        raise ValueError(
+            f"{group['centers']} の群の数と埋め込みの幅が group の欄と"
+            "違います"
+        )
+    ready = bundle.info["ready"]
+    hashes = {r.get("sha256") for r in bundle.info["model"]["pretrained"]}
+    if (wanted["library"], wanted["model"]) != (
+        ready["library"], ready["model"]
+    ) or hashes != {wanted["sha256"]}:
+        raise ValueError(
+            f"{group['centers']} の群の中心を作った既製のモデルか重みの hash"
+            " が, 一式の ready と model.pretrained と違います"
+        )
 
 
 def frame_column(prediction: pd.DataFrame, name: str) -> pd.Series:
@@ -1204,7 +1665,9 @@ def group_summary(
 
     # 一時の名前の列で作る ML-EDA の群の要約 (数の列は数, 種類の列は
     # 文字. 欠けは欠けのまま)
-    numeric = bundle.cache["group_encoding"]["numeric"]
+    numeric = READY_COLUMNS if bundle.from_ready else (
+        bundle.cache["group_encoding"]["numeric"]
+    )
     temporary = {name: f"c{n}" for n, name in enumerate(group["columns"])}
     frame = pd.DataFrame(index=range(len(done)))
     for name, short in temporary.items():
@@ -1287,8 +1750,8 @@ def group_representatives(
     ----------
     groups: list[dict]
         群の番号の順の group と rows (row (予測の表の行の位置),
-        distance, values (群を作る列の元の値)) の辞書. 割り当てた行が
-        無ければ空
+        distance, values (群を作る列の元の値. 既製の埋め込みは写真の
+        場所 path も)) の辞書. 割り当てた行が無ければ空
 
     Raises
     ----------
@@ -1314,8 +1777,10 @@ def group_representatives(
             f"予測の表に {', '.join(missing)} の列がありません"
         )
     group = bundle.info["group"]
-    columns = {name: frame_column(prediction, name)
-               for name in group["columns"]}
+    names = [READY_ID, *group["columns"]] if bundle.from_ready else (
+        group["columns"]
+    )
+    columns = {name: frame_column(prediction, name) for name in names}
     positions = np.flatnonzero((prediction["status"] == OK).to_numpy())
     if positions.size == 0:
         return []
