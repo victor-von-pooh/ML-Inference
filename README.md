@@ -111,6 +111,8 @@ write_result(result, "results/reviews")   # predictions.csv と result.yaml
 | `bands` | 回帰, 予測 | `[{label: 少ない, upper: 100}, {label: 多い}]` のような値の帯 |
 | `group_by` | 全て | 列の値ごとに件数, 判断の内訳, 値の合計などをまとめる |
 
+書き出した結果は `read_result(path)` で読み直せる (表は `frame`). 数に見える文字 (`"001"`) や欠けのある整数の列は, そのまま読み直すと値が変わるので, `write_result` がその列の型を `result.yaml` の `column_types` に残し (結果の形の版 3), `read_result` は文字と欠損を持てる整数 (`Int64`) で読む. どの一式の種類の結果も同じ (DESIGN の「書き出し」).
+
 ### 構造のある出力, ベクトル, 繰り返しの手順 (一式の版 3)
 
 一式は受け持ち (`role`) と出力の形 (`form`: `class`, `value`, `distribution`, `mask`, `point_cloud`, `vector`, `text`, `image`, `table`) を持ち, 出力の形ごとに読み方を変える. 省くとタスクから決める (分類は `class`, 回帰と予測は `value`). 版 1 と 2 の一式もそのまま読める.
