@@ -1,12 +1,20 @@
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 import numpy as np
 import torch
+from torch import nn
 
-# 既製のモデルの一式の入力の項目の種類と, 出力の形
+# 既製のモデルの一式の入力の項目の種類と, 出力の形 (class は種類の予測,
+# vector は分類の最後の層の手前の出力の埋め込み)
 READY_INPUTS = ("image",)
-READY_FORMS = ("class",)
+READY_FORMS = ("class", "vector")
+
+# 埋め込みを確かめるときに渡す画像の数と乱数の種, 分類の最後の層を通した
+# 値と出力が合うとみなす差 (相対と, 出力の大きさに比べた絶対)
+HEAD_SAMPLES = 2
+HEAD_SEED = 0
+HEAD_TOLERANCE = 1e-4
 
 # ready の欄
 READY_KEYS = (
@@ -392,3 +400,195 @@ def weights_file(ready: dict) -> Path:
     ).name
 
     return path
+
+
+def last_linear(model: nn.Module) -> nn.Linear:
+    """
+    モデルの中の最後の全結合の層 (分類の最後の層) を返す関数
+
+    Parameters
+    ----------
+    model: nn.Module
+        組み立てたモデル
+
+    Returns
+    ----------
+    head: nn.Linear
+        登録の順で最後の全結合の層
+
+    Raises
+    ----------
+    ValueError
+        全結合の層が無い場合
+    """
+    # 登録の順で最後の全結合の層 (torchvision の画像の分類のモデルの分類
+    # の層)
+    heads = [m for m in model.modules() if isinstance(m, nn.Linear)]
+    if not heads:
+        raise ValueError(
+            "モデルに分類の最後の全結合の層が無いので, 埋め込みを取り出せ"
+            "ません"
+        )
+    head = heads[-1]
+
+    return head
+
+
+class ReadyEmbedding(nn.Module):
+    def __init__(self, model: nn.Module, width: Optional[int] = None):
+        # 親クラスのコンストラクタを呼び出す
+        super(ReadyEmbedding, self).__init__()
+
+        # 組み立てて重みを読んだモデルと, その最後の全結合の層を保存 (一式
+        # の幅を渡すと最後の層の入力の幅と比べる)
+        self.model = model
+        self.head = last_linear(model)
+        if width is not None and self.head.in_features != width:
+            raise ValueError(
+                f"分類の最後の層の入力の幅 {self.head.in_features} が, 一式の"
+                f"埋め込みの幅 {width} と違います"
+            )
+        self.found: list = []
+        self.handle = self.head.register_forward_hook(self.keep)
+
+    def release(self) -> None:
+        """
+        最後の層に付けた hook を外す関数
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        ----------
+        None
+        """
+        # 外した後は埋め込みを取り出せない
+        self.handle.remove()
+
+    def keep(self, module: nn.Module, inputs: tuple, output: Any) -> None:
+        """
+        最後の層の入力を残す関数
+
+        Parameters
+        ----------
+        module: nn.Module
+            最後の層
+        inputs: tuple
+            最後の層の入力
+        output: Any
+            最後の層の出力
+
+        Returns
+        ----------
+        None
+        """
+        # 最後の層の入力 (1 回の推論で 1 度だけ)
+        self.found.append(inputs[0])
+
+    def pair(self, *inputs: torch.Tensor) -> tuple:
+        """
+        埋め込みとモデルの出力の組を返す関数
+
+        Parameters
+        ----------
+        *inputs: torch.Tensor
+            モデルの入力
+
+        Returns
+        ----------
+        pair: tuple
+            (件数, 幅) の埋め込みと, モデルの出力
+
+        Raises
+        ----------
+        ValueError
+            最後の層を 1 度だけ通らない場合と, 埋め込みが 2 次元でない場合
+        """
+        # 最後の層を通った回数と形
+        self.found = []
+        output = self.model(*inputs)
+        found, self.found = self.found, []
+        if len(found) != 1:
+            raise ValueError(
+                f"分類の最後の層を {len(found)} 回通りました (1 回だけ通る"
+                "モデルの埋め込みだけを取り出せます)"
+            )
+        if found[0].ndim != 2:
+            raise ValueError(
+                f"分類の最後の層の入力の形 {tuple(found[0].shape)} が "
+                "(件数, 幅) ではありません"
+            )
+        pair = (found[0], output)
+
+        return pair
+
+    def forward(self, *inputs: torch.Tensor) -> torch.Tensor:
+        """
+        分類の最後の層の入力を埋め込みとして返す関数
+
+        Parameters
+        ----------
+        *inputs: torch.Tensor
+            モデルの入力 ((件数, 3, 高さ, 幅) の画像)
+
+        Returns
+        ----------
+        embedding: torch.Tensor
+            (件数, 幅) の埋め込み
+        """
+        # 埋め込みだけ (出力は不使用)
+        embedding, _ = self.pair(*inputs)
+
+        return embedding
+
+
+def check_head(embedder: ReadyEmbedding, crop: int) -> int:
+    """
+    最後の全結合の層が, 出力をそのまま作る分類の層かを確かめる関数
+
+    乱数の画像で, 最後の層に入力を通した値とモデルの出力が合うかを見る
+
+    Parameters
+    ----------
+    embedder: ReadyEmbedding
+        埋め込みを返すモデル
+    crop: int
+        前処理の後の画像の辺
+
+    Returns
+    ----------
+    width: int
+        埋め込みの幅
+
+    Raises
+    ----------
+    ValueError
+        出力が 1 つのテンソルでない場合と, 最後の層を通した値と出力が
+        合わない場合
+    """
+    # 決まった種の乱数の画像
+    generator = torch.Generator().manual_seed(HEAD_SEED)
+    images = torch.randn(HEAD_SAMPLES, 3, crop, crop, generator=generator)
+    with torch.no_grad():
+        embedding, output = embedder.pair(images)
+        if isinstance(output, dict) and len(output) == 1:
+            output = next(iter(output.values()))
+        if not isinstance(output, torch.Tensor):
+            raise ValueError(
+                "既製のモデルの出力が 1 つのテンソルではないので, 埋め込みを"
+                "確かめられません"
+            )
+        again = embedder.head(embedding)
+    scale = float(output.abs().max()) if output.numel() else 0.0
+    if again.shape != output.shape or not torch.allclose(
+        again, output, rtol=HEAD_TOLERANCE,
+        atol=HEAD_TOLERANCE * max(scale, 1.0)
+    ):
+        raise ValueError(
+            "最後の全結合の層の出力がモデルの出力と違います (分類の最後の層"
+            "の後にも処理があるモデルの埋め込みは取り出せません)"
+        )
+    width = int(embedding.shape[1])
+
+    return width

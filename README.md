@@ -10,7 +10,7 @@
 - **何段も先の予測と列の効き**: 予測した値を次の入力に使って先の行を埋める. どの列が予測を動かしているかを並べ替えで求める
 - **意思決定**: 予測から次の行動 (量, 選ぶ対象, 人が確かめる対象) と見込みの得と損を出し, 過去のデータでたどり直して, 素朴なやり方と今のやり方 (問題の設定と同じ決まりでも書ける) と比べる. 新しい実績で外れ方を測り直す
 - **方策の一式**: ML-Found が書き出す強化学習の方策を読み, 観測から行動と守り (行動の範囲, 止める条件, 外れたときの動き) の結果を返す. 実機では動かさない
-- **既製のモデルの一式**: 学習しない既製のモデル (torchvision の学習済みの画像の分類など) を, 重みの版と hash を固定し, 種類の名前の表と前処理を持たせて一式にする
+- **既製のモデルの一式**: 学習しない既製のモデル (torchvision の学習済みの画像の分類など) を, 重みの版と hash を固定し, 種類の名前の表と前処理を持たせて一式にする. 種類の予測の他に, 分類の最後の層の手前の出力を埋め込みとして返せる
 - **並べるの一式**: 利用者と品物の 2 塔のモデル (ML-Quest の並べるの骨組みの実験) から, 品物の埋め込みを索引に持つ一式を作り, 利用者ごとに上位 K 件の品物と点数を返す. 前に反応した品物を除くかを選べ, 後の反応から Recall@K と NDCG を数える
 - **群分けの一式**: 表の行の埋め込みと群の中心 (ML-Quest のまとめるの骨組みの実験) から, 列の符号化と群の安定性を持つ一式を作り, 新しい行を最も近い群に割り当てて, 群ごとの件数と特徴 (群の要約) と, 群の中心に近い行 (代表の行) を返す
 - **見本の一式**: 表か文のデータから小さなモデルをその場で学習し, 画面で操作を試すための一式を作る
@@ -180,13 +180,18 @@ write_result(result, "results/shape")   # 点群は artifacts/000000.npy など
 ライブラリの学習済みの重みを学習せずにそのまま使う一式も作れる. 今は torchvision の画像の分類 (ML-ModelControl の追加の依存 `torchvision` で入れる). 種類の名前の表と前処理 (大きさ, 切り出し, 正規化) は重みの説明から一式に書き, 重みは写さずに名前 (版) と hash で固定する. 重みは初回に取りに行くか, 利用者が PyTorch の置き場 (`torch.hub.get_dir()` の `checkpoints`) に置く. 置くファイルは信頼できるものだけにする (hash の照合の前に torchvision が読み込むため).
 
 ```python
-from ml_inference import describe_bundle, infer, make_ready_bundle
+from ml_inference import describe_bundle, infer, make_ready_bundle, predict
 
 make_ready_bundle("bundles/resnet18", "resnet18", "IMAGENET1K_V1")
 description = describe_bundle("bundles/resnet18")
 len(description["classes"])            # 1000 (tench, goldfish, ...)
 description["ready"]["license"]        # ライセンスの警告 (torchvision は unknown)
 result = infer("bundles/resnet18", "photos/")   # prediction は種類の名前
+
+# 分類の最後の層の手前の出力 (埋め込み) を返す一式. output に (512,) の配列
+make_ready_bundle("bundles/resnet18_embedding", "resnet18", "IMAGENET1K_V1",
+                  form="vector")
+frame = predict("bundles/resnet18_embedding", "photos/")
 ```
 
 ### 利用者ごとに品物を並べる (一式の版 8)

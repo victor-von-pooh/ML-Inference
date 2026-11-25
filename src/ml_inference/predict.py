@@ -1539,7 +1539,7 @@ def predict_ready(
     bundle: Bundle, source: Any, batch_size: int, device: str
 ) -> pd.DataFrame:
     """
-    既製のモデルの一式で, 画像ごとの種類の予測を返す関数
+    既製のモデルの一式で, 画像ごとの種類の予測か埋め込みを返す関数
 
     Parameters
     ----------
@@ -1555,8 +1555,8 @@ def predict_ready(
     Returns
     ----------
     result: pd.DataFrame
-        読み込みの表 (path など) と, status, reason, prediction,
-        confidence, p:<種類> の列
+        読み込みの表 (path など) と, status, reason と, 種類の予測は
+        prediction, confidence, p:<種類>, 埋め込みは output の列
 
     Raises
     ----------
@@ -1647,8 +1647,8 @@ def empty_output(bundle: Bundle) -> np.ndarray:
     outputs: np.ndarray
         0 件の出力
     """
-    # 分類はクラスの数, 分布は分位点の数, 表は符号化した行の幅の列. 配列
-    # の形は次元の数だけ
+    # 分類はクラスの数, 分布は分位点の数, 表は符号化した行の幅, 既製の
+    # モデルの埋め込みは幅の列. 配列の形は次元の数だけ
     form = bundle.form
     if form == "class":
         shape: tuple = (0, len(bundle.classes))
@@ -1658,6 +1658,8 @@ def empty_output(bundle: Bundle) -> np.ndarray:
         shape = (0, 1, 1)
     elif form == "table":
         shape = (0, table_width(bundle.output_info["columns"]))
+    elif bundle.embedding_width is not None:
+        shape = (0, bundle.embedding_width)
     else:
         shape = (0, 1)
     outputs = np.zeros(shape, dtype=np.float32)

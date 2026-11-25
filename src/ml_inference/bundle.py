@@ -22,7 +22,8 @@ from ml_inference.items import (
 )
 from ml_inference.procedures import PROCEDURES, get_procedure, option_names
 from ml_inference.ready import (
-    READY_FORMS, READY_LIBRARIES, check_ready, ready_license
+    READY_FORMS, READY_LIBRARIES, ReadyEmbedding, check_head, check_ready,
+    ready_license
 )
 from ml_inference.tables import (
     check_table_columns, read_table_columns, table_width
@@ -393,6 +394,28 @@ class Bundle:
         return output
 
     @property
+    def embedding_width(self) -> Optional[int]:
+        """
+        既製のモデルの埋め込みの幅を返す関数
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        ----------
+        width: Optional[int]
+            埋め込みの一式は output.shape の幅 (他は None)
+        """
+        # 1 件の形は (幅,)
+        shape = self.output_info.get("shape")
+        width = int(shape[0]) if self.form == "vector" and isinstance(
+            shape, list
+        ) and shape else None
+
+        return width
+
+    @property
     def form(self) -> str:
         """
         出力の形を返す関数
@@ -599,6 +622,9 @@ class Bundle:
         else:
             model.load_state_dict(state)
         model.eval()
+        if self.from_ready and self.form != "class":
+            # 既製のモデルの埋め込みは分類の最後の層の入力
+            model = ReadyEmbedding(model, self.embedding_width).eval()
         self.cache["model"] = model
 
         return model
@@ -899,14 +925,33 @@ def check_ready_info(info: dict) -> list[str]:
             "(データセットと正解を持たず, 学習しないため)"
         )
 
-    # 出力は種類の名前の表を持つ分類, 入力は画像, 重みは出どころから
+    # 出力は種類の名前の表を持つ分類か幅の決まった埋め込み, 入力は画像,
+    # 重みは出どころから
     output = info.get("output") if isinstance(info.get("output"), dict) else {}
     classes = output.get("classes")
+    shape = output.get("shape")
     if output.get("form") not in READY_FORMS:
         errors.append(
             f"既製のモデルの一式の出力の形は {', '.join(READY_FORMS)} だけ"
             "です"
         )
+    elif output["form"] == "vector":
+        if not (isinstance(shape, list) and len(shape) == 1 and isinstance(
+            shape[0], int
+        ) and not isinstance(shape[0], bool) and shape[0] >= 1):
+            errors.append(
+                "既製のモデルの埋め込みの一式の output.shape は [埋め込みの"
+                "幅] にしてください"
+            )
+        if classes is not None:
+            errors.append(
+                "既製のモデルの埋め込みの一式は output.classes を持てません"
+            )
+        if info.get("conclusion"):
+            errors.append(
+                "既製のモデルの埋め込みの一式は結論の決め方の既定値を持てま"
+                "せん"
+            )
     elif not isinstance(classes, list) or not classes or not all(
         isinstance(c, str) for c in classes
     ) or len(set(classes)) != len(classes):
@@ -2012,7 +2057,8 @@ def make_ready_bundle(
     path: Union[str, Path], model: str, weights: str,
     library: str = "torchvision", sha256: Optional[str] = None,
     name: Optional[str] = None, license: Optional[dict] = None,
-    conclusion: Optional[dict] = None, overwrite: bool = False
+    conclusion: Optional[dict] = None, overwrite: bool = False,
+    form: str = "class"
 ) -> dict:
     """
     学習しない既製のモデルの一式を, 重みの版と hash を固定して作る関数
@@ -2038,9 +2084,12 @@ def make_ready_bundle(
         重みのライセンスの情報 (ML-ModelControl の pretrained_info の
         形). 省略すると pretrained_info で読む
     conclusion: Optional[dict] = None
-        結論の決め方の既定値
+        結論の決め方の既定値 (種類の予測の一式だけ)
     overwrite: bool = False
         既にある一式を置き換えるか
+    form: str = "class"
+        出力の形 (class は種類の予測, vector は分類の最後の層の手前の
+        出力の埋め込み)
 
     Returns
     ----------
@@ -2053,8 +2102,8 @@ def make_ready_bundle(
         ディレクトリが既にあり, overwrite が False の場合と, 一式ではない
         ディレクトリを置き換えようとした場合
     ValueError
-        出どころ, モデル, 重みの名前が無い場合と, 重みを読めない場合,
-        hash が sha256 と違う場合
+        出どころ, モデル, 重みの名前, 出力の形が無い場合と, 重みを読めない
+        場合, hash が sha256 と違う場合, 埋め込みを取り出せない場合
     """
     # 置き換えられるのは, 前に作った一式だけ
     final = Path(path).expanduser().resolve()
@@ -2067,6 +2116,15 @@ def make_ready_bundle(
         raise ValueError(
             f"既製のモデルの出どころ {library} はありません (出どころ: "
             f"{', '.join(READY_LIBRARIES)})"
+        )
+    if form not in READY_FORMS:
+        raise ValueError(
+            f"既製のモデルの一式の出力の形 {form} はありません (形: "
+            f"{', '.join(READY_FORMS)})"
+        )
+    if form == "vector" and conclusion:
+        raise ValueError(
+            "既製のモデルの埋め込みの一式は結論の決め方を持てません"
         )
 
     # 重みの説明 (種類の名前の表と前処理) と, 1 つのノードの定義
@@ -2088,7 +2146,7 @@ def make_ready_bundle(
     check_units(spec)
 
     # 出どころの重みを読んで hash を求める (初回は取りに行く)
-    record, ready, notes = ready_record(
+    record, ready, notes, built = ready_record(
         spec, found, library, model, license
     )
     if sha256 is not None and sha256 != record["sha256"]:
@@ -2111,14 +2169,14 @@ def make_ready_bundle(
             "name": name or final.name,
             "created_at": dt.datetime.now().astimezone().isoformat(),
             "role": "predict",
-            "output": {"form": "class", "classes": list(found["classes"])},
+            "output": ready_output(form, found, built, crop),
             "target": None,
             "procedure": None,
             "model": {
                 "spec": "model_spec.yaml",
                 "weights": "final_model.pt",
                 "output": None,
-                "kind": "logits",
+                "kind": "logits" if form == "class" else "value",
                 "target_scale": None,
                 "pretrained": [record],
             },
@@ -2152,6 +2210,46 @@ def make_ready_bundle(
     return info
 
 
+def ready_output(form: str, found: dict, built: Any, crop: int) -> dict:
+    """
+    既製のモデルの一式の output を作る関数
+
+    Parameters
+    ----------
+    form: str
+        出力の形 (class か vector)
+    found: dict
+        出どころの重みの説明 (READY_LIBRARIES の関数の結果)
+    built: Any
+        出どころの重みを読んで組み立てたモデル
+    crop: int
+        前処理の後の画像の辺
+
+    Returns
+    ----------
+    output: dict
+        種類の予測は種類の名前の表, 埋め込みは 1 件の形 ([幅])
+
+    Raises
+    ----------
+    ValueError
+        埋め込みを取り出せない場合
+    """
+    # 埋め込みの幅は, 最後の層の入力を確かめた幅 (確かめた後に hook は
+    # 外す)
+    if form == "class":
+        output = {"form": "class", "classes": list(found["classes"])}
+        return output
+    embedder = ReadyEmbedding(built.eval())
+    try:
+        width = check_head(embedder, crop)
+    finally:
+        embedder.release()
+    output = {"form": "vector", "shape": [width]}
+
+    return output
+
+
 def ready_record(
     spec: dict, found: dict, library: str, model: str,
     license: Optional[dict]
@@ -2174,8 +2272,8 @@ def ready_record(
 
     Returns
     ----------
-    result: tuple[dict, dict, list[str]]
-        model.pretrained の記録, ready, 注意の文
+    result: tuple[dict, dict, list[str], Any]
+        model.pretrained の記録, ready, 注意の文, 組み立てたモデル
 
     Raises
     ----------
@@ -2185,7 +2283,8 @@ def ready_record(
     # 組み立てると部品が出どころの重みを読む (外部の重みのファイルは無い)
     version = str(found["params"].get("weights") or "")
     try:
-        state = build_model(spec, seed=0, load_weights=False).state_dict()
+        built = build_model(spec, seed=0, load_weights=False)
+        state = built.state_dict()
     except Exception as error:
         raise ValueError(
             f"{library} の {model} の重み {version} を読めません "
@@ -2238,7 +2337,7 @@ def ready_record(
     if info.get("gated"):
         notes.append("重みは申請制です. 使う人ごとに配布元で申請してください")
 
-    return record, ready, notes
+    return record, ready, notes, built
 
 
 def check_ready_sample(bundle: Bundle) -> None:
@@ -2258,16 +2357,20 @@ def check_ready_sample(bundle: Bundle) -> None:
     Raises
     ----------
     ValueError
-        推論できない場合と, 出力が種類の名前の表と合わない場合
+        推論できない場合と, 出力が種類の名前の表か埋め込みの幅と合わない
+        場合
     """
     # 予測の関数はこのモジュールを読むので, 使うときに読み込む
     from ml_inference.predict import shape_inputs
 
-    # 前処理の後の (3, crop, crop) の 0 の画像を数件
+    # 前処理の後の (3, crop, crop) の 0 の画像を数件 (埋め込みは読んだ
+    # 一式でも最後の層を確かめる)
     crop = int(bundle.info["ready"]["preprocess"]["crop"])
     images = np.zeros((NOISE_SAMPLE_ROWS, 3, crop, crop), dtype=np.float32)
     tensors = shape_inputs(bundle, {"items": images}, NOISE_SAMPLE_ROWS)
     sample_inference(bundle, tensors)
+    if bundle.form == "vector":
+        check_head(bundle.model(), crop)
 
 
 def bundle_version(

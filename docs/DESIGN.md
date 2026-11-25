@@ -269,7 +269,7 @@ dataset: null
 
 #### 既製のモデルの一式 (版 6. `ready`)
 
-学習せずにそのまま使う既製のモデル (ライブラリの学習済みの重み) の一式は, データセットと実験を持たず, モデルの出どころ (ライブラリ, モデルの名前, 重みの名前), 種類の名前の表, 前処理を一式に書く. 版 6 で書く. 今は画像の分類だけで, 出どころは torchvision だけ.
+学習せずにそのまま使う既製のモデル (ライブラリの学習済みの重み) の一式は, データセットと実験を持たず, モデルの出どころ (ライブラリ, モデルの名前, 重みの名前), 種類の名前の表, 前処理を一式に書く. 版 6 で書く. 今は画像の分類のモデルだけで, 出どころは torchvision だけ. 出力の形 (`READY_FORMS`) は, 種類の予測 (`class`) と, 分類の最後の層の手前の出力の埋め込み (`vector`) の 2 つ.
 
 ```yaml
 format_version: 6
@@ -305,15 +305,24 @@ ready:
   license: {license: null, status: unknown, redistributable: false, gated: false, alert: true, message: …, source: …, url: null}
 ```
 
-- **作り方**: `make_ready_bundle(path, "resnet18", "IMAGENET1K_V1", library="torchvision", sha256=None, name=None, license=None, conclusion=None, overwrite=False)`. 出どころの読み方 (`READY_LIBRARIES` の関数) が重みの説明から部品 (`unit`, `params`), 種類の名前の表, 前処理, 重みの URL とファイルの名前を読み, 1 つのノードの定義を作る. torchvision は `torchvision.models.get_model_weights(model)[weights]` の `meta["categories"]` と `transforms()` の大きさ, 切り出し, 補い方, 正規化を読む (画像の分類の重みでないか, 補い方が `bilinear` と `bicubic` でなければ作る前に誤り). torchvision は ML-ModelControl の追加の依存 (`ml-modelcontrol[torchvision]`) で入れる
+埋め込みの一式は, 出力と `model.kind` だけが違う (定義, 重み, `ready` は種類の予測と同じ).
+
+```yaml
+output: {form: vector, shape: [512]}   # 1 件の形 ([埋め込みの幅]. 分類の最後の層の入力の幅)
+model: {spec: model_spec.yaml, weights: final_model.pt, kind: value, pretrained: [...]}
+conclusion: {}
+```
+
+- **作り方**: `make_ready_bundle(path, "resnet18", "IMAGENET1K_V1", library="torchvision", sha256=None, name=None, license=None, conclusion=None, overwrite=False, form="class")`. `form` は `READY_FORMS` のどれか (`vector` で埋め込みの一式. 結論の決め方は渡せない). 出どころの読み方 (`READY_LIBRARIES` の関数) が重みの説明から部品 (`unit`, `params`), 種類の名前の表, 前処理, 重みの URL とファイルの名前を読み, 1 つのノードの定義を作る. torchvision は `torchvision.models.get_model_weights(model)[weights]` の `meta["categories"]` と `transforms()` の大きさ, 切り出し, 補い方, 正規化を読む (画像の分類の重みでないか, 補い方が `bilinear` と `bicubic` でなければ作る前に誤り). torchvision は ML-ModelControl の追加の依存 (`ml-modelcontrol[torchvision]`) で入れる
 - **重みの版と hash**: 版は重みの名前 (torchvision は名前ごとに重みのファイルが決まり, 取りに行くときにファイルの名前の hash の頭で確かめる). 作るときに定義を組み立てて出どころの重みを読み, ノードの重みの hash (`sha256`. 「学習済みの重みの置き方」と同じ求め方) を記録する. `sha256` を渡すと (問題の設定や前に作った一式で決めておいた値), 読んだ重みと違えば作らない
 - **重みを写さない**: 既製のモデルの一式は, ライセンスに依らず重みを一式に写さず (`place: source`. `final_model.pt` は空), 使うときに出どころから読む. 重みは小さくなく, 版と hash で固定できるため. 読むときに hash が記録と違えば, 警告でなく誤りにする (学習した重みが無く, 違う重みで推論しても気付けないため)
 - **重みの置き場**: 出どころの重みは, 初回に組み立てたときに部品が取りに行き, PyTorch の置き場 (`torch.hub.get_dir()` の `checkpoints`) に置いて次から読む. ネットワークを使えない場所では, 利用者が `ready.file` の名前のファイルをその場所に置く. 置くファイルは信頼できるものだけにする (sha256 の照合の前に torchvision がファイルを読み込むため). `ready.file` は区切りと `..` を含まないファイルの名前だけで, 置き場は名前の部分だけから作る. `ready.url` は文字. `ready.library` は `READY_LIBRARIES` にあり, `ready.model` と `ready.weights` は定義の `model` のノードの `params` の `name` と `weights` と同じ (違えば読むときに誤り). CI とテストは作り物の出どころ (`READY_LIBRARIES` に足した関数と登録した部品) を使い, ネットワークを使わない
 - **ライセンス**: 重みのライセンスの情報は `license` で `pretrained_info` の形の辞書を渡せる (画面が既に読んだ情報. テスト). 省くと ML-ModelControl の `pretrained_info` で読む (torchvision は機械で読める情報が無いので `unknown`). `ready.license` に `license`, `status`, `redistributable`, `gated`, `alert`, `message`, `source`, `url` を写す. 読めなかった情報 (`pretrained_info` が誤りになった, 無い, 結果が無い) と, 渡した情報で `alert` や `message` が無いものも, `alert` を必ず真偽値にする. `status` が `commercial`, `noncommercial`, `unknown` のどれでもなければ `unknown`, `alert` が真偽値でなければ `commercial` 以外で真, 警告で `message` が空なら「ライセンス: <ライセンスか不明> (<分類>). 配布元のページで条件を確かめる」にする (分類の言い方は ML-ModelControl の `pretrained_info` と同じ). 読めなかった訳は `source` に残る. 画面は `alert` が真なら `message` と `source` を並べて警告する. `notes` には, 出どころから読むことと hash の頭, 商用 (`commercial`) でないライセンスなら確かめる注意, 申請制 (`gated`) なら使う人ごとに申請する注意を残す
 - **前処理** (`ml_inference.ready.prepare_ready`): 画像を ML-EDA の画像の読み込みで読み, RGB にし (灰色は 3 つに重ね, 透明度は除く), 短い辺を `resize` にそろえ (長い辺は比で切り捨て. Pillow で `interpolation` の補い方), 真ん中の `crop` の正方形を切り出し (上と左は `round((大きさ - crop) / 2)`), 255 で割って (値 - `mean`) / `std` にした (3, `crop`, `crop`) の float32. torchvision の画像の分類の前処理に Pillow の画像を渡したときと同じ値になる
-- **確かめ**: 作るときに, 前処理の後の大きさの 0 の画像で推論し, 出力の幅が種類の名前の数と合うかを確かめる (合わなければ作らない). 比べる正解が無いので `check`, `uncertainty`, `target` は null
-- **推論**: `predict(bundle, 画像のファイルかディレクトリ)` (`infer` も同じ). 表は読み込みの表 (`path` など) と, 分類の列 (`prediction` は種類の名前, `confidence`, `p:<種類>`). 読めない画像は理由を付けて飛ばす. 読み込みの設定 (`options`), 表, ML-EDA の `Data` は誤り. 結論の決め方 (確信の下限など) は使える. 意思決定, たどり直し, 外れ方の測り直し, 列の効き, 何段も先の予測は, データセットと外れ方の記録を持たないので誤り
-- **説明**: `describe_bundle` の `kind` は `ready`, `task` は `classification`, `classes` は種類の名前の表. `ready` は `ready` の欄に, 重みのファイルを置く場所 (`weights_file`) とそこにあるか (`weights_cached`. 無ければ初回に取りに行く) を足したもの
+- **埋め込み** (`ml_inference.ready.ReadyEmbedding`): 定義は種類の予測と同じ 1 つのノードのままにし, 組み立てて重みを読んだモデルの中で登録の順が最後の全結合の層 (`torch.nn.Linear`. torchvision の画像の分類のモデルの分類の層. ResNet の `fc`, ViT の `heads.head`, EfficientNet の `classifier` の最後など) の入力を, 1 回の推論ごとに受け取って埋め込みにする (モデルの出力は使わない). 定義の部品はライブラリのモデル 1 つで, 中の層をノードとして指せないため. 全結合の層が無いモデル (SqueezeNet など), 1 回の推論で最後の層を 1 度だけ通らない, 入力が (件数, 幅) でない, は誤り. 作るときに, 決まった種の乱数の画像 2 枚で, 埋め込みを最後の層に通した値がモデルの出力と合う (相対と絶対の差 1e-4 まで. 絶対の差は出力の大きさに比べる) ことを確かめ, 合わなければ (最後の層の後にも処理がある) 作らない. 幅は `output.shape` に書き, 読んで組み立てるときに最後の層の入力の幅と違えば誤り
+- **確かめ**: 作るときに, 前処理の後の大きさの 0 の画像で推論し, 出力の幅が種類の名前の数と合うか (埋め込みは (件数, 幅) の形と上の最後の層) を確かめる (合わなければ作らない). 比べる正解が無いので `check`, `uncertainty`, `target` は null
+- **推論**: `predict(bundle, 画像のファイルかディレクトリ)` (`infer` も同じ). 表は読み込みの表 (`path` など) と, 分類の列 (`prediction` は種類の名前, `confidence`, `p:<種類>`. 埋め込みは `output` に 1 件の (幅,) の float32. 書き出しは `artifacts/`). 読めない画像は理由を付けて飛ばす. 読み込みの設定 (`options`), 表, ML-EDA の `Data` は誤り. 結論の決め方 (確信の下限など) は種類の予測だけで使える (埋め込みの結論は件数だけ). 意思決定, たどり直し, 外れ方の測り直し, 列の効き, 何段も先の予測は, データセットと外れ方の記録を持たないので誤り
+- **説明**: `describe_bundle` の `kind` は `ready`, `task` は `classification` (埋め込みは空), `classes` は種類の名前の表 (埋め込みは空). `ready` は `ready` の欄に, 重みのファイルを置く場所 (`weights_file`) とそこにあるか (`weights_cached`. 無ければ初回に取りに行く) を足したもの
 - **画面と骨組みが使う値**: 画面 (ML-Provide の登録の画面) は, 作る前に `READY_LIBRARIES[library](model, weights)` で種類の名前の表と前処理と重みのファイルの名前を読める (重みは取りに行かない). 作るときは `make_ready_bundle` に出どころ, モデルの名前, 重みの名前 (と読んだライセンスの情報) を渡し, 作った後は説明の `classes`, `ready` (`license` の `alert` と `message`, `weights_cached`), `pretrained` (`sha256`, `place`), `notes` を出す. 問題の設定の作り方「既製のモデルをそのまま」の骨組み (ML-Quest) は, 学習の代わりに `library`, `model`, `weights` と, 決めておくなら `sha256` を一式づくりに渡す値として残す. 種類の名前の表は重みの説明から読むので渡さない
 
 #### 並べるの一式 (版 8. `rank`)
