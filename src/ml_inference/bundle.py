@@ -486,8 +486,8 @@ class Bundle:
             class, value, distribution なら True (異常の度合いの一式は
             False)
         """
-        # 1 行に 1 つのクラスか値 (異常の度合いは確率でも目的の列の値でも
-        # ない)
+        # 1 行に 1 つのクラスか値 (確率でも目的の列の値でもない異常の度合い
+        # は除外)
         column = self.form in COLUMN_FORMS and not self.from_anomaly
 
         return column
@@ -602,7 +602,7 @@ class Bundle:
             列の出力でない一式の場合
         """
         # 結論と意思決定は 1 行に 1 つのクラスか値が前提. 既製のモデルの
-        # 一式は測るデータを持たない. 異常の度合いは確率でない
+        # 一式は測るデータ無し. 異常の度合いは確率でないので誤り
         if self.from_anomaly:
             raise ValueError(
                 f"異常の度合いの一式には {what} を使えません (使えるのは度合い"
@@ -840,12 +840,12 @@ def check_info(info: Any) -> list[str]:
     if not isinstance(version, int) or isinstance(version, bool):
         errors.append("format_version が整数ではありません")
     model = info.get("model")
+    # (距離に基づく度合いの一式はモデル無しの空の欄)
     distance = version == ANOMALY_BUNDLE_VERSION and isinstance(
         info.get("anomaly"), dict
     ) and info["anomaly"].get("score") == "distance"
     if model is None and distance:
-        # 距離に基づく度合いの一式はモデル無し
-        pass
+        model = {}
     elif not isinstance(model, dict) or not model.get("spec") or (
         not model.get("weights")
     ):
@@ -952,7 +952,7 @@ def check_info(info: Any) -> list[str]:
             f"anomaly を持つ一式は版 {ANOMALY_BUNDLE_VERSION} にしてください"
         )
     if version == ANOMALY_BUNDLE_VERSION:
-        # 異常の度合いの一式の決まりは異常のモジュールが持つ
+        # 異常の度合いの一式の決まりは異常のモジュールの受け持ち
         from ml_inference.anomaly import check_anomaly_info
 
         errors.extend(check_anomaly_info(info))

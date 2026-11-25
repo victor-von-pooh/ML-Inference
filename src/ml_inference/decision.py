@@ -247,7 +247,7 @@ def check_decision(
         誤りの一覧 (無ければ空)
     """
     # 型と知らない項目 (異常の度合いの一式は度合いの上位から回す振り分け
-    # だけ)
+    # の確かめ)
     if not isinstance(decision, dict):
         return ["意思決定の決め方は辞書にしてください"]
     if bundle.from_anomaly:
@@ -1398,7 +1398,8 @@ def decide(
     ValueError
         決め方に誤りがある場合と, 外れ方を残していない一式の場合
     """
-    # 決め方の確認 (異常の度合いの一式は度合いの上位から件数の上限まで)
+    # 決め方の確認 (異常の度合いの一式は度合いの上位から件数の上限までの
+    # 振り分け)
     if not isinstance(bundle, Bundle):
         bundle = load_bundle(bundle)
     if bundle.from_anomaly:

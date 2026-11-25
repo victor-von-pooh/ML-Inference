@@ -1,0 +1,6 @@
+task: anomaly
+target: is_anomaly
+id: reading_id
+steps: []
+format_version: 1
+item_steps: []

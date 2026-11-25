@@ -1,6 +1,9 @@
+import contextlib
 import csv
 import datetime as dt
+import os
 from pathlib import Path
+import threading
 from typing import Any, Union
 
 import numpy as np
@@ -92,8 +95,7 @@ def review_time(reviewed_at: Any) -> str:
 
 def row_key(result: Path, row: Any) -> str:
     """
-    異常の度合いの結果の予測の表に, 確かめた行があるかを確かめて行の id
-    の文字を返す関数
+    確かめた行が結果にあるかを確かめ, 行の id の文字を返す関数
 
     Parameters
     ----------
@@ -128,7 +130,7 @@ def row_key(result: Path, row: Any) -> str:
             "score がありません)"
         )
 
-    # id の列の値は文字で比べ, 列の無い結果は行の位置
+    # 文字で比べる id の列の値 (列の無い結果は行の位置)
     frame = read_result(result)["frame"]
     column = summary["id"]
     if column is None:
@@ -148,6 +150,35 @@ def row_key(result: Path, row: Any) -> str:
         raise ValueError(f"予測の表に行の id {key} の行がありません")
 
     return key
+
+
+def create_reviews(path: Path) -> None:
+    """
+    見出しの行だけの人の確認の記録を, 無ければ排他で作る関数
+
+    Parameters
+    ----------
+    path: Path
+        reviews.csv
+
+    Returns
+    ----------
+    None
+    """
+    # 見出しを書き終えた一時のファイルの, 排他の置き (os.link は置く先が
+    # あれば FileExistsError. 中身ごと一度に置くので, 同時に追記する側が
+    # 見出しの無いファイルを見ることも無し)
+    if path.is_file():
+        return
+    writing = path.with_name(f".{path.name}.{os.getpid()}."
+                             f"{threading.get_ident()}.writing")
+    with open(writing, "w", encoding="utf-8-sig", newline="") as file:
+        csv.writer(file).writerow(REVIEW_COLUMNS)
+    try:
+        with contextlib.suppress(FileExistsError):
+            os.link(writing, path)
+    finally:
+        writing.unlink()
 
 
 def record_review(
@@ -197,19 +228,15 @@ def record_review(
     when = review_time(reviewed_at)
     key = row_key(root, row)
 
-    # 無ければ見出しの行から作り, あれば後ろに 1 行
+    # 見出しの行だけのファイルを隣に書いて排他で置き (同時に最初の 1 件を
+    # 書いても見出しは 1 行), 記録は後ろへの 1 行の追記
     path = root / REVIEWS_FILE
-    exists = path.is_file()
-    if exists:
-        check_header(path)
     record = {"id": key, "judgment": judgment,
               "reviewer": reviewer.strip(), "reviewed_at": when}
-    with open(path, "a", encoding="utf-8" if exists else "utf-8-sig",
-              newline="") as file:
-        writer = csv.writer(file)
-        if not exists:
-            writer.writerow(REVIEW_COLUMNS)
-        writer.writerow([record[name] for name in REVIEW_COLUMNS])
+    create_reviews(path)
+    check_header(path)
+    with open(path, "a", encoding="utf-8", newline="") as file:
+        csv.writer(file).writerow([record[name] for name in REVIEW_COLUMNS])
 
     return record
 
@@ -234,7 +261,7 @@ def read_reviews(result: Union[str, Path]) -> pd.DataFrame:
     ValueError
         記録の列が違う場合
     """
-    # 全ての列を文字で (行の id の先頭の 0 などを残す)
+    # 全ての列を文字で読み込み (行の id の先頭の 0 などを残すため)
     path = Path(result).expanduser() / REVIEWS_FILE
     if not path.is_file():
         reviews = pd.DataFrame({name: pd.Series(dtype=object)

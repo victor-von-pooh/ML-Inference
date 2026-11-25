@@ -9,6 +9,7 @@ from ml_eda import (
     Data, ItemSplit, load_data, load_items, transform_entry
 )
 
+from ml_inference.anomaly import anomaly_of_bundle, predict_anomaly
 from ml_inference.bundle import Bundle, load_bundle
 from ml_inference.calibrate import apply_calibration
 from ml_inference.items import (
@@ -17,7 +18,6 @@ from ml_inference.items import (
 from ml_inference.procedures import (
     get_procedure, make_generator, run_procedure, start_noise
 )
-from ml_inference.anomaly import anomaly_of_bundle, predict_anomaly
 from ml_inference.grouping import group_of_bundle, predict_group
 from ml_inference.ranking import predict_rank, rank_of_bundle
 from ml_inference.ready import read_images, weights_file
@@ -1803,8 +1803,8 @@ def describe_bundle(bundle: Union[str, Path, Bundle]) -> dict:
         bundle = load_bundle(bundle)
     info = bundle.info
     model = info.get("model") or {}
-    # (異常の度合いの一式は前処理だけのデータセット. 目的の列は異常の
-    # 正解で, 推論では使わない)
+    # (異常の度合いの一式は前処理だけのデータセット. 目的の列は推論で
+    # 使わない異常の正解なので除外)
     prepared = bundle.cache["anomaly_dataset"] if bundle.from_anomaly else (
         bundle.dataset
     )

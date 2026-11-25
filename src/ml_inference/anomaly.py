@@ -98,7 +98,7 @@ def is_whole(value: Any, lowest: int) -> bool:
     result: bool
         下限以上の整数なら True
     """
-    # bool は int の子なので除く
+    # bool は int の子なので除外
     result = isinstance(value, (int, np.integer)) and not isinstance(
         value, (bool, np.bool_)
     ) and int(value) >= lowest
@@ -162,7 +162,7 @@ def check_scorer(scorer: Any) -> list[str]:
     if errors:
         return errors
     score = scorer["score"]
-    if score not in SCORE_NAMES:
+    if not isinstance(score, str) or score not in SCORE_NAMES:
         errors.append(f"score は {', '.join(SCORE_NAMES)} のどちらかにして"
                       "ください")
 
@@ -234,7 +234,7 @@ def refuse_constant(value: str) -> None:
     ValueError
         いつも
     """
-    # json.loads の parse_constant に渡す
+    # json.loads の parse_constant に渡す関数
     raise ValueError(f"{value} は数にできません")
 
 
@@ -367,7 +367,7 @@ def read_evaluations(root: Path) -> dict:
         分割の名前から rows, anomalies, k, precision_at_k,
         average_precision (評価の無い分割は無い)
     """
-    # ML-Found の evaluations の形の最初の行 (形の違う評価は写さない)
+    # ML-Found の evaluations の形の最初の行 (形の違う評価は写さずに除外)
     evaluations = {}
     for split in EVALUATION_SPLITS:
         path = root / EVALUATION_FILE.format(split=split)
@@ -417,7 +417,7 @@ def run_sources(run: Union[str, Path]) -> dict:
     recipe = read_recipe(recipe_file)
     scores = read_scores(inside(root, scorer["scores"]), scorer["id"])
 
-    # 自己符号化器の重みと定義 (仮のモデルで学習した実験には定義が無い)
+    # 自己符号化器の重みと定義 (仮のモデルで学習した実験は定義無し)
     weights = spec = None
     if scorer["score"] == "autoencoder":
         weights = root / "final_model.pt"
@@ -475,7 +475,7 @@ def check_anomaly_info(info: dict) -> list[str]:
     # 決め方とモデルの有無, ファイルの名前, 件数
     score = anomaly["score"]
     model = info.get("model")
-    if score not in SCORE_NAMES:
+    if not isinstance(score, str) or score not in SCORE_NAMES:
         errors.append(f"anomaly.score は {', '.join(SCORE_NAMES)} の"
                       "どちらかにしてください")
     elif score == "autoencoder" and not isinstance(model, dict):
@@ -531,8 +531,7 @@ def check_anomaly_spec(spec: dict, names: dict) -> None:
 
 def anomaly_dataset(root: Path, recipe: dict, features: list) -> Dataset:
     """
-    レシピの写しと度合いに使う列から, 前処理だけの ML-EDA のデータセット
-    を作る関数
+    前処理だけの ML-EDA のデータセットを作る関数
 
     Parameters
     ----------
@@ -613,7 +612,7 @@ def autoencoder_parts(
     ValueError
         再構成の形が入力と違う場合
     """
-    # 二乗誤差は float32 で求めてから float64 に (骨組みと同じ)
+    # float32 で求めた二乗誤差の float64 への変換 (骨組みと同じ)
     chunks = []
     model = model.to(device)
     try:
@@ -698,8 +697,7 @@ def row_features(
     bundle: Bundle, frame: pd.DataFrame
 ) -> tuple[np.ndarray, list[str]]:
     """
-    表にレシピの前処理をかけ, 度合いに使う列の配列と行ごとの理由を返す
-    関数
+    表に前処理をかけ, 度合いに使う列と行ごとの理由を返す関数
 
     Parameters
     ----------
@@ -727,7 +725,7 @@ def row_features(
             f"前処理の手順 {op} で除く行です (学習でも使わない行)"
         )
 
-    # 数にできない値も欠損として, 欠けた列を理由に
+    # 数にできない値も欠損とした, 欠けた列の理由
     numbers = transformed.apply(lambda c: pd.to_numeric(c, errors="coerce"))
     values = numbers.to_numpy(dtype=np.float64, na_value=np.nan)
     with np.errstate(over="ignore"):
@@ -838,7 +836,7 @@ def id_column(bundle: Bundle, prediction: pd.DataFrame) -> Optional[str]:
         行の id の列 (予測の列と同じ名前なら「(入力)」付き. 無ければ
         None)
     """
-    # 予測の列と同じ名前の元の列は「(入力)」付き
+    # 予測の列と同じ名前の元の列の「(入力)」付きの名前
     key = bundle.info["anomaly"]["id"]
     if key in ANOMALY_FRAME_COLUMNS:
         key = f"{key} (入力)"
@@ -878,7 +876,8 @@ def score_check(
     if key is None:
         note = (f"元の表に行の id の列 {bundle.info['anomaly']['id']} が"
                 "無いので, 一式の度合いを実験の度合いと比べません")
-        return None, [note]
+        found = (None, [note])
+        return found
     expected = sources["scores"]
     known = expected.drop_duplicates(expected.columns[0]).set_index(
         expected.columns[0]
@@ -889,7 +888,8 @@ def score_check(
     if not matched.any():
         note = ("元の表の行の id が実験の行ごとの度合いの表に無いので, 一式"
                 "の度合いを実験の度合いと比べません")
-        return None, [note]
+        found = (None, [note])
+        return found
 
     # 差の許し (絶対と相対) の中の割合と, 差の最大
     found_scores = ok["score"].to_numpy(dtype=np.float64)[matched]
@@ -939,7 +939,7 @@ def probe_autoencoder(bundle: Bundle, width: int, batch_size: int) -> None:
     ValueError
         再構成が (件数, 列の数) の数の配列でない場合
     """
-    # 再構成の形の確かめは autoencoder_parts
+    # 再構成の形の確かめ (autoencoder_parts の中)
     parts = autoencoder_parts(
         bundle.model(), np.zeros((PROBE_ROWS, width), dtype=np.float32),
         bundle.cache["anomaly_scorer"]["model"], batch_size, "cpu"
@@ -1036,7 +1036,7 @@ def make_anomaly_bundle(
     ValueError
         定義, 重み, 成果物が約束に合わない場合
     """
-    # 置き換えられるのは, 前に作った一式だけ
+    # 前に作った一式だけの置き換え
     final = Path(path).expanduser().resolve()
     if final.exists():
         if not overwrite:
@@ -1142,8 +1142,7 @@ def make_anomaly_bundle(
 
 def check_anomaly_bundle(bundle: Bundle) -> None:
     """
-    読んだ異常の度合いの一式の成果物を確かめ, 度合いに要るものを cache に
-    置く関数
+    異常の度合いの一式の成果物を確かめて cache に置く関数
 
     Parameters
     ----------
@@ -1161,7 +1160,7 @@ def check_anomaly_bundle(bundle: Bundle) -> None:
     ValueError
         成果物の形が違う場合と, 成果物と一式の欄が食い違う場合
     """
-    # 度合いの決め方とレシピの写し (一式の外を指せない)
+    # 度合いの決め方とレシピの写し (一式の外は誤り)
     anomaly = bundle.info["anomaly"]
     scorer = read_scorer(inside(bundle.path, anomaly["scorer"]))
     recipe = read_recipe(inside(bundle.path, anomaly["recipe"]))
@@ -1226,7 +1225,7 @@ def value_of(value: Any) -> Any:
     result: Any
         欠けは None, 真偽値と数はそのまま, 他は文字
     """
-    # numpy の値は Python の値に
+    # numpy の値の Python の値への変換
     value = plain(value)
     if value is None or (isinstance(value, float) and math.isnan(value)):
         return None
@@ -1290,7 +1289,7 @@ def evaluation_sentences(evaluations: dict) -> list[str]:
         分割ごとの上位 K 件の適合率と PR-AUC の文 (無ければ, 人が見て
         確かめる文)
     """
-    # 正解の無い実験は, 分布と上位の行を人が見る文
+    # 正解の無い実験の, 分布と上位の行を人が見る文
     if not evaluations:
         sentences = ["異常の正解の無い実験なので, 度合いの分布と上位の行を"
                      "人が見て確かめる"]
@@ -1378,7 +1377,7 @@ def check_anomaly_decision(decision: dict) -> list[str]:
     errors: list[str]
         誤りの一覧 (無ければ空)
     """
-    # 型は振り分けだけ, 項目は type と capacity だけ
+    # 振り分けの型と書ける項目 (type, capacity)
     if decision.get("type") != "triage":
         return ["異常の度合いの一式の意思決定は振り分け (type: triage) "
                 "だけです"]
@@ -1430,7 +1429,7 @@ def decide_anomaly(
     if errors:
         raise ValueError("意思決定の決め方の誤り: " + " / ".join(errors))
 
-    # 予測した行の度合いの高い順 (同じ度合いは前の行が先) に上限まで
+    # 予測した行の度合いの高い順 (同じ度合いは前の行が先) の上限までの選び方
     capacity = int(decision["capacity"])
     ok = (prediction["status"] == OK).to_numpy()
     scores = prediction["score"].to_numpy(dtype=np.float64)

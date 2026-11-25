@@ -1,6 +1,8 @@
 import datetime as dt
 import json
 from pathlib import Path
+import shutil
+import threading
 
 import numpy as np
 import pandas as pd
@@ -11,6 +13,7 @@ from ml_eda import export_dataset, load_data, load_dataset
 from ml_modelcontrol import build_model, load_example
 
 import ml_inference.bundle as bundle_module
+from ml_inference.anomaly import read_scorer
 from ml_inference import (
     backtest, check_decision, decide, describe_bundle, infer, load_bundle,
     make_anomaly_bundle, predict, read_result, read_reviews, record_review,
@@ -24,6 +27,9 @@ CAPACITY = 3
 
 # 度合いに使う列
 FEATURES = ["temp", "vibration", "current"]
+
+# ML-Quest の異常の検知の骨組みの write_results が書いた成果物
+SKELETON_OUTPUT = Path(__file__).parent / "anomaly_skeleton"
 
 
 def sensor_rows() -> pd.DataFrame:
@@ -40,7 +46,7 @@ def sensor_rows() -> pd.DataFrame:
         reading_id, temp, vibration, current, is_anomaly の表 (異常の行
         にだけ印)
     """
-    # 正常の行は 3 つの列が連れ立って動き, 異常の行は振動だけ外れる
+    # 3 つの列が連れ立って動く正常の行と, 振動だけ外れた異常の行
     rng = np.random.default_rng(0)
     rows = []
     for number in range(NORMAL + ANOMALIES):
@@ -244,8 +250,7 @@ def raw(tmp_path: Path) -> Path:
 @pytest.mark.parametrize("score", ["autoencoder", "distance"])
 def test_anomaly_bundle(tmp_path: Path, raw: Path, score: str) -> None:
     """
-    実験の成果物から異常の度合いの一式を作り, 度合いが実験と同じになり,
-    上位から上限まで人の確認に回すことを確かめる関数
+    異常の度合いの一式の度合いと振り分けを確かめる関数
 
     Parameters
     ----------
@@ -289,7 +294,7 @@ def test_anomaly_bundle(tmp_path: Path, raw: Path, score: str) -> None:
     assert found["anomaly"]["capacity"] == CAPACITY
     assert found["group"] is None and not found["column_output"]
 
-    # 新しい行の度合い (前処理で欠けた行は飛ばす)
+    # 新しい行の度合い (前処理で欠けた行は飛ばした行)
     rows = sensor_rows().drop(columns=["is_anomaly"])
     rows.loc[1, "temp"] = None
     frame = predict(bundle, rows)
@@ -329,14 +334,14 @@ def test_anomaly_bundle(tmp_path: Path, raw: Path, score: str) -> None:
     assert "度合いの高い順に 3 件を人の確認に回す" in decided["sentences"][0]
     assert any("確率ではない" in note for note in decided["notes"])
 
-    # 上限より行が少なければ全ての行, 空の辞書で振り分けない
+    # 上限より少ない行は全ての行, 空の辞書は振り分け無し
     few = infer(bundle, rows.head(2), decision={"type": "triage",
                                                 "capacity": 10})
     assert few["decision"]["summary"]["acted"] == 1
     plain = infer(bundle, rows, decision={})
     assert "decision" not in plain and "action" not in plain["frame"]
 
-    # 書き出して読み直す
+    # 書き出しと読み直し
     write_result(result, tmp_path / "result")
     back = read_result(tmp_path / "result")
     assert back["summary"]["id"] == "reading_id"
@@ -347,8 +352,7 @@ def test_anomaly_bundle(tmp_path: Path, raw: Path, score: str) -> None:
 
 def test_anomaly_decision(tmp_path: Path, raw: Path) -> None:
     """
-    異常の度合いの一式の振り分けの決め方の誤りと, 使えない機能を確かめる
-    関数
+    振り分けの決め方の誤りと使えない機能を確かめる関数
 
     Parameters
     ----------
@@ -401,7 +405,7 @@ def test_anomaly_reviews(tmp_path: Path, raw: Path) -> None:
     ----------
     None
     """
-    # 結果を書き, 2 件の記録を足す
+    # 結果の書き出しと, 2 件の記録の追記
     run = write_anomaly_run(tmp_path / "work", raw, "distance")
     make_anomaly_bundle(tmp_path / "bundle", run)
     result = infer(tmp_path / "bundle", raw)
@@ -418,7 +422,7 @@ def test_anomaly_reviews(tmp_path: Path, raw: Path) -> None:
         second["reviewed_at"]
     ).utcoffset() is not None
 
-    # 書いた順に文字で読み直し, 同じ場所に書き直しても残る
+    # 書いた順の文字の読み直しと, 同じ場所に書き直した後の記録
     reviews = read_reviews(place)
     assert list(reviews.columns) == ["id", "judgment", "reviewer",
                                      "reviewed_at"]
@@ -468,8 +472,7 @@ def test_anomaly_sources(
     tmp_path: Path, raw: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """
-    一式にできない実験と成果物, 古い読む側, 比べられない元の表を確かめる
-    関数
+    一式にできない実験と成果物, 古い読む側を確かめる関数
 
     Parameters
     ----------
@@ -484,7 +487,7 @@ def test_anomaly_sources(
     ----------
     None
     """
-    # 仮のモデルで学習した実験 (定義が無い)
+    # 仮のモデルで学習した実験 (定義無し)
     placeholder = write_anomaly_run(tmp_path / "a", raw, "autoencoder",
                                     spec=False)
     with pytest.raises(ValueError, match="PlaceholderModel"):
@@ -508,13 +511,13 @@ def test_anomaly_sources(
                                              encoding="utf-8")
     assert not (tmp_path / "x").exists()
 
-    # 行の id の列の無い元の表は比べない
+    # 行の id の列の無い元の表の比べ無し
     rows = pd.read_csv(raw).drop(columns=["reading_id"])
     info = make_anomaly_bundle(tmp_path / "bundle", run, data=rows)
     assert info["anomaly"]["check"] is None
     assert any("比べません" in note for note in info["notes"])
 
-    # 一部の行だけの元の表は, 比べた行の数を知らせる
+    # 一部の行だけの元の表の, 比べた行の数の知らせ
     info = make_anomaly_bundle(tmp_path / "bundle", run,
                                data=pd.read_csv(raw).head(10),
                                overwrite=True)
@@ -539,3 +542,91 @@ def test_anomaly_sources(
                     encoding="utf-8")
     with pytest.raises(ValueError, match="id"):
         load_bundle(tmp_path / "bundle")
+
+
+def test_skeleton_output(tmp_path: Path) -> None:
+    """
+    骨組みが実際に書いた成果物から一式を作れることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 骨組みの write_results で書いた距離に基づく度合いの成果物 (末尾の
+    # 改行も骨組みの書き出しのまま)
+    run = tmp_path / "run"
+    shutil.copytree(SKELETON_OUTPUT, run)
+    scorer = read_scorer(run / "anomaly_scorer.json")
+    assert (scorer["score"], scorer["features"]) == ("distance",
+                                                     ["temp", "vibration"])
+    assert (run / "anomaly_scorer.json").read_text("utf-8").endswith("}\n")
+
+    # 元の行の度合いが骨組みの度合いと同じで, 外れた行が上位
+    rows = pd.DataFrame({
+        "reading_id": [f"r{n:02d}" for n in range(9)],
+        "temp": [0, 1, -1, 0, 0.5, -0.5, 0.2, 4, -0.1],
+        "vibration": [1, 0, 0, -1, 0.5, -0.5, 0.1, 4, 0.3],
+    })
+    info = make_anomaly_bundle(tmp_path / "bundle", run, data=rows)
+    assert info["anomaly"]["check"]["rows"] == 9
+    assert info["anomaly"]["check"]["agreement"] == 1.0
+    frame = predict(tmp_path / "bundle", rows)
+    assert frame.loc[frame["rank"] == 1, "reading_id"].tolist() == ["r07"]
+
+
+def test_reviews_at_once(tmp_path: Path, raw: Path) -> None:
+    """
+    同時に最初の記録を書いても見出しが 1 行だけになることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    raw: Path
+        元の表の CSV
+
+    Returns
+    ----------
+    None
+    """
+    # 記録の無い結果に, 8 つの thread で同時に 1 件ずつ
+    run = write_anomaly_run(tmp_path / "work", raw, "distance")
+    make_anomaly_bundle(tmp_path / "bundle", run)
+    place = write_result(infer(tmp_path / "bundle", raw),
+                         tmp_path / "result")
+    start = threading.Barrier(8)
+
+    def write(number: int) -> None:
+        """
+        揃ってから 1 件の記録を足す関数
+
+        Parameters
+        ----------
+        number: int
+            行の番号
+
+        Returns
+        ----------
+        None
+        """
+        # 全ての thread が揃ってからの追記
+        start.wait()
+        record_review(place, f"r{number:03d}", "normal", "山田")
+
+    workers = [threading.Thread(target=write, args=(n,)) for n in range(8)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+
+    # 見出しは 1 行, 記録は 8 件
+    lines = (place / "reviews.csv").read_text("utf-8-sig").splitlines()
+    assert lines.count("id,judgment,reviewer,reviewed_at") == 1
+    assert sorted(read_reviews(place)["id"]) == [f"r{n:03d}"
+                                                 for n in range(8)]
+    assert not list(place.glob(".reviews.csv.*"))

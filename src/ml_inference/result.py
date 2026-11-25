@@ -221,8 +221,7 @@ def infer_anomaly(
     batch_size: int, device: str, forecast: bool, decision: Optional[dict]
 ) -> dict:
     """
-    異常の度合いの一式で新しい行の度合いを出し, 要約と振り分けまで出す
-    関数
+    異常の度合いと, 要約と振り分けを出す関数
 
     Parameters
     ----------
