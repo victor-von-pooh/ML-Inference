@@ -503,8 +503,49 @@ def column_types(frame: pd.DataFrame, path: Path) -> dict[str, str]:
     return types
 
 
+def given_types(types: Optional[dict], name: str) -> dict[str, Any]:
+    """
+    呼び手の渡した列の型を, 読み込みの型に直す関数
+
+    Parameters
+    ----------
+    types: Optional[dict]
+        列の名前から型 (text か integer) への対応
+    name: str
+        誤りの文に出す引数の名前
+
+    Returns
+    ----------
+    dtypes: dict[str, Any]
+        列の名前から読み込みの型への対応
+
+    Raises
+    ----------
+    ValueError
+        辞書でない場合, 知らない型の名前がある場合
+    """
+    # 渡した型の名前の確かめ (column_types と同じ名前だけ)
+    if types is None:
+        return {}
+    if not isinstance(types, dict):
+        raise ValueError(f"{name} は列の名前から型への辞書で渡してください")
+    dtypes = {}
+    for column, kind in types.items():
+        if not isinstance(kind, str) or kind not in COLUMN_DTYPES:
+            known = ", ".join(COLUMN_DTYPES)
+            raise ValueError(
+                f"{name} の列 {column} の型 {kind!r} は使えません "
+                f"({known} のどれか)"
+            )
+        dtypes[str(column)] = COLUMN_DTYPES[kind]
+
+    return dtypes
+
+
 def read_predictions(
-    path: Path, types: Optional[dict] = None
+    path: Path, types: Optional[dict] = None,
+    override_types: Optional[dict] = None,
+    fallback_types: Optional[dict] = None
 ) -> pd.DataFrame:
     """
     予測の表を読む関数 (文の出力の文と番号は文字のまま)
@@ -515,42 +556,64 @@ def read_predictions(
         predictions.csv
     types: Optional[dict] = None
         result.yaml の列の型 (列の名前から text か integer)
+    override_types: Optional[dict] = None
+        呼び手の列の型 (types と文の出力の文と番号より強く当てる)
+    fallback_types: Optional[dict] = None
+        呼び手の列の型 (types に無い列だけに, 文の出力の文と番号より
+        弱く当てる)
 
     Returns
     ----------
     frame: pd.DataFrame
         予測の表 (空の欄は欠損. 文の出力の予測した行の空の文は空の文字.
         text の列は文字, integer の列は欠損を持てる整数)
+
+    Raises
+    ----------
+    ValueError
+        呼び手の列の型が辞書でない場合, 知らない型の名前がある場合
     """
+    # 弱い順に重ねる (呼び手の補いの型, 文の出力の文と番号, 残した列の型,
+    # 呼び手の強い型. 表に無い列と知らない残した型は無視)
+    strong = given_types(override_types, "override_types")
+    weak = given_types(fallback_types, "fallback_types")
+    kept = {str(name): COLUMN_DTYPES[kind]
+            for name, kind in (types or {}).items() if kind in COLUMN_DTYPES}
+    head = pd.read_csv(path, encoding="utf-8-sig", nrows=0)
+    columns = set(head.columns)
+    dtype: dict[str, Any] = {
+        name: kind for name, kind in weak.items() if name not in kept
+    }
+
     # tokens の列のある表は文の出力なので, 文と番号を文字で読む (番号が 1
     # つの並びや数に見える文を数にしない)
-    head = pd.read_csv(path, encoding="utf-8-sig", nrows=0)
-    text = TOKENS_COLUMN in head.columns
-    dtype: dict[str, Any] = (
-        {"prediction": str, TOKENS_COLUMN: str} if text else {}
-    )
-
-    # 残した列の型 (表に無い列と知らない型は無視)
-    for name, kind in (types or {}).items():
-        if str(name) in head.columns and kind in COLUMN_DTYPES:
-            dtype[str(name)] = COLUMN_DTYPES[kind]
+    text = TOKENS_COLUMN in columns
+    if text:
+        dtype.update({"prediction": str, TOKENS_COLUMN: str})
+    dtype.update(kept)
+    dtype.update(strong)
+    dtype = {name: kind for name, kind in dtype.items() if name in columns}
     frame = pd.read_csv(
         path, encoding="utf-8-sig", keep_default_na=False, na_values=[""],
         dtype=dtype or None
     )
 
-    # 予測した行の空の文 (戻すと何も残らない並び) は欠損と分ける
+    # 予測した行の空の文 (戻すと何も残らない並び) は欠損と分ける (呼び手
+    # が文字でない型を強く当てた列は除く)
     if text and "status" in frame.columns:
         done = frame["status"] == OK
         for name in ("prediction", TOKENS_COLUMN):
-            if name in frame.columns:
+            if name in frame.columns and strong.get(name, str) is str:
                 frame[name] = frame[name].astype(object)
                 frame.loc[done & frame[name].isna(), name] = ""
 
     return frame
 
 
-def read_result(path: Union[str, Path]) -> dict:
+def read_result(
+    path: Union[str, Path], override_types: Optional[dict] = None,
+    fallback_types: Optional[dict] = None
+) -> dict:
     """
     書き出した結果を読む関数
 
@@ -558,6 +621,13 @@ def read_result(path: Union[str, Path]) -> dict:
     ----------
     path: Union[str, Path]
         結果のディレクトリ
+    override_types: Optional[dict] = None
+        呼び手の都合の列の型 (列の名前から text か integer.
+        column_types と文の出力の文と番号より強く当てる)
+    fallback_types: Optional[dict] = None
+        呼び手の補いの列の型 (列の名前から text か integer.
+        column_types に無い列だけに, 文の出力の文と番号より弱く当てる.
+        column_types の無い版 1 と 2 の結果に呼び手が残した型など)
 
     Returns
     ----------
@@ -573,7 +643,8 @@ def read_result(path: Union[str, Path]) -> dict:
     FileNotFoundError
         result.yaml が無い場合
     ValueError
-        新しい版の場合
+        新しい版の場合, 呼び手の列の型が辞書でない場合, 知らない型の
+        名前がある場合
     """
     # 知らない新しい版の読み込みの停止
     root = Path(path).expanduser()
@@ -588,8 +659,10 @@ def read_result(path: Union[str, Path]) -> dict:
             f"{RESULT_FORMAT_VERSION} まで) では読めません"
         )
     types = meta.get(COLUMN_TYPES_KEY)
-    frame = read_predictions(root / "predictions.csv",
-                             types if isinstance(types, dict) else None)
+    frame = read_predictions(
+        root / "predictions.csv", types if isinstance(types, dict) else None,
+        override_types, fallback_types
+    )
     artifacts = meta.get("artifacts") or {}
     if ARTIFACT_COLUMN in frame.columns and artifacts:
         frame[ARTIFACT_COLUMN] = frame[ARTIFACT_COLUMN].fillna("")
