@@ -249,7 +249,8 @@ def test_given_types(tmp_path: Path) -> None:
          "column_types": {"rank": "integer", "code": "text"}},
     )
 
-    # 渡さなければ今までどおり (省くのと None と空の辞書は同じ)
+    # 型を渡さないときは column_types だけで読む (省くのと None と空の
+    # 辞書は同じ)
     plain = read_result(root)["frame"]
     assert plain["user"].tolist() == [1, 2]
     assert str(plain["rank"].dtype) == "Int64"
@@ -283,6 +284,9 @@ def test_given_types(tmp_path: Path) -> None:
         read_result(root, override_types=["user"])
     with pytest.raises(ValueError, match="fallback_types"):
         read_result(root, fallback_types={"user": "float"})
+    for kind in (["text"], {"text": 1}):
+        with pytest.raises(ValueError, match="override_types"):
+            read_result(root, override_types={"user": kind})
 
 
 def test_given_types_old_versions(tmp_path: Path) -> None:
@@ -349,6 +353,10 @@ def test_given_types_text_output(tmp_path: Path) -> None:
     )
     plain = read_result(root)["frame"]
     assert kept(plain["prediction"]) == ["5", "", None]
+    for given in ({}, None):
+        table = read_result(root, given, given)["frame"]
+        assert kept(table["prediction"]) == ["5", "", None]
+        assert kept(table["tokens"]) == ["5", "", None]
 
     # 補いの型は文と番号に効かず, 他の列には効く
     table = read_result(
@@ -363,3 +371,35 @@ def test_given_types_text_output(tmp_path: Path) -> None:
     assert str(table["tokens"].dtype) == "Int64"
     assert kept(table["tokens"]) == [5, None, None]
     assert kept(table["prediction"]) == ["5", "", None]
+    table = read_result(root, override_types={"prediction": "integer"})
+    table = table["frame"]
+    assert str(table["prediction"].dtype) == "Int64"
+    assert kept(table["prediction"]) == [5, None, None]
+    assert kept(table["tokens"]) == ["5", "", None]
+
+
+def test_text_output_form(tmp_path: Path) -> None:
+    """
+    tokens の列の無い古い文の結果も, output_form が text なら予測を文字で
+    読み, 予測した行の空の文を空の文字にすることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 番号 1 つの予測, 空の文 (予測した行), 予測しなかった行
+    csv = "status,prediction\nok,5\nok,\nskipped,\n"
+    root = write_raw(tmp_path / "text", csv,
+                     {"format_version": 1, "output_form": "text"})
+    table = read_result(root)["frame"]
+    assert kept(table["prediction"]) == ["5", "", None]
+
+    # 出力の形の無い結果は, 文の出力として読まない
+    root = write_raw(tmp_path / "plain", csv, {"format_version": 1})
+    table = read_result(root)["frame"]
+    assert kept(table["prediction"]) == [5.0, None, None]

@@ -39,6 +39,9 @@ ARTIFACT_COLUMN = "artifact"
 # 文の出力の番号の並びの列 (この列のある表は文の出力)
 TOKENS_COLUMN = "tokens"
 
+# 呼び手が result.yaml に足す出力の形の項目 (text の表も文の出力)
+OUTPUT_FORM_KEY = "output_form"
+
 # 書き出すときに result.yaml へ写さない結果の項目 (表, 形, 読んだ場所,
 # 読んだ版と中身と列の型の記録)
 RESULT_OWN_KEYS = ("frame", "form", "directory", "format_version",
@@ -531,7 +534,7 @@ def given_types(types: Optional[dict], name: str) -> dict[str, Any]:
         raise ValueError(f"{name} は列の名前から型への辞書で渡してください")
     dtypes = {}
     for column, kind in types.items():
-        if kind not in COLUMN_DTYPES:
+        if not isinstance(kind, str) or kind not in COLUMN_DTYPES:
             known = ", ".join(COLUMN_DTYPES)
             raise ValueError(
                 f"{name} の列 {column} の型 {kind!r} は使えません "
@@ -545,7 +548,7 @@ def given_types(types: Optional[dict], name: str) -> dict[str, Any]:
 def read_predictions(
     path: Path, types: Optional[dict] = None,
     override_types: Optional[dict] = None,
-    fallback_types: Optional[dict] = None
+    fallback_types: Optional[dict] = None, text_form: bool = False
 ) -> pd.DataFrame:
     """
     予測の表を読む関数 (文の出力の文と番号は文字のまま)
@@ -561,6 +564,9 @@ def read_predictions(
     fallback_types: Optional[dict] = None
         呼び手の列の型 (types に無い列だけに, 文の出力の文と番号より
         弱く当てる)
+    text_form: bool = False
+        result.yaml の出力の形が文か (tokens の列の無い古い文の結果も
+        文の出力として読む)
 
     Returns
     ----------
@@ -585,9 +591,9 @@ def read_predictions(
         name: kind for name, kind in weak.items() if name not in kept
     }
 
-    # tokens の列のある表は文の出力なので, 文と番号を文字で読む (番号が 1
-    # つの並びや数に見える文を数にしない)
-    text = TOKENS_COLUMN in columns
+    # tokens の列のある表と出力の形が文の表は文の出力なので, 文と番号を
+    # 文字で読む (番号が 1 つの並びや数に見える文を数にしない)
+    text = text_form or TOKENS_COLUMN in columns
     if text:
         dtype.update({"prediction": str, TOKENS_COLUMN: str})
     dtype.update(kept)
@@ -661,7 +667,8 @@ def read_result(
     types = meta.get(COLUMN_TYPES_KEY)
     frame = read_predictions(
         root / "predictions.csv", types if isinstance(types, dict) else None,
-        override_types, fallback_types
+        override_types, fallback_types,
+        meta.get(OUTPUT_FORM_KEY) == "text"
     )
     artifacts = meta.get("artifacts") or {}
     if ARTIFACT_COLUMN in frame.columns and artifacts:
