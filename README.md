@@ -111,7 +111,7 @@ write_result(result, "results/reviews")   # predictions.csv と result.yaml
 | `bands` | 回帰, 予測 | `[{label: 少ない, upper: 100}, {label: 多い}]` のような値の帯 |
 | `group_by` | 全て | 列の値ごとに件数, 判断の内訳, 値の合計などをまとめる |
 
-書き出した結果は `read_result(path)` で読み直せる (表は `frame`). 数に見える文字 (`"001"`) や欠けのある整数の列は, そのまま読み直すと値が変わるので, `write_result` がその列の型を `result.yaml` の `column_types` に残し (結果の形の版 3), `read_result` は文字と欠損を持てる整数 (`Int64`) で読む. どの一式の種類の結果も同じ (DESIGN の「書き出し」).
+書き出した結果は `read_result(path)` で読み直せる (表は `frame`). 数に見える文字 (`"001"`) や欠けのある整数の列は, そのまま読み直すと値が変わるので, `write_result` がその列の型を `result.yaml` の `column_types` に残し (結果の形の版 3), `read_result` は文字と欠損を持てる整数 (`Int64`) で読む. どの一式の種類の結果も同じ (DESIGN の「書き出し」). 呼び手の都合の列の型は `read_result(path, override_types={"status": "text"}, fallback_types={"rank": "integer"})` のように渡す (`override_types` は `column_types` より強く当て, `fallback_types` は `column_types` に無い列だけに当てる. 型は `text` か `integer`).
 
 ### 構造のある出力, ベクトル, 繰り返しの手順 (一式の版 3)
 

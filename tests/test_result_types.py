@@ -2,6 +2,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 import yaml
 
 from ml_inference import read_result, write_result
@@ -198,3 +199,167 @@ def test_columns_without_types(tmp_path: Path) -> None:
     assert back["format_version"] == 1 and "column_types" not in back
     assert len(back["frame"]) == 0
     assert list(back["frame"].columns) == ["code", "group", "status"]
+
+
+def write_raw(root: Path, csv: str, meta: dict) -> Path:
+    """
+    予測の表と result.yaml を, そのまま書く関数
+
+    Parameters
+    ----------
+    root: Path
+        結果のディレクトリ
+    csv: str
+        predictions.csv の中身
+    meta: dict
+        result.yaml の中身
+
+    Returns
+    ----------
+    root: Path
+        結果のディレクトリ
+    """
+    # 版と列の型を決めて書くため (write_result は型を表から決める)
+    root.mkdir(parents=True)
+    (root / "predictions.csv").write_text(csv, encoding="utf-8-sig")
+    (root / "result.yaml").write_text(yaml.safe_dump(meta), encoding="utf-8")
+
+    return root
+
+
+def test_given_types(tmp_path: Path) -> None:
+    """
+    呼び手の列の型が, override_types は column_types より強く,
+    fallback_types は column_types に無い列だけに効くことを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 版 3 の結果 (順位は欠けのある整数, 番号は数に見える文字)
+    root = write_raw(
+        tmp_path / "typed",
+        "user,rank,code,count,status\n1,1,001,3,ok\n2,,002,,skipped\n",
+        {"format_version": 3,
+         "column_types": {"rank": "integer", "code": "text"}},
+    )
+
+    # 渡さなければ今までどおり (省くのと None と空の辞書は同じ)
+    plain = read_result(root)["frame"]
+    assert plain["user"].tolist() == [1, 2]
+    assert str(plain["rank"].dtype) == "Int64"
+    assert plain["code"].tolist() == ["001", "002"]
+    assert plain["count"].iloc[0] == 3.0 and pd.isna(plain["count"].iloc[1])
+    for given in ({}, None):
+        pd.testing.assert_frame_equal(
+            read_result(root, given, given)["frame"], plain
+        )
+
+    # 強い型は column_types より先, 補いの型は column_types に無い列だけ
+    table = read_result(
+        root, override_types={"user": "text", "rank": "text"},
+        fallback_types={"code": "integer", "count": "integer",
+                        "missing": "text"},
+    )["frame"]
+    assert table["user"].tolist() == ["1", "2"]
+    assert table["rank"].iloc[0] == "1" and pd.isna(table["rank"].iloc[1])
+    assert table["code"].tolist() == ["001", "002"]
+    assert str(table["count"].dtype) == "Int64"
+    assert kept(table["count"]) == [3, None]
+    assert "missing" not in table.columns
+
+    # 強い型と補いの型が同じ列なら強い型
+    table = read_result(root, override_types={"count": "text"},
+                        fallback_types={"count": "integer"})["frame"]
+    assert kept(table["count"]) == ["3", None]
+
+    # 辞書でない対応と知らない型の名前は誤り
+    with pytest.raises(ValueError, match="override_types"):
+        read_result(root, override_types=["user"])
+    with pytest.raises(ValueError, match="fallback_types"):
+        read_result(root, fallback_types={"user": "float"})
+
+
+def test_given_types_old_versions(tmp_path: Path) -> None:
+    """
+    column_types の無い版 1 と 2 の結果では, 補いの型が全ての列に効き,
+    配列の列の欠けは空の文字のままであることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 版 1 の結果 (群の番号は欠けがあると小数に見える)
+    root = write_raw(
+        tmp_path / "one", "group,name,status\n0,a,ok\n,b,skipped\n",
+        {"format_version": 1},
+    )
+    plain = read_result(root)["frame"]
+    assert plain["group"].dtype == float
+    table = read_result(root, fallback_types={"group": "integer"})["frame"]
+    assert str(table["group"].dtype) == "Int64"
+    assert kept(table["group"]) == [0, None]
+    assert table["name"].tolist() == ["a", "b"]
+
+    # 版 2 の配列の結果も, 配列の列の欠けは型に依らず空の文字
+    root = write_raw(
+        tmp_path / "two",
+        "id,artifact,status\n7,artifacts/000000.npy,ok\n8,,skipped\n",
+        {"format_version": 2,
+         "artifacts": {"directory": "artifacts", "column": "artifact",
+                       "format": "npy", "count": 1, "form": "vector"}},
+    )
+    back = read_result(root, override_types={"artifact": "text"},
+                       fallback_types={"id": "text"})
+    assert back["form"] == "vector"
+    assert back["frame"]["id"].tolist() == ["7", "8"]
+    assert back["frame"]["artifact"].tolist() == ["artifacts/000000.npy", ""]
+
+
+def test_given_types_text_output(tmp_path: Path) -> None:
+    """
+    文の出力の文と番号の型は補いの型より強く, 強い型より弱いこと, 予測した
+    行の空の文は空の文字のままであることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 番号 1 つの並び, 空の文 (予測した行), 予測しなかった行
+    root = write_raw(
+        tmp_path / "text",
+        "user,status,prediction,tokens\n"
+        "1,ok,5,5\n2,ok,,\n3,skipped,,\n",
+        {"format_version": 1},
+    )
+    plain = read_result(root)["frame"]
+    assert kept(plain["prediction"]) == ["5", "", None]
+
+    # 補いの型は文と番号に効かず, 他の列には効く
+    table = read_result(
+        root, fallback_types={"prediction": "integer", "user": "text"}
+    )["frame"]
+    pd.testing.assert_series_equal(table["prediction"], plain["prediction"])
+    assert kept(table["tokens"]) == ["5", "", None]
+    assert table["user"].tolist() == ["1", "2", "3"]
+
+    # 強い型は文と番号にも効き, 文字でない型の列は空の文字にしない
+    table = read_result(root, override_types={"tokens": "integer"})["frame"]
+    assert str(table["tokens"].dtype) == "Int64"
+    assert kept(table["tokens"]) == [5, None, None]
+    assert kept(table["prediction"]) == ["5", "", None]
