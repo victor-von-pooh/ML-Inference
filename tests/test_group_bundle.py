@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 import shutil
-from typing import Callable
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -787,6 +787,39 @@ def test_group_bundle_errors(
                     output_options={"shape": [5]})
 
 
+def same_values(mine: Any, theirs: Any) -> bool:
+    """
+    入れ子の値を, 小数は丸めの差まで, 他は型と値で比べる関数
+
+    Parameters
+    ----------
+    mine: Any
+        比べる値
+    theirs: Any
+        比べる相手
+
+    Returns
+    ----------
+    same: bool
+        同じか
+    """
+    # 小数は CSV を通した丸めの差まで, 他 (文字と整数) は型も同じ
+    if isinstance(mine, dict) and isinstance(theirs, dict):
+        same = list(mine) == list(theirs) and all(
+            same_values(mine[k], theirs[k]) for k in mine
+        )
+    elif isinstance(mine, list) and isinstance(theirs, list):
+        same = len(mine) == len(theirs) and all(
+            same_values(a, b) for a, b in zip(mine, theirs)
+        )
+    elif isinstance(mine, float) and isinstance(theirs, float):
+        same = mine == pytest.approx(theirs)
+    else:
+        same = type(mine) is type(theirs) and mine == theirs
+
+    return same
+
+
 def test_group_result_keeps_types(tmp_path: Path, group_run: Path) -> None:
     """
     数に見える種類の値と欠けのある整数の列を持つ群分けの結果を, 書き出して
@@ -837,7 +870,7 @@ def test_group_result_keeps_types(tmp_path: Path, group_run: Path) -> None:
     assert back["customer"].iloc[0] == "0000"
     assert back["region"].iloc[0] == "010"
     assert str(back["visits"].dtype) == "Int64"
-    assert group_summary(root, back) == result["summary"]["groups"]
-    assert group_representatives(root, back) == (
-        result["summary"]["representatives"]
-    )
+    assert same_values(group_summary(root, back),
+                       result["summary"]["groups"])
+    assert same_values(group_representatives(root, back),
+                       result["summary"]["representatives"])
