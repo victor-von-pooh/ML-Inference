@@ -15,6 +15,7 @@
 - **群分けの一式**: 表の行の埋め込みと群の中心 (ML-Quest のまとめるの骨組みの実験) から, 列の符号化と群の安定性を持つ一式を作り, 新しい行を最も近い群に割り当てて, 群ごとの件数と特徴 (群の要約) と, 群の中心に近い行 (代表の行) を返す. 既製のモデルの埋め込みで写真を群に分ける一式も作れる
 - **異常の度合いの一式**: 正常の行が多い表の度合いの決め方 (ML-Quest の異常の検知の骨組みの実験. 自己符号化器か距離に基づく度合い) から一式を作り, 新しい行の異常の度合いを出して, 度合いの上位から人が確かめる件数の上限まで人の確認に回す. 人が確かめた結果は 1 件ごとに結果の隣に記録する
 - **効果の一式**: 無作為に配った記録から学んだ, 処置の群と対照の群の 2 つの予測 (ML-Quest の効果の見積もりの骨組みの実験) から一式を作り, 新しい行の効果 (クーポンを配ったときに買う確率がどれだけ上がるか) を見積もって, 効果の高い順に配る数の上限まで配る. 実験の Qini の係数と上位 K 割の効果の差を結論に写し, 処置と結果のある表では数え直す
+- **値段の一式**: 試しに値段を変えた売れ行きの記録から学んだ, 値段を入力に入れて売れた数を予測するモデル (ML-Quest の値段を変える判断の骨組みの実験) から一式を作り, 新しい行の値段を今の値段として候補の値段ごとに売れた数を予測し, 変える幅の上限の中で見込みの利益 ((値段 − 原価) × 予測した数) が最も大きい値段を選ぶ. 実験の誤差, 弾力性, 見込みの利益の比べを結論に写し, 売れた数のある表では誤差を数え直す
 - **見本の一式**: 表か文のデータから小さなモデルをその場で学習し, 画面で操作を試すための一式を作る
 
 前処理は [ML-EDA](https://github.com/victor-von-pooh/ML-EDA), モデルの組み立ては [ML-ModelControl](https://github.com/victor-von-pooh/ML-ModelControl) を使い, [ML-Found](https://github.com/victor-von-pooh/ML-Found) で学習した重みを読む.
@@ -23,7 +24,7 @@
 
 | 相手 | 使うもの |
 | --- | --- |
-| ML-Provide (推論) | 推論の一式の作成と確かめ (並べるの一式は `make_rank_bundle` と `rank_metrics`, 群分けの一式は `make_group_bundle`, `group_summary`, `group_representatives`, 異常の度合いの一式は `make_anomaly_bundle`, 効果の一式は `make_uplift_bundle`), 人の確認の記録 (`record_review`, `read_reviews`), 版 2 のデータセットの説明 (`describe_items`), 予測と同じデータの読み込み (`read_source`), 正解の種類と出どころ (`target_of`, `origin_sentence`), 結論 (決め方の項目 `RULE_KEYS`, 件数だけの結論 `conclude_outputs`, まとめからの文 `summary_sentences`), 撮影の深度から点 (`backproject`), 意思決定, 先の予測と列の効き, 方策の一式. 自作の繰り返しの手順 (`register_procedure`, `PROCEDURES`) と自作の部品 (`register_units`) の登録. 問題の設定 (ML-Quest) の損得と今のやり方は, 画面が引数で渡す |
+| ML-Provide (推論) | 推論の一式の作成と確かめ (並べるの一式は `make_rank_bundle` と `rank_metrics`, 群分けの一式は `make_group_bundle`, `group_summary`, `group_representatives`, 異常の度合いの一式は `make_anomaly_bundle`, 効果の一式は `make_uplift_bundle`, 値段の一式は `make_price_bundle`), 人の確認の記録 (`record_review`, `read_reviews`), 版 2 のデータセットの説明 (`describe_items`), 予測と同じデータの読み込み (`read_source`), 正解の種類と出どころ (`target_of`, `origin_sentence`), 結論 (決め方の項目 `RULE_KEYS`, 件数だけの結論 `conclude_outputs`, まとめからの文 `summary_sentences`), 撮影の深度から点 (`backproject`), 意思決定, 先の予測と列の効き, 方策の一式. 自作の繰り返しの手順 (`register_procedure`, `PROCEDURES`) と自作の部品 (`register_units`) の登録. 問題の設定 (ML-Quest) の損得と今のやり方は, 画面が引数で渡す |
 | ML-Found の学習のスクリプト (ML-Quest の骨組みを含む) | 学習の後に `make_bundle` で実験のディレクトリの中に一式を作る |
 
 ## 導入
@@ -304,6 +305,29 @@ result["summary"]["evaluations"]  # 実験の Qini の係数と上位 K 割の�
 result["decision"]["sentences"]   # [前提の文, ..., '効果の高い順に 500 件に配る ...', ...]
 describe_bundle("bundles/coupons")["uplift"]["curves"]   # 実験の Qini の曲線 (分割ごとの rows, fraction, qini, random)
 write_result(result, "results/coupons")
+```
+
+### 上限の中で利益が最も大きい値段を選ぶ (一式の版 13)
+
+値段を変える判断の実験 (値段の決め方 `price_estimator.json`, 前処理のレシピの写し `price_recipe.yaml`, 商品ごとの選んだ値段 `price_choices.csv`, 重み `final_model.pt` と定義 `model_spec.yaml`) から一式を作る. 学習に使った元の表を渡すと, 一式で選んだ値段を実験の選んだ値段と比べる. 新しい行の値段の列を今の値段とし, 候補 (`candidates`. 今の値段に対する変える割合. 0 を含む) のうち変える幅の上限 (`max_change`. 守る指標なので省けない) の中で, 見込みの利益が最も大きい値段を選ぶ (同じ利益なら今の値段に近い候補. 原価の列が無ければ売上で選ぶ). 売れた数は試しに値段を変えた記録を前提にした予測なので, 選んだ値段の利益は値段を変える試験で確かめる.
+
+```python
+from ml_inference import infer, make_price_bundle, write_result
+
+make_price_bundle("bundles/prices", "outputs/units_price/run",
+                  data="data/sales.csv")
+
+# 行ごとの今の値段での売れた数と弾力性 (元の列と status, reason, current_price,
+# cost, units, current_profit, elasticity) と, 選んだ値段の列 action, change,
+# price, price_units, profit
+result = infer("bundles/prices", "products.csv",
+               decision={"type": "price",
+                         "candidates": [-0.1, -0.05, 0, 0.05, 0.1],
+                         "max_change": 0.1})
+result["summary"]["evaluations"]  # 実験の誤差, 弾力性, 見込みの利益の差と比
+result["decision"]["summary"]     # 値段を変える行の数, 見込みの利益の和, 差, 比
+result["decision"]["sentences"]   # [前提の文, ..., 'n 行のうち x 行の値段を変える ...', ...]
+write_result(result, "results/prices")
 ```
 
 ### 何段も先を予測する

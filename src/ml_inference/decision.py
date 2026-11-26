@@ -12,6 +12,7 @@ from ml_inference.baseline import (
 from ml_inference.bundle import Bundle, load_bundle
 from ml_inference.conclude import is_number, plain
 from ml_inference.predict import lag_settings, predict
+from ml_inference.price import check_price_decision, decide_price
 from ml_inference.uplift import check_uplift_decision, decide_uplift
 
 # 意思決定の型と, 型ごとに書ける項目
@@ -248,7 +249,7 @@ def check_decision(
         誤りの一覧 (無ければ空)
     """
     # 型と知らない項目 (異常の度合いの一式は度合いの上位から回す振り分け,
-    # 効果の一式は効果の上位から配る判断の確かめ)
+    # 効果の一式は効果の上位から配る判断, 値段の一式は値段の判断の確かめ)
     if not isinstance(decision, dict):
         return ["意思決定の決め方は辞書にしてください"]
     if bundle.from_anomaly:
@@ -256,6 +257,9 @@ def check_decision(
         return errors
     if bundle.from_uplift:
         errors = check_uplift_decision(decision)
+        return errors
+    if bundle.from_price:
+        errors = check_price_decision(decision)
         return errors
     kind = decision.get("type")
     if kind not in DECISION_KEYS:
@@ -1403,7 +1407,8 @@ def decide(
         決め方に誤りがある場合と, 外れ方を残していない一式の場合
     """
     # 決め方の確認 (異常の度合いの一式は度合いの上位から件数の上限までの
-    # 振り分け, 効果の一式は効果の上位から上限までの配る判断)
+    # 振り分け, 効果の一式は効果の上位から上限までの配る判断, 値段の一式は
+    # 上限の中で見込みの利益が最も大きい値段の判断)
     if not isinstance(bundle, Bundle):
         bundle = load_bundle(bundle)
     if bundle.from_anomaly:
@@ -1411,6 +1416,9 @@ def decide(
         return result
     if bundle.from_uplift:
         result = decide_uplift(bundle, prediction, decision)
+        return result
+    if bundle.from_price:
+        result = decide_price(bundle, prediction, decision)
         return result
     bundle.require_column("意思決定")
     decision = plain(dict(decision))

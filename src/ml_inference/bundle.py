@@ -38,8 +38,8 @@ from ml_inference.weights import (
 # 版 3, 版 2 のデータセットの一式は版 4, 雑音だけの一式は版 5 (表の出力は
 # 版 7), 既製のモデルの一式は版 6, 並べるの一式は版 8, 群分けの一式は
 # 版 9, 既製の埋め込みの群分けの一式は版 10, 異常の度合いの一式は版 11,
-# 効果の一式は版 12 で書く)
-BUNDLE_FORMAT_VERSION = 12
+# 効果の一式は版 12, 値段の一式は版 13 で書く)
+BUNDLE_FORMAT_VERSION = 13
 COLUMN_BUNDLE_VERSION = 3
 ITEMS_BUNDLE_VERSION = 4
 NOISE_BUNDLE_VERSION = 5
@@ -50,6 +50,7 @@ GROUP_BUNDLE_VERSION = 9
 READY_GROUP_BUNDLE_VERSION = 10
 ANOMALY_BUNDLE_VERSION = 11
 UPLIFT_BUNDLE_VERSION = 12
+PRICE_BUNDLE_VERSION = 13
 
 # 群分けの一式の版 (列の符号化か, 既製のモデルの埋め込み)
 GROUP_VERSIONS = (GROUP_BUNDLE_VERSION, READY_GROUP_BUNDLE_VERSION)
@@ -58,15 +59,18 @@ GROUP_VERSIONS = (GROUP_BUNDLE_VERSION, READY_GROUP_BUNDLE_VERSION)
 DATASETLESS_VERSIONS = (
     NOISE_BUNDLE_VERSION, READY_BUNDLE_VERSION, TABLE_BUNDLE_VERSION,
     RANK_BUNDLE_VERSION, GROUP_BUNDLE_VERSION, READY_GROUP_BUNDLE_VERSION,
-    ANOMALY_BUNDLE_VERSION, UPLIFT_BUNDLE_VERSION
+    ANOMALY_BUNDLE_VERSION, UPLIFT_BUNDLE_VERSION, PRICE_BUNDLE_VERSION
 )
+
+# 出力の形 effect の一式の版 (効果の一式と値段の一式)
+EFFECT_VERSIONS = (UPLIFT_BUNDLE_VERSION, PRICE_BUNDLE_VERSION)
 
 # inference.yaml の一番上の項目
 TOP_KEYS = (
     "format_version", "name", "created_at", "role", "output", "target",
     "procedure", "model", "inputs", "dataset", "run", "conclusion",
     "decision", "check", "uncertainty", "notes", "items", "ready",
-    "calibrate", "rank", "group", "anomaly", "uplift"
+    "calibrate", "rank", "group", "anomaly", "uplift", "price"
 )
 
 # 出力の扱い方
@@ -147,7 +151,8 @@ GROUP_ONLY = (
 
 # 効果の出力の形を make_bundle に渡したときの誤り
 EFFECT_ONLY = (
-    "効果の出力の形 (effect) の一式は make_uplift_bundle で作ってください"
+    "効果の出力の形 (effect) の一式は make_uplift_bundle か "
+    "make_price_bundle で作ってください"
 )
 
 
@@ -226,11 +231,15 @@ class Bundle:
             table, timeseries, image, text, pointcloud, audio, items
             (版 2 のデータセットの一式), noise (雑音だけの一式), ready
             (既製のモデルの一式), rank (並べるの一式), group (群分けの
-            一式), anomaly (異常の度合いの一式), uplift (効果の一式)
+            一式), anomaly (異常の度合いの一式), uplift (効果の一式),
+            price (値段の一式)
         """
-        # 効果の一式 (版 12) の uplift
+        # 効果の一式 (版 12) の uplift と, 値段の一式 (版 13) の price
         if self.from_uplift:
             kind = "uplift"
+            return kind
+        if self.from_price:
+            kind = "price"
             return kind
 
         # 版 2 のデータセットの一式はファイルの組, 雑音だけの一式は雑音
@@ -290,11 +299,11 @@ class Bundle:
             dataset が null の一式 (版 5) なら True
         """
         # dataset が null で, 既製のモデルの一式でも並べるの一式でも群分け
-        # の一式でも異常の度合いの一式でも効果の一式でもない一式 (版 5 と,
-        # 表の出力の版 7)
+        # の一式でも異常の度合いの一式でも効果の一式でも値段の一式でもない
+        # 一式 (版 5 と, 表の出力の版 7)
         noise = self.info.get("dataset") is None and not (
             self.from_ready or self.from_rank or self.from_group
-            or self.from_anomaly or self.from_uplift
+            or self.from_anomaly or self.from_uplift or self.from_price
         )
 
         return noise
@@ -397,6 +406,26 @@ class Bundle:
         uplift = self.info.get("uplift") is not None
 
         return uplift
+
+    @property
+    def from_price(self) -> bool:
+        """
+        行ごとに値段を選ぶ一式かを返す関数
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        ----------
+        price: bool
+            price (値段の決め方と前処理のレシピ) を持つ一式 (版 13) なら
+            True
+        """
+        # 版 13 の price の有無
+        price = self.info.get("price") is not None
+
+        return price
 
     @property
     def mask_values(self) -> Optional[list[int]]:
@@ -635,7 +664,12 @@ class Bundle:
         """
         # 結論と意思決定は 1 行に 1 つのクラスか値が前提. 既製のモデルの
         # 一式は測るデータ無し. 異常の度合いは確率でなく, 効果は 2 つの予測
-        # の差なので誤り
+        # の差, 値段の一式は候補の値段ごとの予測なので誤り
+        if self.from_price:
+            raise ValueError(
+                f"値段の一式には {what} を使えません (使えるのは値段の判断 "
+                "{type: price, candidates, max_change} だけ)"
+            )
         if self.from_uplift:
             raise ValueError(
                 f"効果の一式には {what} を使えません (使えるのは効果の上位"
@@ -994,11 +1028,11 @@ def check_info(info: Any) -> list[str]:
         from ml_inference.anomaly import check_anomaly_info
 
         errors.extend(check_anomaly_info(info))
-    if (output.get("form") == "effect") != (version == UPLIFT_BUNDLE_VERSION):
+    if (output.get("form") == "effect") != (version in EFFECT_VERSIONS):
         errors.append(
-            f"出力の形 effect は版 {UPLIFT_BUNDLE_VERSION} の効果の一式だけ"
-            f"で, 版 {UPLIFT_BUNDLE_VERSION} の一式の出力の形は effect だけ"
-            "です"
+            f"出力の形 effect は版 {UPLIFT_BUNDLE_VERSION} の効果の一式と版 "
+            f"{PRICE_BUNDLE_VERSION} の値段の一式だけで, この版の一式の出力の"
+            "形は effect だけです"
         )
     if info.get("uplift") is not None and version != UPLIFT_BUNDLE_VERSION:
         errors.append(
@@ -1009,6 +1043,15 @@ def check_info(info: Any) -> list[str]:
         from ml_inference.uplift import check_uplift_info
 
         errors.extend(check_uplift_info(info))
+    if info.get("price") is not None and version != PRICE_BUNDLE_VERSION:
+        errors.append(
+            f"price を持つ一式は版 {PRICE_BUNDLE_VERSION} にしてください"
+        )
+    if version == PRICE_BUNDLE_VERSION:
+        # 値段の一式の決まりは値段のモジュールの受け持ち
+        from ml_inference.price import check_price_info
+
+        errors.extend(check_price_info(info))
 
     return errors
 
@@ -1599,6 +1642,10 @@ def load_bundle(path: Union[str, Path]) -> Bundle:
         from ml_inference.uplift import check_uplift_bundle
 
         check_uplift_bundle(bundle)
+    if bundle.from_price:
+        from ml_inference.price import check_price_bundle
+
+        check_price_bundle(bundle)
     if info.get("calibrate") is not None:
         classes = bundle.classes if (
             bundle.form == "class" and not bundle.from_ready
