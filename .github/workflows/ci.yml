@@ -41,7 +41,8 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
       # CUDA の無い軽い PyTorch を先に入れてから, パッケージとテストの依存を入れる
-      # torchvision は既製のモデルの重みの説明を読むテストのため (重みはネットワークで取らない)
+      # torchvision は既製のモデルの重みの説明を読むテストのため (重みはネットワークで取らない.
+      # 手で起動して network を選んだときだけ, 本物の重みを取りに行くテストも動かす)
       - run: pip install ${{ matrix.torch }} torchvision --index-url https://download.pytorch.org/whl/cpu
       - run: pip install -e ".[${{ matrix.extras }}]"
       - run: pytest -q
