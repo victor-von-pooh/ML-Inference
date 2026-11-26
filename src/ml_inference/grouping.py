@@ -68,6 +68,10 @@ FAR_QUANTILE = 0.99
 # 群の中心から遠い行の印の列
 FAR_COLUMN = "far"
 
+# 上限と比べるときの幅 (割合と絶対の値. 一度に渡す件数やデバイスで変わる
+# 埋め込みの丸めの差で, 上限ちょうどの学習の行に印を付けないため)
+FAR_TOLERANCE = (1e-6, 1e-9)
+
 # 学習の表を渡さずに作った一式の注意
 NO_FAR = "学習の表を渡さなかったので, 群の中心から遠い行に印を付けません"
 
@@ -1123,11 +1127,13 @@ def far_marks(
     Returns
     ----------
     marks: np.ndarray
-        距離が群の上限より大きい行が True (割り当てない行と, 上限の無い
-        群の行は False)
+        距離が群の上限 t の少し外 (t × (1 + 1e-6) + 1e-9) より大きい行が
+        True (割り当てない行と, 上限の無い群の行は False)
     """
-    # 群ごとの上限 (無ければ無限) との比べ
-    limits = np.array([math.inf if t is None else float(t)
+    # 群ごとの上限に丸めの差の幅を足した値 (上限が無ければ無限) との比べ
+    relative, absolute = FAR_TOLERANCE
+    limits = np.array([math.inf if t is None
+                       else float(t) * (1 + relative) + absolute
                        for t in thresholds])
     marks = np.zeros(len(labels), dtype=bool)
     kept = labels >= 0

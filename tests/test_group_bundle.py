@@ -12,6 +12,7 @@ from ml_eda import Data, describe_groups
 from ml_modelcontrol import build_model, load_example
 
 import ml_inference.bundle as bundle_module
+from ml_inference.grouping import far_marks
 from ml_inference import (
     describe_bundle, group_far, group_representatives, group_summary,
     infer, load_bundle, make_bundle, make_group_bundle, predict,
@@ -1125,3 +1126,40 @@ def test_far_errors(
     big = pd.DataFrame([{"customer": "big", "spend": 1e6, "visits": 500,
                          "region": "north"}])
     assert not predict(root, big)["far"].any()
+
+
+def test_far_batch_size(tmp_path: Path, group_run: Path) -> None:
+    """
+    一度に渡す行の数が作るときと違っても, 上限ちょうどの学習の行に印が
+    付かないことを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    group_run: Path
+        実験のディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 群の行が 100 以下なので, 群ごとに距離の最も大きい行が上限ちょうど
+    frame = customer_rows()
+    root = tmp_path / "bundle"
+    make_group_bundle(root, group_run, data=frame, batch_size=256)
+
+    # 1 行ずつ, 7 行ずつ, まとめての推論のどれでも学習の行は印無し
+    for batch_size in (1, 7, 256):
+        prediction = predict(root, frame, batch_size=batch_size)
+        assert not prediction["far"].any(), batch_size
+
+    # 上限を少し超える距離の行だけの印
+    far = yaml.safe_load(
+        (root / "inference.yaml").read_text(encoding="utf-8")
+    )["group"]["far"]
+    limit = far["thresholds"][0]
+    distance = np.array([limit, limit * (1 + 1e-7), limit * 1.001])
+    marks = far_marks(np.zeros(3, dtype=np.int64), distance,
+                      far["thresholds"])
+    assert list(marks) == [False, False, True]
