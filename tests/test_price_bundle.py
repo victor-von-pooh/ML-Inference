@@ -1,6 +1,7 @@
 import json
 import math
 from pathlib import Path
+import shutil
 
 import numpy as np
 import pandas as pd
@@ -22,6 +23,12 @@ from ml_inference import (
 ROWS = 60
 CANDIDATES = [-0.1, -0.05, 0, 0.05, 0.1]
 MAX_CHANGE = 0.1
+
+# ML-Quest の値段を変える判断の骨組みの train.py を書き換えずに短く動かした
+# 実験の成果物と元の表 (商品ごとに選ぶ実験と, 商品の id と原価の無い行ごと
+# に選ぶ実験)
+SKELETON_OUTPUT = Path(__file__).parent / "price_skeleton"
+SKELETON_ROWS = Path(__file__).parent / "price_skeleton_rows"
 
 # 予測に使う列 (最後が値段の列)
 FEATURES = ["category", "weekday", "price"]
@@ -53,8 +60,7 @@ LIFT_SAMPLES = [
 
 def sales_rows(product: bool) -> pd.DataFrame:
     """
-    値段を無作為に変えた, 種類で売れ行きの違う合成の売れ行きの記録を作る
-    関数
+    値段を無作為に変えた合成の売れ行きの記録を作る関数
 
     Parameters
     ----------
@@ -67,7 +73,7 @@ def sales_rows(product: bool) -> pd.DataFrame:
         record_id, product_id (product のときだけ), category, weekday,
         price, unit_cost, units の表
     """
-    # 値段は無作為, 売れた数は種類と値段で決める
+    # 無作為の値段と, 種類と値段で決まる売れた数
     rng = np.random.default_rng(0)
     rows = []
     for number in range(ROWS):
@@ -327,7 +333,7 @@ def test_price_bundle(tmp_path: Path, product: bool) -> None:
     ----------
     None
     """
-    # 一式を作り, 元の表で選んだ値段を実験の選んだ値段と比べる
+    # 一式づくりと, 元の表で選んだ値段と実験の選んだ値段の比べ
     raw = raw_table(tmp_path, product)
     run = write_price_run(tmp_path / "work", raw, product)
     info = make_price_bundle(tmp_path / "bundle", run, data=raw)
@@ -455,7 +461,7 @@ def test_price_decision(tmp_path: Path) -> None:
     ----------
     None
     """
-    # ML-Quest の action.decision の値段の判断と同じ名前と形だけを受ける
+    # ML-Quest の action.decision の値段の判断と同じ名前と形だけの受け入れ
     # (max_change は省けない)
     raw = raw_table(tmp_path, False)
     run = write_price_run(tmp_path / "work", raw, False)
@@ -699,3 +705,63 @@ def test_price_sources(
                                        allow_unicode=True), encoding="utf-8")
         with pytest.raises(ValueError, match=words):
             load_bundle(tmp_path / "bundle")
+
+
+def test_skeleton_output(tmp_path: Path) -> None:
+    """
+    骨組みが書いた成果物から一式を作り, 値段を選べることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 行ごとに選ぶ実験の, 元の表で選んだ値段と実験の選んだ値段の比べ
+    run = tmp_path / "rows"
+    shutil.copytree(SKELETON_ROWS, run)
+    estimator = json.loads((run / "price_estimator.json").read_text("utf-8"))
+    assert (estimator["current"], estimator["cost"],
+            estimator["product"]) == ("row", None, None)
+    info = make_price_bundle(tmp_path / "rows_bundle", run,
+                             data=run / "sales.csv")
+    choices = pd.read_csv(run / "price_choices.csv")
+    assert info["price"]["check"]["rows"] == len(choices)
+    assert info["price"]["check"]["agreement"] == 1.0
+    # (骨組みの float32 のまとまりごとの予測との丸めの分)
+    assert info["price"]["check"]["max_diff"] < 1e-3
+    assert info["decision"] == {"type": "price",
+                                "candidates": estimator["candidates"],
+                                "max_change": estimator["max_change"]}
+    assert set(info["price"]["evaluations"]) == {"valid", "test"}
+    result = infer(tmp_path / "rows_bundle", run / "sales.csv")
+    assert (result["frame"]["cost"] == 0).all()
+    assert result["frame"]["change"].abs().max() <= estimator["max_change"]
+
+    # 商品ごとに選ぶ実験 (分割をまたぐ商品は比べない) と, 骨組みの今の値段
+    # (商品ごとの元の値段の中央値)
+    run = tmp_path / "products"
+    shutil.copytree(SKELETON_OUTPUT, run)
+    info = make_price_bundle(tmp_path / "bundle", run,
+                             data=run / "sales.csv")
+    assert info["price"]["current"] == "median"
+    assert info["price"]["cost"] == "unit_cost"
+    assert info["price"]["check"] is None
+    assert any("比べません" in note for note in info["notes"])
+    sales = pd.read_csv(run / "sales.csv")
+    choices = pd.read_csv(run / "price_choices.csv")
+    medians = sales.groupby("product_id")["price"].median()
+    np.testing.assert_allclose(
+        choices["current_price"], medians.loc[choices["product_id"]]
+    )
+    result = infer(tmp_path / "bundle", sales)
+    decided = result["frame"]
+    assert (decided["status"] == "ok").all()
+    assert (decided["profit"] >= decided["current_profit"] - 1e-9).all()
+    assert decided["change"].abs().max() <= estimator["max_change"]
+    assert result["summary"]["evaluations"]["test"]["max_change"] == (
+        estimator["max_change"]
+    )

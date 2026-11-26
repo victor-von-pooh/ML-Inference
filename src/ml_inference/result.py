@@ -19,8 +19,8 @@ from ml_inference.predict import (
     ARRAY_FORMS, OK, noise_request, predict, target_of
 )
 from ml_inference.grouping import conclude_groups
-from ml_inference.ranking import conclude_ranking, request_users
 from ml_inference.price import conclude_price
+from ml_inference.ranking import conclude_ranking, request_users
 from ml_inference.uplift import conclude_uplift
 
 # 結果のファイル (result.yaml) の形の版 (混ざる列を残せば 4, 列の型を
@@ -225,8 +225,7 @@ def infer_ranked(
     batch_size: int, device: str, forecast: bool, decision: Optional[dict]
 ) -> dict:
     """
-    異常の度合いか効果か売れた数と, 要約と判断 (上位から上限まで, 値段)
-    を出す関数
+    異常の度合いか効果か売れた数と, 要約と判断を出す関数
 
     Parameters
     ----------

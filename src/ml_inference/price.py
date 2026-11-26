@@ -322,8 +322,7 @@ def read_estimator(path: Path) -> dict:
 
 def read_recipe(path: Path, estimator: dict) -> dict:
     """
-    前処理のレシピの写しを読み, 値段を変えた記録の表のレシピかを確かめる
-    関数
+    値段を変えた記録の表のレシピの写しを読んで確かめる関数
 
     Parameters
     ----------
@@ -751,7 +750,7 @@ def number_values(values: pd.Series, lowest: float, open_low: bool) -> tuple:
     found: tuple
         float64 の値 (読めない値は nan) と, 読めた行の印
     """
-    # 真偽値と数でない値と範囲の外の値は読めない
+    # 真偽値, 数でない値, 範囲の外の値の除外
     numbers = np.array([
         float(v) if is_number(v) else math.nan for v in values.tolist()
     ], dtype=np.float64)
@@ -770,8 +769,7 @@ def candidate_units(
     rows: np.ndarray, changes: list, batch_size: int, device: str
 ) -> tuple[np.ndarray, list[str]]:
     """
-    行の値段を今の値段 × (1 + 割合) に置き換え, 割合ごとの売れた数を
-    予測する関数
+    値段を置き換えた行で, 割合ごとの売れた数を予測する関数
 
     Parameters
     ----------
@@ -883,8 +881,7 @@ def elasticity_of(now: np.ndarray, raised: np.ndarray) -> np.ndarray:
 
 def price_elasticity(now: Any, raised: Any) -> dict:
     """
-    値段を 1 % 上げたときの弾力性を, ML-Found の price_elasticity と同じ
-    決まりで数える関数
+    値段を 1 % 上げたときの弾力性を数える関数
 
     Parameters
     ----------
@@ -904,7 +901,8 @@ def price_elasticity(now: Any, raised: Any) -> dict:
     ValueError
         長さが 0 か違う場合と, 予測した数が 0 以上の有限の数でない場合
     """
-    # 0 以上の有限の数の, 同じ長さの並び
+    # 0 以上の有限の数の, 同じ長さの並び (ML-Found の price_elasticity と
+    # 同じ決まり)
     now = np.asarray(now, dtype=np.float64).reshape(-1)
     raised = np.asarray(raised, dtype=np.float64).reshape(-1)
     if not len(now) or now.shape != raised.shape:
@@ -974,8 +972,7 @@ def profit_lift(
     max_change: Optional[float] = None
 ) -> dict:
     """
-    選んだ値段と今の値段の見込みの利益を, ML-Found の profit_lift と同じ
-    決まりで比べる関数
+    選んだ値段と今の値段の見込みの利益を比べる関数
 
     Parameters
     ----------
@@ -1002,7 +999,7 @@ def profit_lift(
     ValueError
         形が合わない場合と, 値が決まりの外の場合
     """
-    # 形と値の確かめ
+    # 形と値の確かめ (ML-Found の profit_lift と同じ決まり)
     price = np.asarray(price, dtype=np.float64).reshape(-1)
     units = np.asarray(units, dtype=np.float64)
     cost = np.zeros(len(price)) if cost is None else np.asarray(

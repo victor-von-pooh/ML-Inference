@@ -1,0 +1,38 @@
+format_version: 1
+task: price
+target: units
+price: price
+cost: unit_cost
+product: product_id
+id: record_id
+steps:
+- op: drop_columns
+  columns:
+  - leftover
+  state:
+    columns:
+    - leftover
+- op: standardize
+  columns: auto
+  state:
+    values:
+      category:
+      - 0.5
+      - 0.5091750772173156
+      weekday:
+      - 3.75
+      - 1.8978545391709691
+      price:
+      - 102.85714285714286
+      - 14.104672946998772
+    columns:
+    - category
+    - weekday
+    - price
+split:
+  method: stratified
+  valid: 0.2
+  test: 0.2
+  seed: 0
+  unlabeled: drop
+item_steps: []
