@@ -26,7 +26,8 @@ from ml_inference.price import decimal_of, number_values
 from ml_inference.units import check_units
 from ml_inference.uplift import read_json
 
-# 実験の中の成果物 (ML-Quest の時間をまたぐ量の判断の骨組みが書く名前)
+# 実験の中の成果物 (ML-Quest の時間をまたぐ量の判断の学習のスクリプトが
+# 書く名前)
 ESTIMATOR_FILE = "demand_estimator.json"
 RECIPE_FILE = "demand_recipe.yaml"
 EVALUATION_FILE = "evaluations/demand_{split}.json"

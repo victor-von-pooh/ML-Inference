@@ -117,7 +117,7 @@ def demand_spec() -> dict:
 
 def skeleton_quantiles(model: torch.nn.Module, x: np.ndarray) -> np.ndarray:
     """
-    骨組みと同じ式で, 行ごとの分位点を予測する関数
+    学習のスクリプトと同じ式で, 行ごとの分位点を予測する関数
 
     Parameters
     ----------
@@ -143,8 +143,8 @@ def write_demand_run(
     root: Path, raw: Path, stock: bool, spec: bool = True
 ) -> Path:
     """
-    時間をまたぐ量の判断の骨組みと同じ成果物を持つ実験のディレクトリを作る
-    関数
+    時間をまたぐ量の判断の学習のスクリプトと同じ成果物を持つ実験の
+    ディレクトリを作る関数
 
     Parameters
     ----------
