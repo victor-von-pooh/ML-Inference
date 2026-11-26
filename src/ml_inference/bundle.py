@@ -38,8 +38,8 @@ from ml_inference.weights import (
 # 版 3, 版 2 のデータセットの一式は版 4, 雑音だけの一式は版 5 (表の出力は
 # 版 7), 既製のモデルの一式は版 6, 並べるの一式は版 8, 群分けの一式は
 # 版 9, 既製の埋め込みの群分けの一式は版 10, 異常の度合いの一式は版 11,
-# 効果の一式は版 12, 値段の一式は版 13 で書く)
-BUNDLE_FORMAT_VERSION = 13
+# 効果の一式は版 12, 値段の一式は版 13, 需要の一式は版 14 で書く)
+BUNDLE_FORMAT_VERSION = 14
 COLUMN_BUNDLE_VERSION = 3
 ITEMS_BUNDLE_VERSION = 4
 NOISE_BUNDLE_VERSION = 5
@@ -51,6 +51,7 @@ READY_GROUP_BUNDLE_VERSION = 10
 ANOMALY_BUNDLE_VERSION = 11
 UPLIFT_BUNDLE_VERSION = 12
 PRICE_BUNDLE_VERSION = 13
+DEMAND_BUNDLE_VERSION = 14
 
 # 群分けの一式の版 (列の符号化か, 既製のモデルの埋め込み)
 GROUP_VERSIONS = (GROUP_BUNDLE_VERSION, READY_GROUP_BUNDLE_VERSION)
@@ -59,7 +60,8 @@ GROUP_VERSIONS = (GROUP_BUNDLE_VERSION, READY_GROUP_BUNDLE_VERSION)
 DATASETLESS_VERSIONS = (
     NOISE_BUNDLE_VERSION, READY_BUNDLE_VERSION, TABLE_BUNDLE_VERSION,
     RANK_BUNDLE_VERSION, GROUP_BUNDLE_VERSION, READY_GROUP_BUNDLE_VERSION,
-    ANOMALY_BUNDLE_VERSION, UPLIFT_BUNDLE_VERSION, PRICE_BUNDLE_VERSION
+    ANOMALY_BUNDLE_VERSION, UPLIFT_BUNDLE_VERSION, PRICE_BUNDLE_VERSION,
+    DEMAND_BUNDLE_VERSION
 )
 
 # 出力の形 effect の一式の版 (効果の一式と値段の一式)
@@ -70,7 +72,7 @@ TOP_KEYS = (
     "format_version", "name", "created_at", "role", "output", "target",
     "procedure", "model", "inputs", "dataset", "run", "conclusion",
     "decision", "check", "uncertainty", "notes", "items", "ready",
-    "calibrate", "rank", "group", "anomaly", "uplift", "price"
+    "calibrate", "rank", "group", "anomaly", "uplift", "price", "demand"
 )
 
 # 出力の扱い方
@@ -232,14 +234,18 @@ class Bundle:
             (版 2 のデータセットの一式), noise (雑音だけの一式), ready
             (既製のモデルの一式), rank (並べるの一式), group (群分けの
             一式), anomaly (異常の度合いの一式), uplift (効果の一式),
-            price (値段の一式)
+            price (値段の一式), demand (需要の一式)
         """
-        # 効果の一式 (版 12) の uplift と, 値段の一式 (版 13) の price
+        # 効果の一式 (版 12) の uplift, 値段の一式 (版 13) の price, 需要の
+        # 一式 (版 14) の demand
         if self.from_uplift:
             kind = "uplift"
             return kind
         if self.from_price:
             kind = "price"
+            return kind
+        if self.from_demand:
+            kind = "demand"
             return kind
 
         # 版 2 のデータセットの一式はファイルの組, 雑音だけの一式は雑音
@@ -299,11 +305,12 @@ class Bundle:
             dataset が null の一式 (版 5) なら True
         """
         # dataset が null で, 既製のモデルの一式でも並べるの一式でも群分け
-        # の一式でも異常の度合いの一式でも効果の一式でも値段の一式でもない
-        # 一式 (版 5 と, 表の出力の版 7)
+        # の一式でも異常の度合いの一式でも効果の一式でも値段の一式でも需要の
+        # 一式でもない一式 (版 5 と, 表の出力の版 7)
         noise = self.info.get("dataset") is None and not (
             self.from_ready or self.from_rank or self.from_group
             or self.from_anomaly or self.from_uplift or self.from_price
+            or self.from_demand
         )
 
         return noise
@@ -428,6 +435,26 @@ class Bundle:
         return price
 
     @property
+    def from_demand(self) -> bool:
+        """
+        先の需要の分位点から発注の数を決める一式かを返す関数
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        ----------
+        demand: bool
+            demand (需要の決め方と前処理のレシピ) を持つ一式 (版 14) なら
+            True
+        """
+        # 版 14 の demand の有無
+        demand = self.info.get("demand") is not None
+
+        return demand
+
+    @property
     def mask_values(self) -> Optional[list[int]]:
         """
         領域のクラスの番号ごとの領域の値を返す関数
@@ -544,12 +571,14 @@ class Bundle:
         Returns
         ----------
         column: bool
-            class, value, distribution なら True (異常の度合いの一式は
-            False)
+            class, value, distribution なら True (異常の度合いの一式と
+            需要の一式は False)
         """
         # 1 行に 1 つのクラスか値 (確率でも目的の列の値でもない異常の度合い
-        # は除外)
-        column = self.form in COLUMN_FORMS and not self.from_anomaly
+        # と, 発注を決める日の行だけを返す需要の分位点は除外)
+        column = self.form in COLUMN_FORMS and not (
+            self.from_anomaly or self.from_demand
+        )
 
         return column
 
@@ -664,7 +693,13 @@ class Bundle:
         """
         # 結論と意思決定は 1 行に 1 つのクラスか値が前提. 既製のモデルの
         # 一式は測るデータ無し. 異常の度合いは確率でなく, 効果は 2 つの予測
-        # の差, 値段の一式は候補の値段ごとの予測なので誤り
+        # の差, 値段の一式は候補の値段ごとの予測, 需要の一式は商品ごとの
+        # 発注を決める日の分位点なので誤り
+        if self.from_demand:
+            raise ValueError(
+                f"需要の一式には {what} を使えません (使えるのは発注の判断 "
+                "{type: order, shortage_cost, holding_cost, max_order} だけ)"
+            )
         if self.from_price:
             raise ValueError(
                 f"値段の一式には {what} を使えません (使えるのは値段の判断 "
@@ -1052,6 +1087,15 @@ def check_info(info: Any) -> list[str]:
         from ml_inference.price import check_price_info
 
         errors.extend(check_price_info(info))
+    if info.get("demand") is not None and version != DEMAND_BUNDLE_VERSION:
+        errors.append(
+            f"demand を持つ一式は版 {DEMAND_BUNDLE_VERSION} にしてください"
+        )
+    if version == DEMAND_BUNDLE_VERSION:
+        # 需要の一式の決まりは需要のモジュールの受け持ち
+        from ml_inference.demand import check_demand_info
+
+        errors.extend(check_demand_info(info))
 
     return errors
 
@@ -1609,7 +1653,9 @@ def load_bundle(path: Union[str, Path]) -> Bundle:
                 f"model.kind {kind} は {bundle.task} に使えません (分類は "
                 "logits か probabilities, 回帰と予測は value)"
             )
-    elif form in FORM_TASKS and not bundle.from_anomaly and (
+    elif form in FORM_TASKS and not (
+        bundle.from_anomaly or bundle.from_demand
+    ) and (
         bundle.task not in FORM_TASKS[form]
     ):
         raise ValueError(
@@ -1646,6 +1692,10 @@ def load_bundle(path: Union[str, Path]) -> Bundle:
         from ml_inference.price import check_price_bundle
 
         check_price_bundle(bundle)
+    if bundle.from_demand:
+        from ml_inference.demand import check_demand_bundle
+
+        check_demand_bundle(bundle)
     if info.get("calibrate") is not None:
         classes = bundle.classes if (
             bundle.form == "class" and not bundle.from_ready

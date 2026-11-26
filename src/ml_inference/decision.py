@@ -11,6 +11,7 @@ from ml_inference.baseline import (
 )
 from ml_inference.bundle import Bundle, load_bundle
 from ml_inference.conclude import is_number, plain
+from ml_inference.demand import check_order_decision, decide_order
 from ml_inference.predict import lag_settings, predict
 from ml_inference.price import check_price_decision, decide_price
 from ml_inference.uplift import check_uplift_decision, decide_uplift
@@ -249,7 +250,8 @@ def check_decision(
         誤りの一覧 (無ければ空)
     """
     # 型と知らない項目 (異常の度合いの一式は度合いの上位から回す振り分け,
-    # 効果の一式は効果の上位から配る判断, 値段の一式は値段の判断の確かめ)
+    # 効果の一式は効果の上位から配る判断, 値段の一式は値段の判断, 需要の
+    # 一式は発注の判断の確かめ)
     if not isinstance(decision, dict):
         return ["意思決定の決め方は辞書にしてください"]
     if bundle.from_anomaly:
@@ -260,6 +262,9 @@ def check_decision(
         return errors
     if bundle.from_price:
         errors = check_price_decision(decision)
+        return errors
+    if bundle.from_demand:
+        errors = check_order_decision(decision)
         return errors
     kind = decision.get("type")
     if kind not in DECISION_KEYS:
@@ -1408,7 +1413,8 @@ def decide(
     """
     # 決め方の確認 (異常の度合いの一式は度合いの上位から件数の上限までの
     # 振り分け, 効果の一式は効果の上位から上限までの配る判断, 値段の一式は
-    # 上限の中で見込みの利益が最も大きい値段の判断)
+    # 上限の中で見込みの利益が最も大きい値段の判断, 需要の一式は水準 τ の
+    # 分位点から在庫を引いた発注の判断)
     if not isinstance(bundle, Bundle):
         bundle = load_bundle(bundle)
     if bundle.from_anomaly:
@@ -1419,6 +1425,9 @@ def decide(
         return result
     if bundle.from_price:
         result = decide_price(bundle, prediction, decision)
+        return result
+    if bundle.from_demand:
+        result = decide_order(bundle, prediction, decision)
         return result
     bundle.require_column("意思決定")
     decision = plain(dict(decision))

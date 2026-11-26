@@ -16,6 +16,7 @@
 - **異常の度合いの一式**: 正常の行が多い表の度合いの決め方 (ML-Quest の異常の検知の骨組みの実験. 自己符号化器か距離に基づく度合い) から一式を作り, 新しい行の異常の度合いを出して, 度合いの上位から人が確かめる件数の上限まで人の確認に回す. 人が確かめた結果は 1 件ごとに結果の隣に記録する
 - **効果の一式**: 無作為に配った記録から学んだ, 処置の群と対照の群の 2 つの予測 (ML-Quest の効果の見積もりの骨組みの実験) から一式を作り, 新しい行の効果 (クーポンを配ったときに買う確率がどれだけ上がるか) を見積もって, 効果の高い順に配る数の上限まで配る. 実験の Qini の係数と上位 K 割の効果の差を結論に写し, 処置と結果のある表では数え直す
 - **値段の一式**: 試しに値段を変えた売れ行きの記録から学んだ, 値段を入力に入れて売れた数を予測するモデル (ML-Quest の値段を変える判断の骨組みの実験) から一式を作り, 新しい行の値段を今の値段として候補の値段ごとに売れた数を予測し, 変える幅の上限の中で見込みの利益 ((値段 − 原価) × 予測した数) が最も大きい値段を選ぶ. 実験の誤差, 弾力性, 見込みの利益の比べを結論に写し, 売れた数のある表では誤差を数え直す
+- **需要の一式**: 商品ごとの日ごとの売れた数の記録から学んだ, 先の期間の需要の分位点を予測するモデル (ML-Quest の時間をまたぐ量の判断の学習のスクリプトの実験) から一式を作り, 日ごとの記録の表の商品ごとに最後の日を発注を決める日として先の期間の需要の分位点を予測し, 品切れの損と売れ残りの損の比から決まる水準の分位点から在庫の数を引いた数を, 発注の数の上限の中で発注する. 見込みの損と, 前の期間と同じ数を発注する決め方との比べを結論に出す
 - **見本の一式**: 表か文のデータから小さなモデルをその場で学習し, 画面で操作を試すための一式を作る
 
 前処理は [ML-EDA](https://github.com/victor-von-pooh/ML-EDA), モデルの組み立ては [ML-ModelControl](https://github.com/victor-von-pooh/ML-ModelControl) を使い, [ML-Found](https://github.com/victor-von-pooh/ML-Found) で学習した重みを読む.
@@ -24,7 +25,7 @@
 
 | 相手 | 使うもの |
 | --- | --- |
-| ML-Provide (推論) | 推論の一式の作成と確かめ (並べるの一式は `make_rank_bundle` と `rank_metrics`, 群分けの一式は `make_group_bundle`, `group_summary`, `group_representatives`, 異常の度合いの一式は `make_anomaly_bundle`, 効果の一式は `make_uplift_bundle`, 値段の一式は `make_price_bundle`), 人の確認の記録 (`record_review`, `read_reviews`), 版 2 のデータセットの説明 (`describe_items`), 予測と同じデータの読み込み (`read_source`), 正解の種類と出どころ (`target_of`, `origin_sentence`), 結論 (決め方の項目 `RULE_KEYS`, 件数だけの結論 `conclude_outputs`, まとめからの文 `summary_sentences`), 撮影の深度から点 (`backproject`), 意思決定, 先の予測と列の効き, 方策の一式. 自作の繰り返しの手順 (`register_procedure`, `PROCEDURES`) と自作の部品 (`register_units`) の登録. 問題の設定 (ML-Quest) の損得と今のやり方は, 画面が引数で渡す |
+| ML-Provide (推論) | 推論の一式の作成と確かめ (並べるの一式は `make_rank_bundle` と `rank_metrics`, 群分けの一式は `make_group_bundle`, `group_summary`, `group_representatives`, 異常の度合いの一式は `make_anomaly_bundle`, 効果の一式は `make_uplift_bundle`, 値段の一式は `make_price_bundle`, 需要の一式は `make_demand_bundle`), 人の確認の記録 (`record_review`, `read_reviews`), 版 2 のデータセットの説明 (`describe_items`), 予測と同じデータの読み込み (`read_source`), 正解の種類と出どころ (`target_of`, `origin_sentence`), 結論 (決め方の項目 `RULE_KEYS`, 件数だけの結論 `conclude_outputs`, まとめからの文 `summary_sentences`), 撮影の深度から点 (`backproject`), 意思決定, 先の予測と列の効き, 方策の一式. 自作の繰り返しの手順 (`register_procedure`, `PROCEDURES`) と自作の部品 (`register_units`) の登録. 問題の設定 (ML-Quest) の損得と今のやり方は, 画面が引数で渡す |
 | ML-Found の学習のスクリプト (ML-Quest の骨組みを含む) | 学習の後に `make_bundle` で実験のディレクトリの中に一式を作る |
 
 ## 導入
@@ -328,6 +329,29 @@ result["summary"]["evaluations"]  # 実験の誤差, 弾力性, 見込みの利�
 result["decision"]["summary"]     # 値段を変える行の数, 見込みの利益の和, 差, 比
 result["decision"]["sentences"]   # [前提の文, ..., 'n 行のうち x 行の値段を変える ...', ...]
 write_result(result, "results/prices")
+```
+
+### 先の需要の分位点から発注の数を決める (一式の版 14)
+
+時間をまたぐ量の判断の実験 (需要の決め方 `demand_estimator.json`, 前処理のレシピの写し `demand_recipe.yaml`, 発注の数の表 `demand_orders.csv`, 重み `final_model.pt` と定義 `model_spec.yaml`) から一式を作る. 学習に使った元の日ごとの記録の表を渡すと, 一式で決めた発注の数を実験の発注の数と比べる. 推論に渡す日ごとの記録の表の商品ごとに, 最も遅い日を発注を決める日 (その日の売れた数は空でよい) として先の期間の需要の分位点を予測し, 水準 τ = 品切れの損 / (品切れの損 + 売れ残りの損) の分位点 (学んだ水準の間は直線で補い, 外は端の水準) から在庫の数を引いた数を, 整数にして 0 から上限 (`max_order`. 守る指標なので省けない) の間で発注する. 見込みの損は予測した分位点の分布から数えたもので, 実際の損は発注の後の売れた数で確かめる.
+
+```python
+from ml_inference import infer, make_demand_bundle, write_result
+
+make_demand_bundle("bundles/orders", "outputs/units_demand/run",
+                   data="data/daily.csv")
+
+# 商品ごとの発注を決める日の行 (元の列と status, reason, order_date,
+# on_hand, previous_demand, prediction, q:<水準>) と, 発注の判断の列
+# action, quantile, order, capped, expected_cost, baseline_order,
+# baseline_cost
+result = infer("bundles/orders", "daily.csv",
+               decision={"type": "order", "shortage_cost": 3,
+                         "holding_cost": 1, "max_order": 60})
+result["summary"]["evaluations"]  # 実験の分位点の損失と発注の数の損
+result["decision"]["summary"]     # 発注する商品の数, 発注の数の和, 見込みの損, 前の期間との比べ
+result["decision"]["sentences"]   # [前提の文, ..., 'n 商品のうち x 商品で発注する ...', ...]
+write_result(result, "results/orders")
 ```
 
 ### 何段も先を予測する
