@@ -92,7 +92,7 @@ def is_limit(value: Any) -> bool:
     found: bool
         null か, 真偽値でない正の有限の数なら True
     """
-    # 上限は無くてもよい
+    # 上限の無い null も可
     if value is None:
         return True
     found = isinstance(value, (int, float)) and not isinstance(
@@ -231,7 +231,7 @@ def read_index(path: Path) -> dict:
     ValueError
         形が違う場合
     """
-    # JSON の外の NaN と Infinity は読まない
+    # JSON の外の NaN と Infinity の拒否
     if not path.is_file():
         raise FileNotFoundError(f"索引の説明 {path} がありません")
     try:
@@ -264,7 +264,7 @@ def reject_constant(name: str) -> Any:
     ValueError
         いつも
     """
-    # json.loads の parse_constant に渡す
+    # json.loads の parse_constant に渡す関数
     raise ValueError(f"JSON の外の値 {name} があります")
 
 
@@ -293,7 +293,7 @@ def read_embeddings(path: Path, items: int, width: int) -> np.ndarray:
     ValueError
         形が違う場合, 数でない値がある場合, 長さが 0 の行がある場合
     """
-    # pickle の任意のコードは読まない
+    # pickle の任意のコードの読み込みの禁止
     if not path.is_file():
         raise FileNotFoundError(f"索引の埋め込み {path} がありません")
     try:
@@ -403,7 +403,7 @@ def run_sources(run: Union[str, Path]) -> dict:
     embeddings = read_embeddings(root / EMBEDDINGS_FILE,
                                  len(index["items"]), int(index["width"]))
 
-    # 種類のある索引だけが評価を持つ
+    # 評価は種類のある索引だけ
     labeled = index["items"][0].get("label") is not None
     evaluation_path = root / EVALUATION_FILE
     if labeled:
@@ -812,6 +812,7 @@ def predict_search(
     preprocess = bundle.info["ready"]["preprocess"]
     started = time.perf_counter()
     frame, images, reasons = read_images(source, preprocess)
+    # (読み込みは全ての写真をまとめて読むので, 1 枚あたりの平均)
     read_ms = (time.perf_counter() - started) * 1000 / max(len(frame), 1)
     model = bundle.model().to(device)
     unit = bundle.cache["search_unit"]

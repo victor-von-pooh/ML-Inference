@@ -19,11 +19,11 @@ from ml_inference.procedures import (
     get_procedure, make_generator, run_procedure, start_noise
 )
 from ml_inference.demand import demand_of_bundle, predict_demand
-from ml_inference.search import predict_search, search_of_bundle
 from ml_inference.grouping import group_of_bundle, predict_group
 from ml_inference.price import predict_price, price_of_bundle
 from ml_inference.ranking import predict_rank, rank_of_bundle
 from ml_inference.ready import read_images, weights_file
+from ml_inference.search import predict_search, search_of_bundle
 from ml_inference.tables import decode_table_rows, table_width
 from ml_inference.texts import ids_to_text, text_vocabulary
 from ml_inference.uplift import predict_uplift, uplift_of_bundle

@@ -258,7 +258,11 @@ def test_infer_and_decide_search(search: dict, tmp_path: Path) -> None:
     assert wide["summary"]["k"] == 3 and wide["decision"]["summary"][
         "returned"] == 6
     with pytest.raises(ValueError, match="検索の判断の k"):
-        infer(search["bundle"], search["queries"], k=4)
+        infer(search["bundle"], search["queries"], k=4,
+              decision={"type": "search", "k": 3})
+    given = infer(search["bundle"], search["queries"], k=4)
+    assert given["summary"]["k"] == 4
+    assert given["decision"]["decision"] == {"type": "search", "k": 4}
     plain = infer(search["bundle"], search["queries"], decision={})
     assert "decision" not in plain and "action" not in plain["frame"]
 

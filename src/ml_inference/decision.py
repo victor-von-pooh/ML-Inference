@@ -12,9 +12,9 @@ from ml_inference.baseline import (
 from ml_inference.bundle import Bundle, load_bundle
 from ml_inference.conclude import is_number, plain
 from ml_inference.demand import check_order_decision, decide_order
-from ml_inference.search import check_search_decision, decide_search
 from ml_inference.predict import lag_settings, predict
 from ml_inference.price import check_price_decision, decide_price
+from ml_inference.search import check_search_decision, decide_search
 from ml_inference.uplift import check_uplift_decision, decide_uplift
 
 # 意思決定の型と, 型ごとに書ける項目

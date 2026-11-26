@@ -130,7 +130,7 @@ def infer(
     k: Optional[int] = None
         並べるの一式の, 利用者ごとに並べる件数 (省くと一式の rank.k). 検索
         の一式の, 問いごとに返す件数 (省くと検索の判断の k か一式の
-        search.k)
+        search.k. 渡すと一式の既定の判断の k も同じ値)
     seen: Union[str, Path, pd.DataFrame, None] = None
         並べるの一式の, 前に反応した品物の表 (渡すと除いて並べる)
 
@@ -274,11 +274,14 @@ def infer_search(
         結論の決め方か何段も先の予測を渡した場合, 判断の k と渡した k が
         違う場合, 判断の決め方に誤りがある場合
     """
-    # 結論の決め方と何段も先の予測は誤り. 判断の k で並べる
+    # 結論の決め方と何段も先の予測の誤り. 渡した判断の k で並べ, 一式の
+    # 既定の判断は渡した k に合わせる
     if given or forecast:
         bundle.require_column("結論の決め方と何段も先の予測")
     if decision is None:
         decision = bundle.info.get("decision")
+        if decision and k is not None:
+            decision = {**decision, "k": k}
     wanted = decision.get("k") if isinstance(decision, dict) else None
     if decision and k is not None and wanted != k:
         raise ValueError(
