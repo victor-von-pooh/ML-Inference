@@ -1,6 +1,7 @@
 import json
 import math
 from pathlib import Path
+import shutil
 
 import numpy as np
 import pandas as pd
@@ -28,6 +29,12 @@ LEVELS = [0.1, 0.25, 0.5, 0.75, 0.9]
 SHORTAGE = 3
 HOLDING = 1
 MAX_ORDER = 60
+
+# ML-Quest の時間をまたぐ量の判断の骨組みの train.py を書き換えずに短く
+# 動かした実験の成果物と元の表 (ML-Quest の tests/test_demand_skeleton.py
+# の合成の表を 4 商品, 60 日にし, ML-ModelControl の同梱の例
+# tabular_demand の定義で CPU で 8 エポック)
+SKELETON_OUTPUT = Path(__file__).parent / "demand_skeleton"
 
 # 予測に使う列 (前処理の後)
 FEATURES = ["category", "units_lag1", "units_lag7", "units_mean7",
@@ -790,3 +797,57 @@ def test_demand_sources(
                                        allow_unicode=True), encoding="utf-8")
         with pytest.raises(ValueError, match=words):
             load_bundle(tmp_path / "bundle")
+
+
+def test_skeleton_output(tmp_path: Path) -> None:
+    """
+    骨組みが書いた成果物から一式を作り, 元の表で決めた発注の数が実験の
+    発注の数と一致することを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 実験の決め方 (在庫の数の列を使う発注の判断)
+    run = tmp_path / "run"
+    shutil.copytree(SKELETON_OUTPUT, run)
+    estimator = json.loads((run / "demand_estimator.json")
+                           .read_text("utf-8"))
+    assert (estimator["stock"], estimator["levels"]) == ("stock", LEVELS)
+    assert (estimator["shortage_cost"], estimator["holding_cost"],
+            estimator["max_order"]) == (SHORTAGE, HOLDING, MAX_ORDER)
+
+    # 一式づくりと, 元の表で決めた発注の数と実験の発注の数の比べ
+    info = make_demand_bundle(tmp_path / "bundle", run,
+                              data=run / "daily.csv")
+    orders = pd.read_csv(run / "demand_orders.csv")
+    assert info["format_version"] == 14
+    assert info["decision"] == {"type": "order", "shortage_cost": SHORTAGE,
+                                "holding_cost": HOLDING,
+                                "max_order": MAX_ORDER}
+    check = info["demand"]["check"]
+    assert check["rows"] == len(orders)
+    assert check["agreement"] == 1.0
+    # (骨組みの float32 のまとまりごとの予測との丸めの分)
+    assert check["max_diff"] < 1e-4
+    assert set(info["demand"]["evaluations"]) == {"valid", "test"}
+    assert not info["notes"]
+
+    # 発注を決める日までの表での推論の, 商品ごとの発注の数と在庫と前の期間
+    rows = pd.read_csv(run / "daily.csv")
+    for day, recorded in orders.groupby("date"):
+        result = infer(tmp_path / "bundle", rows[rows["date"] <= day])
+        decided = result["frame"].set_index("product_id")
+        decided = decided.loc[recorded["product_id"]]
+        assert (decided["order_date"] == day).all()
+        np.testing.assert_array_equal(decided["order"], recorded["order"])
+        np.testing.assert_allclose(decided["quantile"],
+                                   recorded["quantile"], atol=1e-4)
+        np.testing.assert_allclose(decided["on_hand"], recorded["stock"])
+        np.testing.assert_allclose(decided["previous_demand"],
+                                   recorded["previous"])

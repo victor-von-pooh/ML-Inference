@@ -1,0 +1,47 @@
+{
+  "name": "demand_valid",
+  "split": "valid",
+  "kind": "table",
+  "x": null,
+  "columns": [
+    "rows",
+    "products",
+    "mae",
+    "pinball_loss",
+    "order_cost",
+    "baseline_cost",
+    "order_cost_saving",
+    "order_cost_ratio",
+    "capped",
+    "level",
+    "max_order"
+  ],
+  "rows": [
+    {
+      "rows": 4,
+      "products": 4,
+      "mae": 39.81258261203766,
+      "pinball_loss": 19.391880197227003,
+      "order_cost": 465.0,
+      "baseline_cost": 50.0,
+      "order_cost_saving": -415.0,
+      "order_cost_ratio": 9.3,
+      "capped": 0,
+      "level": 0.75,
+      "max_order": 60.0
+    }
+  ],
+  "description": "検証用の発注を決める日の行 (4 行. 商品 4) の, 先の 7 日の需要の 0.5 の分位点の平均絶対誤差 (mae), 学んだ水準 [0.1, 0.25, 0.5, 0.75, 0.9] の分位点の損失の平均 (pinball_loss) と, 水準 τ = 0.75 の分位点から在庫の数を引き, 0 から上限 60 の間の整数にした発注の数での実際の損の和 (order_cost. 品切れの損 3 × 足りない数 + 売れ残りの損 1 × 余った数. 売れる数は在庫の数 + 発注の数) と, 前の期間と同じ数を発注したときの損の和 (baseline_cost), その差 (order_cost_saving. 大きいほど良い) と比 (order_cost_ratio. 小さいほど良い. 前の期間の損が 0 なら空). capped は上限で切った行の数 (最良のモデル)",
+  "baseline": null,
+  "guard": false,
+  "better": {
+    "mae": "lower",
+    "pinball_loss": "lower",
+    "order_cost": "lower",
+    "baseline_cost": "lower",
+    "order_cost_saving": "higher",
+    "order_cost_ratio": "lower"
+  },
+  "epoch": 8,
+  "created_at": "2026-11-27T02:12:16+09:00"
+}
