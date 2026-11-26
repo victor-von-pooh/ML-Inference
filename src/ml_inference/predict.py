@@ -18,6 +18,7 @@ from ml_inference.items import (
 from ml_inference.procedures import (
     get_procedure, make_generator, run_procedure, start_noise
 )
+from ml_inference.demand import demand_of_bundle, predict_demand
 from ml_inference.grouping import group_of_bundle, predict_group
 from ml_inference.price import predict_price, price_of_bundle
 from ml_inference.ranking import predict_rank, rank_of_bundle
@@ -1236,7 +1237,9 @@ def predict(
         reason, score, rank, column, column_share. 効果の一式は元の列と
         status, reason, effect, treated, control, rank. 値段の一式は元の列
         と status, reason, current_price, cost, units, current_profit,
-        elasticity)
+        elasticity. 需要の一式は商品ごとの発注を決める日の行の元の列と
+        status, reason, order_date, on_hand, previous_demand, prediction,
+        q:<水準>)
 
     Raises
     ----------
@@ -1274,6 +1277,9 @@ def predict(
         return result
     if bundle.from_price:
         result = predict_price(bundle, source, options, batch_size, device)
+        return result
+    if bundle.from_demand:
+        result = predict_demand(bundle, source, options, batch_size, device)
         return result
     if bundle.from_items:
         result = predict_items(bundle, source, batch_size, device)
@@ -1814,16 +1820,19 @@ def describe_bundle(bundle: Union[str, Path, Bundle]) -> dict:
         bundle = load_bundle(bundle)
     info = bundle.info
     model = info.get("model") or {}
-    # (異常の度合いの一式と効果の一式と値段の一式は前処理だけのデータ
-    # セット. 目的の列は推論で使わない異常の正解か結果か売れた数なので除外)
+    # (異常の度合いの一式と効果の一式と値段の一式と需要の一式は前処理だけ
+    # のデータセット. 目的の列は推論で使わない異常の正解か結果か売れた数か
+    # 先の期間の合計なので除外)
     prepared = bundle.cache["anomaly_dataset"] if bundle.from_anomaly else (
         bundle.cache["uplift_dataset"] if bundle.from_uplift
         else bundle.cache["price_dataset"] if bundle.from_price
+        else bundle.cache["demand_dataset"] if bundle.from_demand
         else bundle.dataset
     )
     dataset = prepared.info
     column = None if (
         bundle.from_anomaly or bundle.from_uplift or bundle.from_price
+        or bundle.from_demand
     ) else dataset.get("target")
     description: dict[str, Any] = {
         "path": str(bundle.path),
@@ -1877,6 +1886,7 @@ def describe_bundle(bundle: Union[str, Path, Bundle]) -> dict:
         "anomaly": anomaly_of_bundle(bundle),
         "uplift": uplift_of_bundle(bundle),
         "price": price_of_bundle(bundle),
+        "demand": demand_of_bundle(bundle),
     }
 
     return description

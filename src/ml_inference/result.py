@@ -18,6 +18,7 @@ from ml_inference.forecast import forecast as forecast_rows
 from ml_inference.predict import (
     ARRAY_FORMS, OK, noise_request, predict, target_of
 )
+from ml_inference.demand import conclude_demand
 from ml_inference.grouping import conclude_groups
 from ml_inference.price import conclude_price
 from ml_inference.ranking import conclude_ranking, request_users
@@ -157,8 +158,10 @@ def infer(
 
     # 異常の度合いの一式は度合いの要約と度合いの上位から回す振り分け,
     # 効果の一式は効果の要約と効果の上位から配る判断, 値段の一式は売れた数
-    # と弾力性の要約と値段の判断
-    if bundle.from_anomaly or bundle.from_uplift or bundle.from_price:
+    # と弾力性の要約と値段の判断, 需要の一式は分位点の要約と発注の判断
+    if bundle.from_anomaly or bundle.from_uplift or bundle.from_price or (
+        bundle.from_demand
+    ):
         result = infer_ranked(bundle, source, given, options, batch_size,
                               device, forecast, decision)
         return result
@@ -225,12 +228,12 @@ def infer_ranked(
     batch_size: int, device: str, forecast: bool, decision: Optional[dict]
 ) -> dict:
     """
-    異常の度合いか効果か売れた数と, 要約と判断を出す関数
+    異常の度合いか効果か売れた数か需要の分位点と, 要約と判断を出す関数
 
     Parameters
     ----------
     bundle: Bundle
-        異常の度合いの一式か効果の一式か値段の一式
+        異常の度合いの一式か効果の一式か値段の一式か需要の一式
     source: Any
         表のファイル, 表, 表の Data
     given: dict
@@ -244,8 +247,8 @@ def infer_ranked(
     forecast: bool
         何段も先の予測 (使えないので False だけ)
     decision: Optional[dict]
-        振り分けか配る判断か値段の判断の決め方 (省略すると一式の既定.
-        空の辞書で決めない)
+        振り分けか配る判断か値段の判断か発注の判断の決め方 (省略すると
+        一式の既定. 空の辞書で決めない)
 
     Returns
     ----------
@@ -267,6 +270,8 @@ def infer_ranked(
         bundle.from_uplift
     ) else conclude_price(bundle, prediction) if (
         bundle.from_price
+    ) else conclude_demand(bundle, prediction) if (
+        bundle.from_demand
     ) else conclude_anomaly(bundle, prediction)
     if decision is None:
         decision = bundle.info.get("decision")

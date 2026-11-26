@@ -15,6 +15,7 @@ from ml_inference.conclude import (
 from ml_inference.decision import (
     GUARD_COUNTS, GUARD_UNCOUNTED, backtest, check_decision, decide
 )
+from ml_inference.demand import make_demand_bundle
 from ml_inference.explain import explain, explain_rows
 from ml_inference.forecast import forecast
 from ml_inference.grouping import (
@@ -93,6 +94,7 @@ __all__ = [
     "load_policy",
     "make_anomaly_bundle",
     "make_bundle",
+    "make_demand_bundle",
     "make_generator",
     "make_group_bundle",
     "make_price_bundle",
