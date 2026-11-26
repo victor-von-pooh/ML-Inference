@@ -717,22 +717,22 @@ def score_parts(
 
 
 def row_features(
-    bundle: Bundle, frame: pd.DataFrame
+    dataset: Dataset, frame: pd.DataFrame
 ) -> tuple[np.ndarray, list[str]]:
     """
-    表に前処理をかけ, 度合いに使う列と行ごとの理由を返す関数
+    表に前処理をかけ, 使う列と行ごとの理由を返す関数
 
     Parameters
     ----------
-    bundle: Bundle
-        異常の度合いの一式
+    dataset: Dataset
+        前処理だけのデータセット (異常の度合いの一式と効果の一式)
     frame: pd.DataFrame
         元の列の表
 
     Returns
     ----------
     found: tuple[np.ndarray, list[str]]
-        (件数, 列の数) の float32 の配列と, 行ごとの度合いを出さない理由
+        (件数, 列の数) の float32 の配列と, 行ごとの値を出さない理由
         (出す行は空の文字)
 
     Raises
@@ -741,7 +741,7 @@ def row_features(
         前処理に要る列が無い場合 (ML-EDA の誤り)
     """
     # 当てはめた値のままの前処理 (行を落とす手順で落ちた行は欠損)
-    transformed = bundle.cache["anomaly_dataset"].transform(frame)
+    transformed = dataset.transform(frame)
     reasons = [""] * len(transformed)
     for row, op in (transformed.attrs.get("dropped") or {}).items():
         reasons[int(row)] = (
@@ -799,7 +799,7 @@ def predict_anomaly(
     """
     # 表の読み込みと前処理, 出せる行だけの度合い
     frame = read_table(source, options, "異常の度合いを出す表")
-    x, reasons = row_features(bundle, frame)
+    x, reasons = row_features(bundle.cache["anomaly_dataset"], frame)
     features = bundle.info["anomaly"]["features"]
     scores = np.full(len(x), math.nan)
     columns: list = [None] * len(x)

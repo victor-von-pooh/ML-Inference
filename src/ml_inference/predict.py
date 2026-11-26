@@ -23,6 +23,7 @@ from ml_inference.ranking import predict_rank, rank_of_bundle
 from ml_inference.ready import read_images, weights_file
 from ml_inference.tables import decode_table_rows, table_width
 from ml_inference.texts import ids_to_text, text_vocabulary
+from ml_inference.uplift import predict_uplift, uplift_of_bundle
 
 # 予測しなかった行の印
 OK, SKIPPED = "ok", "skipped"
@@ -1231,7 +1232,8 @@ def predict(
         (表の出力は列の符号化の列. 並べるの一式は利用者と順位ごとの user,
         status, reason, rank, item, score. 群分けの一式は元の列と status,
         reason, group, distance. 異常の度合いの一式は元の列と status,
-        reason, score, rank, column, column_share)
+        reason, score, rank, column, column_share. 効果の一式は元の列と
+        status, reason, effect, treated, control, rank)
 
     Raises
     ----------
@@ -1263,6 +1265,9 @@ def predict(
     if bundle.from_anomaly:
         result = predict_anomaly(bundle, source, options, batch_size,
                                  device)
+        return result
+    if bundle.from_uplift:
+        result = predict_uplift(bundle, source, options, batch_size, device)
         return result
     if bundle.from_items:
         result = predict_items(bundle, source, batch_size, device)
@@ -1803,13 +1808,16 @@ def describe_bundle(bundle: Union[str, Path, Bundle]) -> dict:
         bundle = load_bundle(bundle)
     info = bundle.info
     model = info.get("model") or {}
-    # (異常の度合いの一式は前処理だけのデータセット. 目的の列は推論で
-    # 使わない異常の正解なので除外)
+    # (異常の度合いの一式と効果の一式は前処理だけのデータセット. 目的の
+    # 列は推論で使わない異常の正解か結果なので除外)
     prepared = bundle.cache["anomaly_dataset"] if bundle.from_anomaly else (
-        bundle.dataset
+        bundle.cache["uplift_dataset"] if bundle.from_uplift
+        else bundle.dataset
     )
     dataset = prepared.info
-    column = None if bundle.from_anomaly else dataset.get("target")
+    column = None if bundle.from_anomaly or bundle.from_uplift else (
+        dataset.get("target")
+    )
     description: dict[str, Any] = {
         "path": str(bundle.path),
         "name": info.get("name"),
@@ -1860,6 +1868,7 @@ def describe_bundle(bundle: Union[str, Path, Bundle]) -> dict:
         "rank": rank_of_bundle(bundle),
         "group": group_of_bundle(bundle),
         "anomaly": anomaly_of_bundle(bundle),
+        "uplift": uplift_of_bundle(bundle),
     }
 
     return description

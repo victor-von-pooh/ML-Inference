@@ -20,6 +20,7 @@ from ml_inference.predict import (
 )
 from ml_inference.grouping import conclude_groups
 from ml_inference.ranking import conclude_ranking, request_users
+from ml_inference.uplift import conclude_uplift
 
 # 結果のファイル (result.yaml) の形の版 (混ざる列を残せば 4, 列の型を
 # 残せば 3, 表に収まらない中身があれば 2, どれも無ければ 1)
@@ -153,10 +154,11 @@ def infer(
         merged.pop("threshold", None)
     merged = {k: v for k, v in merged.items() if v is not None}
 
-    # 異常の度合いの一式は, 度合いの要約と度合いの上位から回す振り分け
-    if bundle.from_anomaly:
-        result = infer_anomaly(bundle, source, given, options, batch_size,
-                               device, forecast, decision)
+    # 異常の度合いの一式は度合いの要約と度合いの上位から回す振り分け,
+    # 効果の一式は効果の要約と効果の上位から配る判断
+    if bundle.from_anomaly or bundle.from_uplift:
+        result = infer_ranked(bundle, source, given, options, batch_size,
+                              device, forecast, decision)
         return result
 
     # 列の出力でない一式は, 推論と件数だけ (並べるの一式は利用者の人数,
@@ -216,17 +218,17 @@ def infer(
     return result
 
 
-def infer_anomaly(
+def infer_ranked(
     bundle: Bundle, source: Any, given: dict, options: Optional[dict],
     batch_size: int, device: str, forecast: bool, decision: Optional[dict]
 ) -> dict:
     """
-    異常の度合いと, 要約と振り分けを出す関数
+    異常の度合いか効果と, 要約と上位から上限までの判断を出す関数
 
     Parameters
     ----------
     bundle: Bundle
-        異常の度合いの一式
+        異常の度合いの一式か効果の一式
     source: Any
         表のファイル, 表, 表の Data
     given: dict
@@ -240,25 +242,28 @@ def infer_anomaly(
     forecast: bool
         何段も先の予測 (使えないので False だけ)
     decision: Optional[dict]
-        振り分けの決め方 (省略すると一式の既定. 空の辞書で振り分けない)
+        振り分けか配る判断の決め方 (省略すると一式の既定. 空の辞書で
+        決めない)
 
     Returns
     ----------
     result: dict
-        bundle, source, created_at, form, frame (振り分けると action の列
-        も), summary, sentences, rules (空), (振り分けると) decision
+        bundle, source, created_at, form, frame (決めると action の列
+        も), summary, sentences, rules (空), (決めると) decision
 
     Raises
     ----------
     ValueError
-        結論の決め方か何段も先の予測を渡した場合と, 振り分けの決め方に
-        誤りがある場合
+        結論の決め方か何段も先の予測を渡した場合と, 判断の決め方に誤りが
+        ある場合
     """
     # 結論の決め方と何段も先の予測は誤り
     if given or forecast:
         bundle.require_column("結論の決め方と何段も先の予測")
     prediction = predict(bundle, source, options, batch_size, device)
-    conclusion = conclude_anomaly(bundle, prediction)
+    conclusion = conclude_uplift(bundle, prediction) if (
+        bundle.from_uplift
+    ) else conclude_anomaly(bundle, prediction)
     if decision is None:
         decision = bundle.info.get("decision")
     if decision:

@@ -41,6 +41,7 @@ from ml_inference.result import (
 from ml_inference.reviews import read_reviews, record_review
 from ml_inference.samples import make_sample_bundle
 from ml_inference.units import UnregisteredUnitError, register_units
+from ml_inference.uplift import make_uplift_bundle
 
 try:
     __version__ = metadata.version("ml-inference")
@@ -96,6 +97,7 @@ __all__ = [
     "make_rank_bundle",
     "make_ready_bundle",
     "make_sample_bundle",
+    "make_uplift_bundle",
     "origin_sentence",
     "predict",
     "procedure_options",
