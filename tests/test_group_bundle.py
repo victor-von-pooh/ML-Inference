@@ -13,9 +13,9 @@ from ml_modelcontrol import build_model, load_example
 
 import ml_inference.bundle as bundle_module
 from ml_inference import (
-    describe_bundle, group_representatives, group_summary, infer,
-    load_bundle, make_bundle, make_group_bundle, predict, read_result,
-    write_result
+    describe_bundle, group_far, group_representatives, group_summary,
+    infer, load_bundle, make_bundle, make_group_bundle, predict,
+    read_result, write_result
 )
 
 # 群の数と, 群ごとの行の数
@@ -26,13 +26,14 @@ ROWS = 20
 BASELINE = "列の特徴をそのまま k-means で分けた群"
 
 
-def customer_rows() -> pd.DataFrame:
+def customer_rows(count: int = ROWS) -> pd.DataFrame:
     """
     3 つのはっきりした群のある, 合成の顧客の表を作る関数
 
     Parameters
     ----------
-    None
+    count: int = ROWS
+        群ごとの行の数
 
     Returns
     ----------
@@ -43,7 +44,7 @@ def customer_rows() -> pd.DataFrame:
     rng = np.random.default_rng(0)
     rows = []
     for group in range(GROUPS):
-        for number in range(ROWS):
+        for number in range(count):
             rows.append({
                 "customer": f"c{group}_{number}",
                 "spend": float(rng.normal(1000 * (group + 1), 50)),
@@ -380,11 +381,11 @@ def test_make_group_bundle(tmp_path: Path, group_run: Path) -> None:
     ----------
     None
     """
-    # 版 9 で, 列の符号化と群の中心を写す
+    # 学習の表を渡すと遠さの上限を持つ版 16. 列の符号化と群の中心の写し
     frame = customer_rows()
     root = tmp_path / "bundle"
     info = make_group_bundle(root, group_run, data=frame)
-    assert info["format_version"] == 9
+    assert info["format_version"] == 16
     assert (info["role"], info["output"]) == ("group", {"form": "cluster"})
     assert (root / "group_centers.json").is_file()
     group = info["group"]
@@ -415,8 +416,11 @@ def test_make_group_bundle(tmp_path: Path, group_run: Path) -> None:
                              data=frame.iloc[:10])
     assert info["group"]["check"] is None
     assert any("行の数 10" in note for note in info["notes"])
+    assert info["group"]["far"]["rows"] == 10
     info = make_group_bundle(tmp_path / "plain", group_run)
     assert info["group"]["check"] is None
+    assert info["format_version"] == 9 and "far" not in info["group"]
+    assert any("遠い行に印を付けません" in note for note in info["notes"])
 
 
 def test_predict_group(tmp_path: Path, group_run: Path) -> None:
@@ -923,3 +927,201 @@ def test_group_result_keeps_mixed(tmp_path: Path, group_run: Path) -> None:
                        result["summary"]["groups"])
     assert same_values(group_representatives(root, back),
                        result["summary"]["representatives"])
+
+
+def test_far_rows(tmp_path: Path, group_run: Path) -> None:
+    """
+    学習の表から求めた群ごとの距離の上限で, 学習の行には印が付かず, 学習の
+    ときより遠い行に印と件数が付くことを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    group_run: Path
+        実験のディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 群の行が 100 以下なので, 上限は群の学習の行の距離の最も大きい値
+    frame = customer_rows()
+    root = tmp_path / "bundle"
+    info = make_group_bundle(root, group_run, data=frame)
+    far = info["group"]["far"]
+    assert (far["quantile"], far["rows"]) == (0.99, 60)
+    train = predict(root, frame)
+    for key in range(GROUPS):
+        assert far["thresholds"][key] == pytest.approx(
+            train["distance"][train["group"] == key].max()
+        )
+    assert list(train.columns[-5:]) == ["status", "reason", "group",
+                                        "distance", "far"]
+    assert train["far"].dtype == bool and not train["far"].any()
+
+    # 学習のときに無い大きな額と回数の行の印 (割り当てない行は印無し)
+    new = pd.concat([frame.iloc[1:6], pd.DataFrame([
+        {"customer": "big", "spend": 1e6, "visits": 500, "region": "north"},
+        {"customer": "bad", "spend": "?", "visits": 1, "region": "north"},
+    ])], ignore_index=True)
+    result = infer(root, new)
+    marks = result["frame"]["far"]
+    assert list(marks) == [False] * 5 + [True, False]
+    big = int(result["frame"]["group"][5])
+    summary = result["summary"]["far"]
+    assert (summary["quantile"], summary["rows"]) == (0.99, 1)
+    assert [row["rows"] for row in summary["groups"]] == [
+        int(key == big) for key in range(GROUPS)
+    ]
+    assert [row["threshold"] for row in summary["groups"]] == (
+        far["thresholds"]
+    )
+    assert result["sentences"][2] == (
+        "1 行は群の中心から学習のときより遠い (群ごとの学習の行の距離の "
+        f"99 % 点を超える. 群 {big} 1 行)"
+    )
+    assert group_far(root, result["frame"]) == summary
+    assert infer(root, frame)["sentences"][2] == (
+        "群の中心から学習のときより遠い行は無い (群ごとの学習の行の距離の "
+        "99 % 点まで)"
+    )
+
+    # 書き出して読んだ表の同じ印と件数
+    out = tmp_path / "result"
+    write_result(result, out)
+    loaded = read_result(out)
+    assert loaded["frame"]["far"].tolist() == marks.tolist()
+    assert loaded["summary"]["far"] == summary
+    assert group_far(root, loaded["frame"]) == summary
+    with pytest.raises(ValueError, match="far の列がありません"):
+        group_far(root, result["frame"].drop(columns="far"))
+
+
+def test_far_training_rows_rarely(tmp_path: Path) -> None:
+    """
+    群ごとの行が多い学習の表でも, 上限を超える学習の行が群ごとに 1 % 以下
+    であることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 群ごとに 300 行の学習の表
+    frame = customer_rows(300)
+    run = write_group_run(tmp_path / "run", frame)
+    root = tmp_path / "bundle"
+    make_group_bundle(root, run, data=frame)
+    prediction = predict(root, frame)
+
+    # 印の付く学習の行は群ごとに 1 % 以下 (99 % 点を超える行だけ)
+    marks = prediction["far"]
+    for key in range(GROUPS):
+        inside = prediction["group"] == key
+        assert marks[inside].mean() <= 0.01
+    assert 0 < marks.sum() <= 0.01 * len(frame)
+
+
+def test_far_without_limits(tmp_path: Path, group_run: Path) -> None:
+    """
+    上限を持たない版 9 の一式は印の列を持たず, 上限を持つ一式だけが元の
+    far の列に「(入力)」を付けることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    group_run: Path
+        実験のディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 学習の表を渡さない版 9 の一式の, そのままの元の far の列
+    frame = customer_rows().assign(far="x")
+    root = tmp_path / "plain"
+    make_group_bundle(root, group_run)
+    result = infer(root, frame)
+    assert list(result["frame"]["far"]) == ["x"] * len(frame)
+    assert "far (入力)" not in result["frame"].columns
+    assert result["summary"]["far"] is None
+    assert len(result["sentences"]) == 3
+    assert group_far(root, result["frame"]) is None
+
+    # 上限を持つ一式の「(入力)」付きの元の列と群の要約
+    limited = tmp_path / "limited"
+    make_group_bundle(limited, group_run, data=customer_rows())
+    prediction = predict(limited, frame)
+    assert list(prediction["far (入力)"]) == ["x"] * len(frame)
+    assert prediction["far"].dtype == bool
+    assert group_summary(limited, prediction)[-1]["rows"] == len(frame)
+
+
+def test_far_errors(
+    tmp_path: Path, group_run: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    上限の形の誤りと版の食い違いと, 上限の無い群の扱いを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    group_run: Path
+        実験のディレクトリ
+    monkeypatch: pytest.MonkeyPatch
+        版を差し替える
+
+    Returns
+    ----------
+    None
+    """
+    # 版 15 までしか知らない読む側の停止
+    frame = customer_rows()
+    root = tmp_path / "bundle"
+    make_group_bundle(root, group_run, data=frame)
+    monkeypatch.setattr(bundle_module, "BUNDLE_FORMAT_VERSION", 15)
+    with pytest.raises(ValueError, match="format_version 16 の一式"):
+        load_bundle(root)
+    monkeypatch.undo()
+
+    # 上限の形と版の食い違い
+    file = root / "inference.yaml"
+    info = yaml.safe_load(file.read_text(encoding="utf-8"))
+    group = info["group"]
+    far = group["far"]
+    plain = {key: value for key, value in group.items() if key != "far"}
+    cases: list[tuple[dict, str]] = [
+        ({"group": plain}, "group.far は quantile"),
+        ({"format_version": 9}, "版 9 の一式は group.far を持てません"),
+        ({"group": {**group, "far": {**far, "quantile": 1.5}}},
+         "group.far.quantile"),
+        ({"group": {**group, "far": {**far, "rows": 0}}}, "group.far.rows"),
+        ({"group": {**group, "far": {**far,
+                                     "thresholds": far["thresholds"][:2]}}},
+         "group.far.thresholds"),
+        ({"group": {**group, "far": {**far,
+                                     "thresholds": [-1.0, None, 1.0]}}},
+         "group.far.thresholds"),
+        ({"group": {**group, "far": {**far, "extra": 1}}}, "知らない欄"),
+    ]
+    for change, message in cases:
+        file.write_text(yaml.safe_dump({**info, **change},
+                                       allow_unicode=True), encoding="utf-8")
+        with pytest.raises(ValueError, match=message):
+            load_bundle(root)
+
+    # 上限の無い群の行の印無し
+    limits = {**far, "thresholds": [None] * GROUPS}
+    file.write_text(yaml.safe_dump(
+        {**info, "group": {**group, "far": limits}}, allow_unicode=True
+    ), encoding="utf-8")
+    big = pd.DataFrame([{"customer": "big", "spend": 1e6, "visits": 500,
+                         "region": "north"}])
+    assert not predict(root, big)["far"].any()

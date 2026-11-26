@@ -19,7 +19,7 @@ from ml_inference.demand import make_demand_bundle
 from ml_inference.explain import explain, explain_rows
 from ml_inference.forecast import forecast
 from ml_inference.grouping import (
-    group_representatives, group_summary, make_group_bundle
+    group_far, group_representatives, group_summary, make_group_bundle
 )
 from ml_inference.items import POINT_KINDS, backproject, describe_items
 from ml_inference.policy import (
@@ -88,6 +88,7 @@ __all__ = [
     "explain_rows",
     "forecast",
     "get_procedure",
+    "group_far",
     "group_representatives",
     "group_summary",
     "infer",
