@@ -1274,13 +1274,14 @@ def order_cost(
     demand: Any
         行ごとの実際の需要 (0 以上) の 1 次元の並び
     order: Any
-        行ごとの発注の数 (0 以上) の 1 次元の並び
+        行ごとの売れる数 (在庫の数 + 発注の数. 0 以上) の 1 次元の並び
     shortage_cost: Any
         1 つ足りないときの損 (正の数)
     holding_cost: Any
         1 つ余ったときの損 (正の数)
     baseline: Any = None
-        比べる発注の数 (0 以上) の並び (None は比べない)
+        比べる売れる数 (在庫の数 + 比べる発注の数. 0 以上) の並び (None
+        は比べない)
 
     Returns
     ----------
@@ -1304,9 +1305,9 @@ def order_cost(
     shortage = float(decimal_of(shortage_cost))
     holding = float(decimal_of(holding_cost))
     demand = np.asarray(demand, dtype=np.float64).reshape(-1)
-    named = {"発注の数": order}
+    named = {"売れる数": order}
     if baseline is not None:
-        named["比べる発注の数"] = baseline
+        named["比べる売れる数"] = baseline
     arrays = {}
     for name, value in named.items():
         array = np.asarray(value, dtype=np.float64).reshape(-1)
@@ -1318,8 +1319,8 @@ def order_cost(
         if not (np.isfinite(array).all() and (array >= 0).all()):
             raise ValueError(f"{name}は 0 以上の有限の数にしてください")
 
-    # 行ごとの損と, 比べる発注の数での損, 差と比
-    short, excess, cost = row_costs(demand, arrays["発注の数"], shortage,
+    # 行ごとの損と, 比べる売れる数での損, 差と比
+    short, excess, cost = row_costs(demand, arrays["売れる数"], shortage,
                                     holding)
     total = float(cost.sum())
     found: dict = {
@@ -1329,7 +1330,7 @@ def order_cost(
         "ratio": math.nan,
     }
     if baseline is not None:
-        compared = row_costs(demand, arrays["比べる発注の数"], shortage,
+        compared = row_costs(demand, arrays["比べる売れる数"], shortage,
                              holding)[2]
         baseline_total = float(compared.sum())
         found["items"]["baseline_cost"] = compared.tolist()
