@@ -17,6 +17,7 @@
 - **効果の一式**: 無作為に配った記録から学んだ, 処置の群と対照の群の 2 つの予測 (ML-Quest の効果の見積もりの骨組みの実験) から一式を作り, 新しい行の効果 (クーポンを配ったときに買う確率がどれだけ上がるか) を見積もって, 効果の高い順に配る数の上限まで配る. 実験の Qini の係数と上位 K 割の効果の差を結論に写し, 処置と結果のある表では数え直す
 - **値段の一式**: 試しに値段を変えた売れ行きの記録から学んだ, 値段を入力に入れて売れた数を予測するモデル (ML-Quest の値段を変える判断の骨組みの実験) から一式を作り, 新しい行の値段を今の値段として候補の値段ごとに売れた数を予測し, 変える幅の上限の中で見込みの利益 ((値段 − 原価) × 予測した数) が最も大きい値段を選ぶ. 実験の誤差, 弾力性, 見込みの利益の比べを結論に写し, 売れた数のある表では誤差を数え直す
 - **需要の一式**: 商品ごとの日ごとの売れた数の記録から学んだ, 先の期間の需要の分位点を予測するモデル (ML-Quest の時間をまたぐ量の判断の学習のスクリプトの実験) から一式を作り, 日ごとの記録の表の商品ごとに最後の日を発注を決める日として先の期間の需要の分位点を予測し, 品切れの損と売れ残りの損の比から決まる水準の分位点から在庫の数を引いた数を, 発注の数の上限の中で発注する. 見込みの損と, 前の期間と同じ数を発注する決め方との比べを結論に出す
+- **検索の一式**: 学習しない既製のモデルの埋め込みの索引 (ML-Quest の似た写真を探す骨組みの成果物) から一式を作り, 問いの写真ごとに余弦の近さで近い写真を登録した写真から上位 K 件返す. 1 件の問いの待ち時間を測り, 上限を超えた問いの数を知らせる. 骨組みの Recall@K と NDCG@K を結論に写す
 - **見本の一式**: 表か文のデータから小さなモデルをその場で学習し, 画面で操作を試すための一式を作る
 
 前処理は [ML-EDA](https://github.com/victor-von-pooh/ML-EDA), モデルの組み立ては [ML-ModelControl](https://github.com/victor-von-pooh/ML-ModelControl) を使い, [ML-Found](https://github.com/victor-von-pooh/ML-Found) で学習した重みを読む.
@@ -352,6 +353,25 @@ result["summary"]["evaluations"]  # 実験の分位点の損失と発注の数�
 result["decision"]["summary"]     # 発注する商品の数, 発注の数の和, 見込みの損, 前の期間との比べ
 result["decision"]["sentences"]   # [前提の文, ..., 'n 商品のうち x 商品で発注する ...', ...]
 write_result(result, "results/orders")
+```
+
+### 問いの写真に近い写真を返す (一式の版 15)
+
+似た写真を探す骨組みの成果物 (埋め込みを作った既製のモデルと索引の写真の並び `search_index.json`, 索引の埋め込み `search_embeddings.npy`, 写真に種類があれば検証用の問いの評価 `evaluations/search_valid.json`) から一式を作る. 索引の埋め込みを一式に持つので, 推論のときに索引の写真を埋め込み直さない. 問いの写真を 1 枚ずつ既製のモデルで埋め込み, 索引の写真との余弦の近さで近い順に上位 K 件を返し (問いと中身が同じ索引の写真は除く), 1 件の問いの待ち時間を測って, 上限 (`max_latency_ms`. 守る指標) を超えた問いの数を知らせる.
+
+```python
+from ml_inference import infer, make_search_bundle, write_result
+
+make_search_bundle("bundles/similar", "outputs/similar/artifacts")
+
+# 問いと順位ごとの行 (画像の読み込みの表の列と status, reason, rank,
+# item, label, similarity, latency_ms) と, 検索の判断の列 action
+result = infer("bundles/similar", "queries/",
+               decision={"type": "search", "k": 5})
+result["summary"]["latency"]      # 待ち時間の中央値と最大 (ms)
+result["summary"]["evaluation"]   # 骨組みの Recall@K と NDCG@K と比べる相手との差
+result["sentences"]               # ['問いの写真 n 枚のうち m 枚に, 索引の写真 N 枚から近い順に上位 5 件を並べた', ...]
+write_result(result, "results/similar")
 ```
 
 ### 何段も先を予測する

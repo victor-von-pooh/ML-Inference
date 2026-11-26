@@ -19,6 +19,7 @@ from ml_inference.procedures import (
     get_procedure, make_generator, run_procedure, start_noise
 )
 from ml_inference.demand import demand_of_bundle, predict_demand
+from ml_inference.search import predict_search, search_of_bundle
 from ml_inference.grouping import group_of_bundle, predict_group
 from ml_inference.price import predict_price, price_of_bundle
 from ml_inference.ranking import predict_rank, rank_of_bundle
@@ -1222,7 +1223,8 @@ def predict(
     device: str = "cpu"
         使うデバイス
     k: Optional[int] = None
-        並べるの一式の, 利用者ごとに並べる件数 (省くと一式の rank.k)
+        並べるの一式の, 利用者ごとに並べる件数 (省くと一式の rank.k). 検索
+        の一式の, 問いごとに返す件数 (省くと一式の search.k)
     seen: Union[str, Path, pd.DataFrame, None] = None
         並べるの一式の, 前に反応した品物の表 (渡すと除いて並べる)
 
@@ -1239,7 +1241,8 @@ def predict(
         と status, reason, current_price, cost, units, current_profit,
         elasticity. 需要の一式は商品ごとの発注を決める日の行の元の列と
         status, reason, order_date, on_hand, previous_demand, prediction,
-        q:<水準>)
+        q:<水準>. 検索の一式は問いと順位ごとの画像の読み込みの表の列と
+        status, reason, rank, item, label, similarity, latency_ms)
 
     Raises
     ----------
@@ -1260,10 +1263,18 @@ def predict(
             )
         result = predict_rank(bundle, source, k, seen, batch_size, device)
         return result
+    if bundle.from_search:
+        if options or seen is not None:
+            raise ValueError(
+                "検索の一式は問いの写真を一式の前処理で読むので, 読み込みの"
+                "設定 (options) と前に反応した品物の表 (seen) は使えません"
+            )
+        result = predict_search(bundle, source, k, device)
+        return result
     if k is not None or seen is not None:
         raise ValueError(
             "並べる件数 (k) と前に反応した品物の表 (seen) は, 並べるの一式"
-            "だけに渡せます"
+            "と検索の一式 (k だけ) だけに渡せます"
         )
     if bundle.from_group:
         result = predict_group(bundle, source, options, batch_size, device)
@@ -1887,6 +1898,7 @@ def describe_bundle(bundle: Union[str, Path, Bundle]) -> dict:
         "uplift": uplift_of_bundle(bundle),
         "price": price_of_bundle(bundle),
         "demand": demand_of_bundle(bundle),
+        "search": search_of_bundle(bundle),
     }
 
     return description
