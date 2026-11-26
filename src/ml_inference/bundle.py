@@ -228,10 +228,12 @@ class Bundle:
             (既製のモデルの一式), rank (並べるの一式), group (群分けの
             一式), anomaly (異常の度合いの一式), uplift (効果の一式)
         """
-        # 版 2 のデータセットの一式はファイルの組, 雑音だけの一式は雑音
+        # 効果の一式 (版 12) の uplift
         if self.from_uplift:
             kind = "uplift"
             return kind
+
+        # 版 2 のデータセットの一式はファイルの組, 雑音だけの一式は雑音
         if self.from_anomaly:
             kind = "anomaly"
             return kind

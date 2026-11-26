@@ -252,6 +252,14 @@ def write_uplift_run(
                   "qini": -0.05, "uplift_at_k": None, "effect": 0.0,
                   "estimated": 0.02}],
     }), encoding="utf-8")
+    (run / "evaluations" / "qini_curve_valid.json").write_text(json.dumps({
+        "name": "qini_curve_valid", "split": "valid", "kind": "curve",
+        "x": "fraction",
+        "rows": [{"rows": 0, "fraction": 0.0, "qini": 0.0, "random": 0.0},
+                 {"rows": 8, "fraction": 0.5, "qini": 2.0, "random": 0.5},
+                 {"rows": 16, "fraction": 1.0, "qini": 1.0,
+                  "random": 1.0}],
+    }), encoding="utf-8")
 
     return run
 
@@ -331,6 +339,9 @@ def test_uplift_bundle(tmp_path: Path, outcome: str) -> None:
     assert uplift["check"]["max_diff"] < (1e-6 if outcome == "binary"
                                           else 1e-3)
     assert uplift["evaluations"]["test"]["uplift_at_k"] is None
+    assert uplift["curves"]["valid"]["qini"] == [0.0, 2.0, 1.0]
+    assert uplift["curves"]["valid"]["fraction"] == [0.0, 0.5, 1.0]
+    assert "test" not in uplift["curves"]
     assert uplift["rows"] == CUSTOMERS
     for name in ("uplift_estimator.json", "uplift_recipe.yaml",
                  "model_spec.yaml", "final_model.pt"):
@@ -342,6 +353,7 @@ def test_uplift_bundle(tmp_path: Path, outcome: str) -> None:
     assert (found["kind"], found["task"]) == ("uplift", "")
     assert found["features"] == FEATURES and found["steps"] == ["standardize"]
     assert found["uplift"]["budget"] == BUDGET
+    assert found["uplift"]["curves"]["valid"]["rows"] == [0, 8, 16]
     assert found["anomaly"] is None and not found["column_output"]
 
     # 新しい行の効果 (処置と結果の列は要らない. 前処理で欠けた行は飛ばす)
@@ -358,6 +370,11 @@ def test_uplift_bundle(tmp_path: Path, outcome: str) -> None:
     assert ok.sort_values("rank")["effect"].is_monotonic_decreasing
     if outcome == "binary":
         assert ok["treated"].between(0, 1).all()
+
+    # 入力の列の並びに依らない効果と順位
+    swapped = predict(bundle, rows[["visits", "customer_id", "age"]])
+    np.testing.assert_allclose(swapped["effect"], frame["effect"])
+    assert swapped["rank"].equals(frame["rank"])
 
     # 結論と既定の配る判断 (上位から上限まで, 効果が正の行だけ)
     result = infer(bundle, rows)
@@ -392,7 +409,8 @@ def test_uplift_bundle(tmp_path: Path, outcome: str) -> None:
         chosen["effect"].sum()
     )
     assert decided["summary"]["budget"] == BUDGET
-    assert "効果の高い順に" in decided["sentences"][0]
+    assert decided["sentences"][:3] == decided["notes"]
+    assert "効果の高い順に" in decided["sentences"][3]
     assert any("無作為" in note for note in decided["notes"])
 
     # 空の辞書は配る判断無し
@@ -586,12 +604,13 @@ def test_uplift_sources(
     with pytest.raises(ValueError, match="PlaceholderModel"):
         make_uplift_bundle(tmp_path / "x", placeholder)
 
-    # 成果物の版と形の誤り
+    # 成果物の版と形の誤り (結果の種類が文字でない成果物も)
     run = write_uplift_run(tmp_path / "b", raw, "amount")
     path = run / "uplift_estimator.json"
     estimator = json.loads(path.read_text("utf-8"))
     model = estimator["model"]
     for change, words in (({"format_version": 2}, "版 2"),
+                          ({"outcome": ["binary"]}, "outcome"),
                           ({"learner": "s_learner"}, "learner"),
                           ({"budget": 0}, "budget"),
                           ({"k": 1.5}, "k は"),
@@ -615,6 +634,14 @@ def test_uplift_sources(
                           / "uplift_estimator.json")["budget"] is None
     result = infer(tmp_path / "bundle", raw)
     assert "decision" not in result
+
+    # JSON の外の NaN を持つ評価
+    evaluation = run / "evaluations" / "uplift_valid.json"
+    original = evaluation.read_text("utf-8")
+    evaluation.write_text(original.replace("0.12", "NaN"), encoding="utf-8")
+    with pytest.raises(ValueError, match="NaN"):
+        make_uplift_bundle(tmp_path / "y", run)
+    evaluation.write_text(original, encoding="utf-8")
 
     # 出力の 1 つ欠けた定義
     spec = uplift_spec()
@@ -642,6 +669,8 @@ def test_uplift_sources(
     for change, words in (({"format_version": 11}, "uplift を持つ一式"),
                           ({"output": {"form": "value"}}, "effect"),
                           ({"role": "predict"}, "受け持ち"),
+                          ({"uplift": {**info["uplift"],
+                                       "outcome": ["binary"]}}, "outcome"),
                           ({"uplift": {**info["uplift"],
                                        "treatment": "other"}},
                            "treatment")):

@@ -31,6 +31,7 @@ ESTIMATOR_FILE = "uplift_estimator.json"
 RECIPE_FILE = "uplift_recipe.yaml"
 EFFECTS_FILE = "uplift_effects.csv"
 EVALUATION_FILE = "evaluations/uplift_{split}.json"
+CURVE_FILE = "evaluations/qini_curve_{split}.json"
 
 # 読める効果の決め方の成果物の版と, 効果の決め方
 ESTIMATOR_VERSION = 1
@@ -58,13 +59,16 @@ EVALUATION_SPLITS = ("valid", "test")
 EVALUATION_KEYS = ("rows", "treated", "control", "k", "qini", "effect",
                    "estimated")
 
+# Qini の曲線の列 (ML-Found の qini_curve の列)
+CURVE_COLUMNS = ("rows", "fraction", "qini", "random")
+
 # 分割の日本語の名前
 SPLIT_NAMES = {"valid": "検証用", "test": "テスト用"}
 
 # uplift の欄
 UPLIFT_KEYS = ("estimator", "recipe", "learner", "outcome", "features",
                "id", "treatment", "input", "treated", "control", "budget",
-               "k", "rows", "train", "evaluations", "check")
+               "k", "rows", "train", "evaluations", "curves", "check")
 
 # 一式を作るときに 2 つの予測を確かめる 0 の行の数
 PROBE_ROWS = 2
@@ -195,12 +199,12 @@ def check_estimator(estimator: Any) -> list[str]:
     ):
         errors.append("model は input, treated, control の名前にして"
                       "ください")
-    elif outcome in OUTCOME_LINKS and model.get("link") != OUTCOME_LINKS[
-        outcome
-    ]:
+    elif isinstance(outcome, str) and outcome in OUTCOME_LINKS and (
+        model.get("link") != OUTCOME_LINKS[outcome]
+    ):
         errors.append(f"結果の種類 {outcome} の model.link は "
                       f"{OUTCOME_LINKS[outcome]} にしてください")
-    if outcome in OUTCOME_LINKS:
+    if isinstance(outcome, str) and outcome in OUTCOME_LINKS:
         errors.extend(check_scale(outcome, estimator["scale"]))
     train = estimator["train"]
     if not isinstance(train, dict) or not all(
@@ -328,6 +332,35 @@ def read_effects(path: Path, key: str) -> pd.DataFrame:
     return effects
 
 
+def read_json(path: Path) -> Any:
+    """
+    評価のファイルを読む関数
+
+    Parameters
+    ----------
+    path: Path
+        evaluations の中の JSON のファイル
+
+    Returns
+    ----------
+    table: Any
+        読んだ中身
+
+    Raises
+    ----------
+    ValueError
+        JSON でない場合と, JSON の外の NaN と Infinity がある場合
+    """
+    # JSON の外の NaN と Infinity も誤り (他の成果物の読み込みと同じ)
+    try:
+        table = json.loads(path.read_text(encoding="utf-8"),
+                           parse_constant=refuse_constant)
+    except ValueError as error:
+        raise ValueError(f"{path} を読めません ({error})") from error
+
+    return table
+
+
 def read_evaluations(root: Path) -> dict:
     """
     実験の Qini の係数と上位 K 割の効果の差の評価を読む関数
@@ -349,7 +382,7 @@ def read_evaluations(root: Path) -> dict:
         path = root / EVALUATION_FILE.format(split=split)
         if not path.is_file():
             continue
-        table = json.loads(path.read_text(encoding="utf-8"))
+        table = read_json(path)
         rows = table.get("rows") if isinstance(table, dict) else None
         row = rows[0] if isinstance(rows, list) and rows else None
         if not isinstance(row, dict) or not all(
@@ -367,6 +400,41 @@ def read_evaluations(root: Path) -> dict:
     return evaluations
 
 
+def read_curves(root: Path) -> dict:
+    """
+    実験の Qini の曲線を読む関数
+
+    Parameters
+    ----------
+    root: Path
+        実験のディレクトリ
+
+    Returns
+    ----------
+    curves: dict
+        分割の名前から, rows, fraction, qini, random の値の並び (曲線の
+        無い分割は無い)
+    """
+    # ML-Found の evaluations の曲線の形 (形の違う曲線は写さずに除外)
+    curves = {}
+    for split in EVALUATION_SPLITS:
+        path = root / CURVE_FILE.format(split=split)
+        if not path.is_file():
+            continue
+        table = read_json(path)
+        rows = table.get("rows") if isinstance(table, dict) else None
+        if not isinstance(rows, list) or not rows or not all(
+            isinstance(row, dict) and all(
+                is_number(row.get(key)) for key in CURVE_COLUMNS
+            ) for row in rows
+        ):
+            continue
+        curves[split] = {key: [plain(row[key]) for row in rows]
+                         for key in CURVE_COLUMNS}
+
+    return curves
+
+
 def run_sources(run: Union[str, Path]) -> dict:
     """
     効果の見積もりの実験のディレクトリから, 一式に要るものを読む関数
@@ -380,7 +448,7 @@ def run_sources(run: Union[str, Path]) -> dict:
     ----------
     sources: dict
         root, estimator, recipe_file, recipe, effects, evaluations,
-        weights, spec, run (実験の状態)
+        curves, weights, spec, run (実験の状態)
 
     Raises
     ----------
@@ -414,7 +482,8 @@ def run_sources(run: Union[str, Path]) -> dict:
     sources = {
         "root": root, "estimator": estimator, "recipe_file": recipe_file,
         "recipe": recipe, "effects": effects,
-        "evaluations": read_evaluations(root), "weights": weights,
+        "evaluations": read_evaluations(root),
+        "curves": read_curves(root), "weights": weights,
         "spec": spec, "run": run_summary(root),
     }
 
@@ -452,7 +521,9 @@ def check_uplift_info(info: dict) -> list[str]:
         return errors
 
     # 結果の種類, ファイルの名前, 配る数の上限と K
-    if uplift["outcome"] not in OUTCOME_LINKS:
+    if not isinstance(uplift["outcome"], str) or uplift["outcome"] not in (
+        OUTCOME_LINKS
+    ):
         errors.append(f"uplift.outcome は {', '.join(OUTCOME_LINKS)} の"
                       "どちらかにしてください")
     for key in ("estimator", "recipe"):
@@ -774,7 +845,7 @@ def effect_check(
     found: tuple[Optional[dict], list[str]]
         rows, agreement, max_diff (比べられなければ None) と注意の文
     """
-    # 行の id の値で実験の効果と突き合わせ
+    # 行の id の値による実験の効果との突き合わせ
     prediction = predict_uplift(bundle, data, options, batch_size, "cpu")
     key = id_column(bundle, prediction)
     if key is None:
@@ -843,7 +914,7 @@ def probe_model(bundle: Bundle, width: int, batch_size: int) -> None:
     ValueError
         2 つの予測が件数の数でない場合
     """
-    # 予測の形の確かめ (raw_outputs の中) と, 値が数か
+    # 予測の形の確かめ (raw_outputs の中) と, 値が数かの確かめ
     treated, control = raw_outputs(
         bundle.model(), np.zeros((PROBE_ROWS, width), dtype=np.float32),
         bundle.cache["uplift_estimator"]["model"], batch_size, "cpu"
@@ -887,6 +958,7 @@ def uplift_section(sources: dict) -> dict:
         "rows": int(len(sources["effects"])),
         "train": {key: plain(estimator["train"][key]) for key in TRAIN_KEYS},
         "evaluations": copy.deepcopy(sources["evaluations"]),
+        "curves": copy.deepcopy(sources["curves"]),
         "check": None,
     }
 
@@ -1098,7 +1170,7 @@ def tie_order(scores: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     found: tuple[np.ndarray, np.ndarray]
         高い順の行の位置と, 並べた後の同点のまとまりの最後の位置
     """
-    # 同じ符号の無限大も同点
+    # 同じ値の行は同点
     order = np.argsort(-scores, kind="stable")
     ranked = scores[order]
     ends = np.append(np.flatnonzero(ranked[1:] != ranked[:-1]),
@@ -1170,7 +1242,9 @@ def qini_coefficient(
     scores: np.ndarray, treatment: np.ndarray, outcome: np.ndarray
 ) -> float:
     """
-    Qini の係数を求める関数 (ML-Found の qini_coefficient と同じ決まり)
+    Qini の係数を求める関数
+
+    ML-Found の qini_coefficient と同じ決まり
 
     Parameters
     ----------
@@ -1209,7 +1283,9 @@ def uplift_at_k(
     k: float
 ) -> float:
     """
-    上位 K 割の効果の差を求める関数 (ML-Found の uplift_at_k と同じ決まり)
+    上位 K 割の効果の差を求める関数
+
+    ML-Found の uplift_at_k と同じ決まり
 
     Parameters
     ----------
@@ -1671,20 +1747,8 @@ def decide_uplift(
         frame = frame.rename(columns={ACTION_COLUMN: f"{ACTION_COLUMN} (入力)"})
     frame[ACTION_COLUMN] = action
 
-    # 配る件数と効果の下限と和, 上限で配らない行と効果が 0 以下の行の文
-    sentence = (f"効果の高い順に {summary['acted']:,} 件に配る (配る数の"
-                f"上限 {budget:,} 件)")
-    if summary["lowest"] is not None:
-        sentence += (f". 配る行の効果は {summary['lowest']:.3g} 以上で, 効果"
-                     f"の和は {summary['gain']:.3g} (見積もりで増える結果)")
-    sentences = [sentence]
-    if summary["left_positive"]:
-        sentences.append(f"効果が正なのに上限で配らない行が "
-                         f"{summary['left_positive']:,} 行ある")
-    if summary["nonpositive"]:
-        sentences.append(f"効果が 0 以下の {summary['nonpositive']:,} 行は"
-                         "上限の中でも配らない (見積もりでは配っても結果が"
-                         "増えない)")
+    # 前提, 配る件数と効果の下限と和, 上限で配らない行と効果が 0 以下の
+    # 行の文 (前提は notes にも)
     notes = [
         "効果は処置したときとしないときの 2 つの予測の差の見積もりで, 処置を"
         "無作為に配った記録を前提にしている (配る相手を選んだ記録から学ぶと"
@@ -1693,6 +1757,19 @@ def decide_uplift(
         "結果は判断の材料)",
         "配る数は損得のしきい値でなく, 配る数の上限で決めた",
     ]
+    sentence = (f"効果の高い順に {summary['acted']:,} 件に配る (配る数の"
+                f"上限 {budget:,} 件)")
+    if summary["lowest"] is not None:
+        sentence += (f". 配る行の効果は {summary['lowest']:.3g} 以上で, 効果"
+                     f"の和は {summary['gain']:.3g} (見積もりで増える結果)")
+    sentences = [*notes, sentence]
+    if summary["left_positive"]:
+        sentences.append(f"効果が正なのに上限で配らない行が "
+                         f"{summary['left_positive']:,} 行ある")
+    if summary["nonpositive"]:
+        sentences.append(f"効果が 0 以下の {summary['nonpositive']:,} 行は"
+                         "上限の中でも配らない (見積もりでは配っても結果が"
+                         "増えない)")
     result = {"frame": frame, "summary": summary, "sentences": sentences,
               "notes": notes, "decision": decision}
 

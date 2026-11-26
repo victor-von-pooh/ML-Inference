@@ -289,7 +289,9 @@ read_reviews("results/sensors")   # id, judgment, reviewer, reviewed_at の表
 効果の見積もりの実験 (効果の決め方 `uplift_estimator.json`, 前処理のレシピの写し `uplift_recipe.yaml`, 行ごとの効果 `uplift_effects.csv`, 重み `final_model.pt` と定義 `model_spec.yaml`) から一式を作る. 学習に使った元の表を渡すと, 一式で出した効果を実験の効果と比べる. 配る判断は損得のしきい値でなく, 効果の高い順に配る数の上限 (`budget`) まで配る (効果が 0 以下の行は配らない). 効果は無作為に配った記録を前提にした見積もりなので, 配った効果は配る相手を無作為に分けた試験で確かめる.
 
 ```python
-from ml_inference import infer, make_uplift_bundle, write_result
+from ml_inference import (
+    describe_bundle, infer, make_uplift_bundle, write_result
+)
 
 make_uplift_bundle("bundles/coupons", "outputs/purchased_uplift/run",
                    data="data/coupons.csv")
@@ -299,7 +301,8 @@ make_uplift_bundle("bundles/coupons", "outputs/purchased_uplift/run",
 result = infer("bundles/coupons", "customers.csv",
                decision={"type": "treat", "budget": 500})
 result["summary"]["evaluations"]  # 実験の Qini の係数と上位 K 割の効果の差
-result["decision"]["sentences"]   # ['効果の高い順に 500 件に配る ...', ...]
+result["decision"]["sentences"]   # [前提の文, ..., '効果の高い順に 500 件に配る ...', ...]
+describe_bundle("bundles/coupons")["uplift"]["curves"]   # 実験の Qini の曲線 (分割ごとの rows, fraction, qini, random)
 write_result(result, "results/coupons")
 ```
 
