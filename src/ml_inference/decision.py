@@ -14,6 +14,7 @@ from ml_inference.conclude import is_number, plain
 from ml_inference.demand import check_order_decision, decide_order
 from ml_inference.predict import lag_settings, predict
 from ml_inference.price import check_price_decision, decide_price
+from ml_inference.search import check_search_decision, decide_search
 from ml_inference.uplift import check_uplift_decision, decide_uplift
 
 # 意思決定の型と, 型ごとに書ける項目
@@ -265,6 +266,9 @@ def check_decision(
         return errors
     if bundle.from_demand:
         errors = check_order_decision(decision)
+        return errors
+    if bundle.from_search:
+        errors = check_search_decision(decision)
         return errors
     kind = decision.get("type")
     if kind not in DECISION_KEYS:
@@ -1428,6 +1432,9 @@ def decide(
         return result
     if bundle.from_demand:
         result = decide_order(bundle, prediction, decision)
+        return result
+    if bundle.from_search:
+        result = decide_search(bundle, prediction, decision)
         return result
     bundle.require_column("意思決定")
     decision = plain(dict(decision))

@@ -38,8 +38,9 @@ from ml_inference.weights import (
 # 版 3, 版 2 のデータセットの一式は版 4, 雑音だけの一式は版 5 (表の出力は
 # 版 7), 既製のモデルの一式は版 6, 並べるの一式は版 8, 群分けの一式は
 # 版 9, 既製の埋め込みの群分けの一式は版 10, 異常の度合いの一式は版 11,
-# 効果の一式は版 12, 値段の一式は版 13, 需要の一式は版 14 で書く)
-BUNDLE_FORMAT_VERSION = 14
+# 効果の一式は版 12, 値段の一式は版 13, 需要の一式は版 14, 検索の一式は版 15
+# で書く)
+BUNDLE_FORMAT_VERSION = 15
 COLUMN_BUNDLE_VERSION = 3
 ITEMS_BUNDLE_VERSION = 4
 NOISE_BUNDLE_VERSION = 5
@@ -52,6 +53,7 @@ ANOMALY_BUNDLE_VERSION = 11
 UPLIFT_BUNDLE_VERSION = 12
 PRICE_BUNDLE_VERSION = 13
 DEMAND_BUNDLE_VERSION = 14
+SEARCH_BUNDLE_VERSION = 15
 
 # 群分けの一式の版 (列の符号化か, 既製のモデルの埋め込み)
 GROUP_VERSIONS = (GROUP_BUNDLE_VERSION, READY_GROUP_BUNDLE_VERSION)
@@ -61,8 +63,15 @@ DATASETLESS_VERSIONS = (
     NOISE_BUNDLE_VERSION, READY_BUNDLE_VERSION, TABLE_BUNDLE_VERSION,
     RANK_BUNDLE_VERSION, GROUP_BUNDLE_VERSION, READY_GROUP_BUNDLE_VERSION,
     ANOMALY_BUNDLE_VERSION, UPLIFT_BUNDLE_VERSION, PRICE_BUNDLE_VERSION,
-    DEMAND_BUNDLE_VERSION
+    DEMAND_BUNDLE_VERSION, SEARCH_BUNDLE_VERSION
 )
+
+# 出力の形 ranking の一式の版 (並べるの一式と検索の一式)
+RANKING_VERSIONS = (RANK_BUNDLE_VERSION, SEARCH_BUNDLE_VERSION)
+
+# ready を持つ一式の版 (既製のモデル, 既製の埋め込みの群分け, 検索)
+READY_VERSIONS = (READY_BUNDLE_VERSION, READY_GROUP_BUNDLE_VERSION,
+                  SEARCH_BUNDLE_VERSION)
 
 # 出力の形 effect の一式の版 (効果の一式と値段の一式)
 EFFECT_VERSIONS = (UPLIFT_BUNDLE_VERSION, PRICE_BUNDLE_VERSION)
@@ -72,7 +81,8 @@ TOP_KEYS = (
     "format_version", "name", "created_at", "role", "output", "target",
     "procedure", "model", "inputs", "dataset", "run", "conclusion",
     "decision", "check", "uncertainty", "notes", "items", "ready",
-    "calibrate", "rank", "group", "anomaly", "uplift", "price", "demand"
+    "calibrate", "rank", "group", "anomaly", "uplift", "price", "demand",
+    "search"
 )
 
 # 出力の扱い方
@@ -234,7 +244,7 @@ class Bundle:
             (版 2 のデータセットの一式), noise (雑音だけの一式), ready
             (既製のモデルの一式), rank (並べるの一式), group (群分けの
             一式), anomaly (異常の度合いの一式), uplift (効果の一式),
-            price (値段の一式), demand (需要の一式)
+            price (値段の一式), demand (需要の一式), search (検索の一式)
         """
         # 効果の一式 (版 12) の uplift, 値段の一式 (版 13) の price, 需要の
         # 一式 (版 14) の demand
@@ -246,6 +256,9 @@ class Bundle:
             return kind
         if self.from_demand:
             kind = "demand"
+            return kind
+        if self.from_search:
+            kind = "search"
             return kind
 
         # 版 2 のデータセットの一式はファイルの組, 雑音だけの一式は雑音
@@ -310,7 +323,7 @@ class Bundle:
         noise = self.info.get("dataset") is None and not (
             self.from_ready or self.from_rank or self.from_group
             or self.from_anomaly or self.from_uplift or self.from_price
-            or self.from_demand
+            or self.from_demand or self.from_search
         )
 
         return noise
@@ -455,6 +468,26 @@ class Bundle:
         return demand
 
     @property
+    def from_search(self) -> bool:
+        """
+        問いの写真に近い索引の写真を返す一式かを返す関数
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        ----------
+        search: bool
+            search (索引の写真の並びと埋め込み) を持つ一式 (版 15) なら
+            True
+        """
+        # 版 15 の search の有無
+        search = self.info.get("search") is not None
+
+        return search
+
+    @property
     def mask_values(self) -> Optional[list[int]]:
         """
         領域のクラスの番号ごとの領域の値を返す関数
@@ -526,11 +559,14 @@ class Bundle:
         ----------
         width: Optional[int]
             埋め込みの一式は output.shape の幅, 既製の埋め込みの群分けの
-            一式は group.width (他は None)
+            一式は group.width, 検索の一式は search.width (他は None)
         """
-        # 1 件の形は (幅,). 群分けは群の中心の幅
+        # 1 件の形は (幅,). 群分けは群の中心の幅, 検索は索引の幅
         if self.from_group:
             width = int(self.info["group"]["width"])
+            return width
+        if self.from_search:
+            width = int(self.info["search"]["width"])
             return width
         shape = self.output_info.get("shape")
         width = int(shape[0]) if self.form == "vector" and isinstance(
@@ -694,7 +730,12 @@ class Bundle:
         # 結論と意思決定は 1 行に 1 つのクラスか値が前提. 既製のモデルの
         # 一式は測るデータ無し. 異常の度合いは確率でなく, 効果は 2 つの予測
         # の差, 値段の一式は候補の値段ごとの予測, 需要の一式は商品ごとの
-        # 発注を決める日の分位点なので誤り
+        # 発注を決める日の分位点, 検索の一式は問いごとの上位 K 件なので誤り
+        if self.from_search:
+            raise ValueError(
+                f"検索の一式には {what} を使えません (使えるのは検索の判断 "
+                "{type: search, k} だけ)"
+            )
         if self.from_demand:
             raise ValueError(
                 f"需要の一式には {what} を使えません (使えるのは発注の判断 "
@@ -1014,20 +1055,19 @@ def check_info(info: Any) -> list[str]:
             f"だけで, 版 {TABLE_BUNDLE_VERSION} の一式の出力の形は table "
             "だけです"
         )
-    if info.get("ready") is not None and version not in (
-        READY_BUNDLE_VERSION, READY_GROUP_BUNDLE_VERSION
-    ):
+    if info.get("ready") is not None and version not in READY_VERSIONS:
         errors.append(
             f"ready を持つ一式は版 {READY_BUNDLE_VERSION} にしてください "
-            f"(既製の埋め込みの群分けは版 {READY_GROUP_BUNDLE_VERSION})"
+            f"(既製の埋め込みの群分けは版 {READY_GROUP_BUNDLE_VERSION}, 検索"
+            f"は版 {SEARCH_BUNDLE_VERSION})"
         )
     if version == READY_BUNDLE_VERSION:
         errors.extend(check_ready_info(info))
-    if (output.get("form") == "ranking") != (version == RANK_BUNDLE_VERSION):
+    if (output.get("form") == "ranking") != (version in RANKING_VERSIONS):
         errors.append(
-            f"出力の形 ranking は版 {RANK_BUNDLE_VERSION} の並べるの一式だけ"
-            f"で, 版 {RANK_BUNDLE_VERSION} の一式の出力の形は ranking だけ"
-            "です"
+            f"出力の形 ranking は版 {RANK_BUNDLE_VERSION} の並べるの一式と版 "
+            f"{SEARCH_BUNDLE_VERSION} の検索の一式だけで, この版の一式の出力"
+            "の形は ranking だけです"
         )
     if info.get("rank") is not None and version != RANK_BUNDLE_VERSION:
         errors.append(
@@ -1096,6 +1136,15 @@ def check_info(info: Any) -> list[str]:
         from ml_inference.demand import check_demand_info
 
         errors.extend(check_demand_info(info))
+    if info.get("search") is not None and version != SEARCH_BUNDLE_VERSION:
+        errors.append(
+            f"search を持つ一式は版 {SEARCH_BUNDLE_VERSION} にしてください"
+        )
+    if version == SEARCH_BUNDLE_VERSION:
+        # 検索の一式の決まりは検索のモジュールの受け持ち
+        from ml_inference.search import check_search_info
+
+        errors.extend(check_search_info(info))
 
     return errors
 
@@ -1696,6 +1745,10 @@ def load_bundle(path: Union[str, Path]) -> Bundle:
         from ml_inference.demand import check_demand_bundle
 
         check_demand_bundle(bundle)
+    if bundle.from_search:
+        from ml_inference.search import check_search_bundle
+
+        check_search_bundle(bundle)
     if info.get("calibrate") is not None:
         classes = bundle.classes if (
             bundle.form == "class" and not bundle.from_ready

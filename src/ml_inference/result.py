@@ -22,6 +22,7 @@ from ml_inference.demand import conclude_demand
 from ml_inference.grouping import conclude_groups
 from ml_inference.price import conclude_price
 from ml_inference.ranking import conclude_ranking, request_users
+from ml_inference.search import conclude_search
 from ml_inference.uplift import conclude_uplift
 
 # 結果のファイル (result.yaml) の形の版 (混ざる列を残せば 4, 列の型を
@@ -127,7 +128,9 @@ def infer(
         意思決定の決め方 (渡すと, 行ごとの行動と見込みも出す. 省略すると
         一式の既定値. 空の辞書で意思決定しない)
     k: Optional[int] = None
-        並べるの一式の, 利用者ごとに並べる件数 (省くと一式の rank.k)
+        並べるの一式の, 利用者ごとに並べる件数 (省くと一式の rank.k). 検索
+        の一式の, 問いごとに返す件数 (省くと検索の判断の k か一式の
+        search.k. 渡すと一式の既定の判断の k も同じ値)
     seen: Union[str, Path, pd.DataFrame, None] = None
         並べるの一式の, 前に反応した品物の表 (渡すと除いて並べる)
 
@@ -155,6 +158,12 @@ def infer(
     if merged.get("positive") is None:
         merged.pop("threshold", None)
     merged = {k: v for k, v in merged.items() if v is not None}
+
+    # 検索の一式は件数と待ち時間の要約と検索の判断
+    if bundle.from_search:
+        result = infer_search(bundle, source, given, options, device,
+                              forecast, decision, k, seen)
+        return result
 
     # 異常の度合いの一式は度合いの要約と度合いの上位から回す振り分け,
     # 効果の一式は効果の要約と効果の上位から配る判断, 値段の一式は売れた数
@@ -217,6 +226,83 @@ def infer(
         "bundle": {"name": bundle.info.get("name"), "path": str(bundle.path)},
         "source": str(source) if isinstance(source, (str, Path)) else None,
         "created_at": dt.datetime.now().astimezone().isoformat(),
+        **conclusion,
+    }
+
+    return result
+
+
+def infer_search(
+    bundle: Bundle, source: Any, given: dict, options: Optional[dict],
+    device: str, forecast: bool, decision: Optional[dict],
+    k: Optional[int], seen: Any
+) -> dict:
+    """
+    検索の一式で問いの写真ごとに上位 K 件を並べ, 結論と検索の判断を出す
+    関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        検索の一式
+    source: Any
+        問いの画像のファイルかディレクトリ
+    given: dict
+        渡した結論の決め方 (検索の一式では空でなければ誤り)
+    options: Optional[dict]
+        読み込みの設定 (検索の一式では誤り)
+    device: str
+        使うデバイス
+    forecast: bool
+        何段も先の予測 (検索の一式では誤り)
+    decision: Optional[dict]
+        検索の判断 (省略すると一式の既定, 空の辞書で決めない)
+    k: Optional[int]
+        返す件数 (判断の k と違えば誤り)
+    seen: Any
+        前に反応した品物の表 (検索の一式では誤り)
+
+    Returns
+    ----------
+    result: dict
+        bundle, source, created_at, form, frame (決めると action の列も),
+        summary, sentences, rules (空), (決めると) decision
+
+    Raises
+    ----------
+    ValueError
+        結論の決め方か何段も先の予測を渡した場合, 判断の k と渡した k が
+        違う場合, 判断の決め方に誤りがある場合
+    """
+    # 結論の決め方と何段も先の予測の誤り. 渡した判断の k で並べ, 一式の
+    # 既定の判断は渡した k に合わせる
+    if given or forecast:
+        bundle.require_column("結論の決め方と何段も先の予測")
+    if decision is None:
+        decision = bundle.info.get("decision")
+        if decision and k is not None:
+            decision = {**decision, "k": k}
+    wanted = decision.get("k") if isinstance(decision, dict) else None
+    if decision and k is not None and wanted != k:
+        raise ValueError(
+            f"返す件数 k ({k}) が検索の判断の k ({wanted}) と違います"
+        )
+    if decision and k is None and isinstance(wanted, int) and not (
+        isinstance(wanted, bool)
+    ) and wanted >= 1:
+        k = wanted
+    prediction = predict(bundle, source, options, device=device, k=k,
+                         seen=seen)
+    conclusion = conclude_search(bundle, prediction)
+    if decision:
+        decided = decide(bundle, conclusion["frame"], decision)
+        conclusion["frame"] = decided.pop("frame")
+        conclusion["decision"] = decided
+    result = {
+        "bundle": {"name": bundle.info.get("name"), "path": str(bundle.path)},
+        "source": source_text(bundle, source),
+        "created_at": dt.datetime.now().astimezone().isoformat(),
+        "form": bundle.form,
         **conclusion,
     }
 
