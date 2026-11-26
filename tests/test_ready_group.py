@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import shutil
 
 import numpy as np
 import pandas as pd
@@ -154,7 +155,7 @@ def ready_group(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
 
 def test_make_ready_group_bundle(ready_group: dict) -> None:
     """
-    版 10 の一式が, 既製のモデルの出どころと群の中心と骨組みの群の安定性
+    版 17 の一式が, 既製のモデルの出どころと群の中心と骨組みの群の安定性
     を持つことを確かめる関数
 
     Parameters
@@ -166,9 +167,10 @@ def test_make_ready_group_bundle(ready_group: dict) -> None:
     ----------
     None
     """
-    # 版 10. 重みは出どころから読み, 群の中心と要約は成果物の写し
+    # 写真を渡したので遠さの上限を持つ版 17. 重みは出どころから読み, 群の
+    # 中心と要約は成果物の写し
     info = ready_group["info"]
-    assert info["format_version"] == 10 and info["role"] == "group"
+    assert info["format_version"] == 17 and info["role"] == "group"
     assert info["output"] == {"form": "cluster"}
     assert info["model"]["pretrained"][0]["place"] == "source"
     assert info["ready"]["model"] == "tiny" and info["run"] is None
@@ -357,3 +359,45 @@ def test_ready_group_check_notes(
                              license=LICENSE)
     assert info["group"]["check"] is None
     assert any("群に分けた写真の行の数 5" in n for n in info["notes"])
+
+
+def test_ready_group_far(ready_group: dict, tmp_path: Path) -> None:
+    """
+    群に分けた写真には遠い印が付かず, 学習のときに無い色の写真に印が付く
+    ことを確かめる関数
+
+    Parameters
+    ----------
+    ready_group: dict
+        既製の埋め込みの群分けの一式
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 読めた 6 枚の写真の距離から, 2 つの群の上限
+    bundle = ready_group["bundle"]
+    far = ready_group["info"]["group"]["far"]
+    assert (far["quantile"], far["rows"]) == (0.99, 6)
+    assert len(far["thresholds"]) == 2
+    frame = predict(bundle, ready_group["photos"])
+    assert frame["far"].dtype == bool and not frame["far"].any()
+
+    # 群に分けた赤い写真と, 学習のときに無い緑の写真
+    image = pytest.importorskip("PIL.Image")
+    folder = tmp_path / "new"
+    folder.mkdir()
+    shutil.copy(ready_group["photos"] / "a_red.png", folder / "a_red.png")
+    array = np.zeros((16, 16, 3), dtype=np.uint8)
+    array[:, :, 1] = 250
+    image.fromarray(array).save(folder / "green.png")
+    result = infer(bundle, folder)
+    rows = result["frame"].set_index("path")
+    assert bool(rows.loc["green.png", "far"])
+    assert not bool(rows.loc["a_red.png", "far"])
+    assert result["summary"]["far"]["rows"] == 1
+    assert result["sentences"][2].startswith(
+        "1 行は群の中心から学習のときより遠い"
+    )

@@ -14,9 +14,10 @@ from ml_eda import Data, Dataset, describe_groups, load_data
 from ml_modelcontrol import dump_spec, load_spec
 
 from ml_inference.bundle import (
-    GROUP_BUNDLE_VERSION, READY_GROUP_BUNDLE_VERSION, Bundle, bundle_notes,
-    check_sourced, inside, load_bundle, plan_weights, ready_record,
-    ready_spec, run_summary
+    FAR_GROUP_BUNDLE_VERSION, FAR_GROUP_VERSIONS, GROUP_BUNDLE_VERSION,
+    READY_FAR_GROUP_BUNDLE_VERSION, READY_GROUP_BUNDLE_VERSION,
+    READY_GROUP_VERSIONS, Bundle, bundle_notes, check_sourced, inside,
+    load_bundle, plan_weights, ready_record, ready_spec, run_summary
 )
 from ml_inference.conclude import NO_PREDICTION
 from ml_inference.ready import (
@@ -56,7 +57,23 @@ STABILITY_NAMES = {"seed": "種を変えて作り直す",
 
 # group の欄
 GROUP_KEYS = ("centers", "k", "columns", "features", "width", "id", "rows",
-              "stability", "summary", "check")
+              "stability", "summary", "check", "far")
+
+# group.far の欄 (分位点, 距離を数えた学習の行の数, 群ごとの距離の上限)
+FAR_KEYS = ("quantile", "rows", "thresholds")
+
+# 群ごとの距離の上限にする, 学習の行の距離の分位点
+FAR_QUANTILE = 0.99
+
+# 群の中心から遠い行の印の列
+FAR_COLUMN = "far"
+
+# 上限と比べるときの幅 (割合と絶対の値. 一度に渡す件数やデバイスで変わる
+# 埋め込みの丸めの差で, 上限ちょうどの学習の行に印を付けないため)
+FAR_TOLERANCE = (1e-6, 1e-9)
+
+# 学習の表を渡さずに作った一式の注意
+NO_FAR = "学習の表を渡さなかったので, 群の中心から遠い行に印を付けません"
 
 # 作るときに確かめる 0 の行の数
 PROBE_ROWS = 2
@@ -481,7 +498,7 @@ def summary_of(evaluation: dict, k: int, names: list) -> tuple[list, list]:
 
 def check_group_info(info: dict) -> list[str]:
     """
-    群分けの一式 (版 9) の形を確かめる関数
+    群分けの一式 (版 9, 10, 16, 17) の形を確かめる関数
 
     Parameters
     ----------
@@ -495,7 +512,7 @@ def check_group_info(info: dict) -> list[str]:
     """
     # group が要り, データセット, items, 手順, 正解, 意思決定を持たない
     version = info.get("format_version")
-    ready = version == READY_GROUP_BUNDLE_VERSION
+    ready = version in READY_GROUP_VERSIONS
     group = info.get("group")
     if not isinstance(group, dict):
         return [f"版 {version} の一式には group (群の中心) が要ります"]
@@ -531,6 +548,14 @@ def check_group_info(info: dict) -> list[str]:
     ):
         errors.append("group.check は rows と agreement の辞書か null に"
                       "してください")
+    if version in FAR_GROUP_VERSIONS:
+        errors.extend(check_far(group.get("far"), group.get("k")))
+    elif group.get("far") is not None:
+        errors.append(
+            f"版 {version} の一式は group.far を持てません (遠さの上限を持つ"
+            f"一式は版 {FAR_GROUP_BUNDLE_VERSION} か "
+            f"{READY_FAR_GROUP_BUNDLE_VERSION})"
+        )
     if ready:
         errors.extend(check_ready_group(info))
     held = [k for k in ("dataset", "items", "procedure", "decision",
@@ -559,7 +584,8 @@ def check_group_info(info: dict) -> list[str]:
 
 def check_ready_group(info: dict) -> list[str]:
     """
-    既製の埋め込みの群分けの一式 (版 10) の ready と group を確かめる関数
+    既製の埋め込みの群分けの一式 (版 10 と 17) の ready と group を確かめる
+    関数
 
     Parameters
     ----------
@@ -574,7 +600,7 @@ def check_ready_group(info: dict) -> list[str]:
     # ready が要り, 重みは出どころから. 符号化した行の幅を持たず, 行を
     # 見分ける列と群の要約の列は画像の読み込みの表の列
     if info.get("ready") is None:
-        return [f"版 {READY_GROUP_BUNDLE_VERSION} の一式には ready (既製の"
+        return [f"版 {info.get('format_version')} の一式には ready (既製の"
                 "モデルの出どころと前処理) が要ります"]
     errors = check_ready(info["ready"])
     model = info.get("model") if isinstance(info.get("model"), dict) else {}
@@ -589,6 +615,46 @@ def check_ready_group(info: dict) -> list[str]:
     if group.get("columns") != list(READY_COLUMNS):
         errors.append("既製の埋め込みの群分けの一式の group.columns は "
                       f"[{', '.join(READY_COLUMNS)}] にしてください")
+
+    return errors
+
+
+def check_far(far: Any, k: Any) -> list[str]:
+    """
+    群の中心から遠い行の上限 (group.far) を確かめる関数
+
+    Parameters
+    ----------
+    far: Any
+        group.far
+    k: Any
+        group.k (群の数)
+
+    Returns
+    ----------
+    errors: list[str]
+        誤りの一覧 (無ければ空)
+    """
+    # 分位点, 行の数, 群の数の長さの上限の並び (行の無い群は null)
+    if not isinstance(far, dict):
+        return ["group.far は quantile, rows, thresholds の辞書にしてください"]
+    errors = []
+    unknown = [str(key) for key in far if key not in FAR_KEYS]
+    if unknown:
+        errors.append(f"group.far の知らない欄: {', '.join(unknown)}")
+    quantile = far.get("quantile")
+    if not is_number(quantile) or not 0 < quantile < 1:
+        errors.append("group.far.quantile は 0 より大きく 1 より小さい数に"
+                      "してください")
+    if not is_whole(far.get("rows"), 1):
+        errors.append("group.far.rows は 1 以上の整数にしてください")
+    thresholds = far.get("thresholds")
+    if not isinstance(thresholds, list) or (
+        is_whole(k, 2) and len(thresholds) != k
+    ) or not all(t is None or (is_number(t) and t >= 0)
+                 for t in thresholds):
+        errors.append("group.far.thresholds は群の数の長さの, 0 以上の数か "
+                      "null の並びにしてください")
 
     return errors
 
@@ -1001,7 +1067,8 @@ def predict_group(
     ----------
     result: pd.DataFrame
         元の列 (既製の埋め込みは画像の読み込みの表. 予測の列と同じ名前は
-        「(入力)」付き) と, status, reason, group (Int64), distance
+        「(入力)」付き) と, status, reason, group (Int64), distance と,
+        遠さの上限を持つ一式は far (真偽値)
 
     Raises
     ----------
@@ -1024,7 +1091,7 @@ def predict_group(
                                                  device)
 
     # 元の列の後ろに予測の列 (同じ名前の元の列は「(入力)」)
-    added = list(GROUP_FRAME_COLUMNS)
+    added = frame_columns(bundle)
     result = frame.rename(
         columns={c: f"{c} (入力)" for c in frame.columns if c in added}
     )
@@ -1035,8 +1102,66 @@ def predict_group(
         [int(v) if v >= 0 else None for v in labels], dtype="Int64"
     )
     result["distance"] = distance.astype(float)
+    far = bundle.info["group"].get("far")
+    if far is not None:
+        result[FAR_COLUMN] = far_marks(labels, distance, far["thresholds"])
 
     return result
+
+
+def far_marks(
+    labels: np.ndarray, distance: np.ndarray, thresholds: list
+) -> np.ndarray:
+    """
+    群の距離の上限より遠い行に印を付ける関数
+
+    Parameters
+    ----------
+    labels: np.ndarray
+        群の番号 (割り当てない行は -1)
+    distance: np.ndarray
+        群の中心までの距離
+    thresholds: list
+        群ごとの距離の上限 (行の無かった群は None)
+
+    Returns
+    ----------
+    marks: np.ndarray
+        距離が群の上限 t の少し外 (t × (1 + 1e-6) + 1e-9) より大きい行が
+        True (割り当てない行と, 上限の無い群の行は False)
+    """
+    # 群ごとの上限に丸めの差の幅を足した値 (上限が無ければ無限) との比べ
+    relative, absolute = FAR_TOLERANCE
+    limits = np.array([math.inf if t is None
+                       else float(t) * (1 + relative) + absolute
+                       for t in thresholds])
+    marks = np.zeros(len(labels), dtype=bool)
+    kept = labels >= 0
+    marks[kept] = distance[kept] > limits[labels[kept]]
+
+    return marks
+
+
+def frame_columns(bundle: Bundle) -> list[str]:
+    """
+    群分けの一式の予測の表に足す列の名前を返す関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        群分けの一式
+
+    Returns
+    ----------
+    added: list[str]
+        status, reason, group, distance と, 遠さの上限を持つ一式は far
+    """
+    # 遠さの上限を持つ一式だけ印の列
+    added = list(GROUP_FRAME_COLUMNS)
+    if bundle.info["group"].get("far") is not None:
+        added.append(FAR_COLUMN)
+
+    return added
 
 
 def run_sources(run: Union[str, Path]) -> dict:
@@ -1110,12 +1235,11 @@ def run_sources(run: Union[str, Path]) -> dict:
     return sources
 
 
-def data_check(
-    bundle: Bundle, data: Any, options: Optional[dict], sources: dict,
-    batch_size: int
-) -> tuple[Optional[dict], list[str]]:
+def assign_data(
+    bundle: Bundle, data: Any, options: Optional[dict], batch_size: int
+) -> tuple[str, pd.DataFrame, np.ndarray, np.ndarray]:
     """
-    学習の表を一式で割り当て直し, 実験の割り当てとの一致を数える関数
+    学習の表 (既製の埋め込みは群に分けた写真) を一式で割り当て直す関数
 
     Parameters
     ----------
@@ -1126,30 +1250,56 @@ def data_check(
         写真のディレクトリ)
     options: Optional[dict]
         ファイルの読み込みの設定
-    sources: dict
-        run_sources の結果
     batch_size: int
         1 回に渡す行の数
+
+    Returns
+    ----------
+    assigned: tuple[str, pd.DataFrame, np.ndarray, np.ndarray]
+        誤りの文に使う呼び名, 表 (既製の埋め込みは読めた写真の読み込みの
+        表), 群の番号 (割り当てない行は -1), 距離 (割り当てない行は NaN)
+    """
+    # 既製の埋め込みは読めた写真だけ (骨組みの割り当ての表も読めた写真
+    # だけ)
+    if bundle.from_ready:
+        what = "群に分けた写真"
+        frame, reasons, labels, distance = assign_images(bundle, data,
+                                                         batch_size, "cpu")
+        read = np.array([r in ("", NOT_FINITE) for r in reasons],
+                        dtype=bool)
+        frame = frame[read].reset_index(drop=True)
+        labels, distance = labels[read], distance[read]
+    else:
+        what = "学習の表"
+        frame = read_table(data, options, what)
+        _, labels, distance = assign_frame(bundle, frame, batch_size, "cpu")
+    assigned = (what, frame, labels, distance)
+
+    return assigned
+
+
+def data_check(
+    what: str, frame: pd.DataFrame, labels: np.ndarray, sources: dict
+) -> tuple[Optional[dict], list[str]]:
+    """
+    割り当て直した群と, 実験の割り当ての一致を数える関数
+
+    Parameters
+    ----------
+    what: str
+        誤りの文に使う表の呼び名
+    frame: pd.DataFrame
+        割り当て直した表
+    labels: np.ndarray
+        割り当て直した群の番号 (割り当てない行は -1)
+    sources: dict
+        run_sources の結果
 
     Returns
     ----------
     found: tuple[Optional[dict], list[str]]
         rows と agreement (比べられなければ None) と注意の文
     """
-    # 既製の埋め込みは読めた写真だけ (骨組みの割り当ての表も読めた写真
-    # だけ)
-    labels = None
-    if bundle.from_ready:
-        what = "群に分けた写真"
-        frame, reasons, labels, _ = assign_images(bundle, data, batch_size,
-                                                  "cpu")
-        read = np.array([r in ("", NOT_FINITE) for r in reasons],
-                        dtype=bool)
-        frame, labels = frame[read].reset_index(drop=True), labels[read]
-    else:
-        what = "学習の表"
-        frame = read_table(data, options, what)
-
     # 比べるのは, 行の数と行を見分ける列の値の並びがそろう場合だけ
     expected = sources["assignments"]
     if len(frame) != len(expected):
@@ -1163,8 +1313,6 @@ def data_check(
         note = (f"{what}の行を見分ける列 {key} の値の並びが実験の群の割り"
                 "当てと違うので, 割り当て直しを比べません")
         return None, [note]
-    if labels is None:
-        _, labels, _ = assign_frame(bundle, frame, batch_size, "cpu")
     agreement = float((labels == expected.to_numpy()).mean())
     notes = []
     if agreement < AGREEMENT:
@@ -1176,6 +1324,77 @@ def data_check(
     found = ({"rows": len(frame), "agreement": agreement}, notes)
 
     return found
+
+
+def far_of(
+    labels: np.ndarray, distance: np.ndarray, k: int
+) -> Optional[dict]:
+    """
+    学習の行の距離から, 群ごとの距離の上限を求める関数
+
+    Parameters
+    ----------
+    labels: np.ndarray
+        割り当て直した群の番号 (割り当てない行は -1)
+    distance: np.ndarray
+        群の中心までの距離
+    k: int
+        群の数
+
+    Returns
+    ----------
+    far: Optional[dict]
+        quantile, rows (距離を数えた行の数), thresholds (群ごとの上限.
+        行の無い群は None) の辞書. 割り当てた行が無ければ None
+    """
+    # 群ごとの距離の分位点 (並べた距離のうち分位点以上で最も小さい値)
+    kept = labels >= 0
+    if not kept.any():
+        return None
+    thresholds = []
+    for key in range(k):
+        inside_group = distance[labels == key]
+        thresholds.append(
+            float(np.quantile(inside_group, FAR_QUANTILE, method="higher"))
+            if inside_group.size else None
+        )
+    far = {"quantile": FAR_QUANTILE, "rows": int(kept.sum()),
+           "thresholds": thresholds}
+
+    return far
+
+
+def place_far(info: dict, far: Optional[dict], data: Any) -> None:
+    """
+    群ごとの距離の上限を一式の説明に置き, 版を決める関数
+
+    Parameters
+    ----------
+    info: dict
+        作っている一式の説明 (版 9 か 10. 上限があれば版 16 か 17 にする)
+    far: Optional[dict]
+        far_of の結果
+    data: Any
+        学習の表 (渡さなければ None)
+
+    Returns
+    ----------
+    None
+    """
+    # 上限が無ければ版 9 か 10 のままで, 理由は注意に
+    if far is None:
+        info["notes"].append(
+            NO_FAR if data is None else
+            "学習の表で群に割り当てた行が無いので, 群の中心から遠い行に"
+            "印を付けません"
+        )
+        return
+    info["group"]["far"] = far
+    info["format_version"] = (
+        READY_FAR_GROUP_BUNDLE_VERSION
+        if info["format_version"] == READY_GROUP_BUNDLE_VERSION
+        else FAR_GROUP_BUNDLE_VERSION
+    )
 
 
 def make_group_bundle(
@@ -1203,7 +1422,8 @@ def make_group_bundle(
         一式の名前 (省略するとディレクトリの名前)
     data: Any = None
         学習に使った表 (既製の埋め込みは群に分けた写真のディレクトリ.
-        渡すと割り当て直して実験の割り当てと比べる)
+        渡すと割り当て直して実験の割り当てと比べ, 群ごとの距離の上限を
+        持つ版 16 (既製の埋め込みは版 17) の一式を作る)
     options: Optional[dict] = None
         data のファイルの読み込みの設定 (load_data に渡す. 既製の埋め込み
         は使えない)
@@ -1341,14 +1561,19 @@ def make_group_bundle(
             "check": None,
         }
 
-        # 学習の表を渡した場合は, 割り当て直しと実験の割り当ての比べ
+        # 学習の表を渡した場合は, 割り当て直しと実験の割り当ての比べと,
+        # 群ごとの距離の上限
+        far = None
         if data is not None:
             building.cache["group_encoding"] = centers["encoding"]
             building.cache["group_centers"] = centers["centers"]
-            found, notes = data_check(building, data, options, sources,
-                                      batch_size)
+            what, table, labels, distance = assign_data(building, data,
+                                                        options, batch_size)
+            found, notes = data_check(what, table, labels, sources)
             info["group"]["check"] = found
             info["notes"].extend(notes)
+            far = far_of(labels, distance, centers["k"])
+        place_far(info, far, data)
         (writing / "inference.yaml").write_text(
             yaml.safe_dump(info, allow_unicode=True, sort_keys=False),
             encoding="utf-8"
@@ -1369,7 +1594,8 @@ def make_ready_group(
     license: Optional[dict], batch_size: int
 ) -> dict:
     """
-    既製の埋め込みの群分けの一式 (版 10) を, 骨組みの成果物から作る関数
+    既製の埋め込みの群分けの一式 (版 10. 写真を渡せば版 17) を, 骨組みの
+    成果物から作る関数
 
     Parameters
     ----------
@@ -1380,7 +1606,8 @@ def make_ready_group(
     name: Optional[str]
         一式の名前 (省略するとディレクトリの名前)
     data: Any
-        群に分けた写真のディレクトリ (渡すと割り当て直して比べる)
+        群に分けた写真のディレクトリ (渡すと割り当て直して比べ, 群ごとの
+        距離の上限を求める)
     license: Optional[dict]
         重みのライセンスの情報 (省略すると pretrained_info で読む)
     batch_size: int
@@ -1476,18 +1703,22 @@ def make_ready_group(
             },
         }
 
-        # 写真を渡した場合は, 割り当て直しと骨組みの割り当ての比べ (読んだ
-        # 重みのモデルのまま)
+        # 写真を渡した場合は, 割り当て直しと骨組みの割り当ての比べと群
+        # ごとの距離の上限 (読んだ重みのモデルのまま)
+        far = None
         if data is not None:
             building = Bundle(path=writing, info=info, spec=spec,
                               dataset=Dataset(path=writing, info={},
                                               frames={}, recipe={}))
             building.cache["model"] = embedder
             building.cache["group_centers"] = centers["centers"]
-            checked, more = data_check(building, data, None, sources,
-                                       batch_size)
+            what, table, labels, distance = assign_data(building, data,
+                                                        None, batch_size)
+            checked, more = data_check(what, table, labels, sources)
             info["group"]["check"] = checked
             info["notes"].extend(more)
+            far = far_of(labels, distance, centers["k"])
+        place_far(info, far, data)
         (writing / "inference.yaml").write_text(
             yaml.safe_dump(info, allow_unicode=True, sort_keys=False),
             encoding="utf-8"
@@ -1597,7 +1828,9 @@ def check_ready_centers(bundle: Bundle, found: dict) -> None:
         )
 
 
-def frame_column(prediction: pd.DataFrame, name: str) -> pd.Series:
+def frame_column(
+    prediction: pd.DataFrame, name: str, added: list[str]
+) -> pd.Series:
     """
     予測の表から, 群を作る列の元の値を取り出す関数
 
@@ -1607,6 +1840,8 @@ def frame_column(prediction: pd.DataFrame, name: str) -> pd.Series:
         予測の表
     name: str
         群を作る列の名前
+    added: list[str]
+        予測の表に足した列の名前 (frame_columns)
 
     Returns
     ----------
@@ -1619,7 +1854,7 @@ def frame_column(prediction: pd.DataFrame, name: str) -> pd.Series:
         列が無い場合
     """
     # 予測の列と同じ名前の元の列は「(入力)」付き
-    key = f"{name} (入力)" if name in GROUP_FRAME_COLUMNS else name
+    key = f"{name} (入力)" if name in added else name
     if key not in prediction.columns:
         raise ValueError(f"予測の表に群を作る列 {key} がありません")
     column = prediction[key]
@@ -1667,9 +1902,10 @@ def group_summary(
         bundle.cache["group_encoding"]["numeric"]
     )
     temporary = {name: f"c{n}" for n, name in enumerate(group["columns"])}
+    added = frame_columns(bundle)
     frame = pd.DataFrame(index=range(len(done)))
     for name, short in temporary.items():
-        column = frame_column(done, name).reset_index(drop=True)
+        column = frame_column(done, name, added).reset_index(drop=True)
         if name in numeric:
             frame[short] = pd.to_numeric(
                 column.map(lambda v: float(v) if isinstance(v, bool) else v),
@@ -1778,7 +2014,9 @@ def group_representatives(
     names = [READY_ID, *group["columns"]] if bundle.from_ready else (
         group["columns"]
     )
-    columns = {name: frame_column(prediction, name) for name in names}
+    added = frame_columns(bundle)
+    columns = {name: frame_column(prediction, name, added)
+               for name in names}
     positions = np.flatnonzero((prediction["status"] == OK).to_numpy())
     if positions.size == 0:
         return []
@@ -1802,6 +2040,88 @@ def group_representatives(
         groups.append({"group": key, "rows": rows})
 
     return groups
+
+
+def group_far(
+    bundle: Union[str, Path, Bundle], prediction: pd.DataFrame
+) -> Optional[dict]:
+    """
+    群の中心から学習のときより遠い行の件数を, 群ごとに数える関数
+
+    Parameters
+    ----------
+    bundle: Union[str, Path, Bundle]
+        群分けの一式かそのディレクトリ
+    prediction: pd.DataFrame
+        predict の表 (read_result で読んだ表も)
+
+    Returns
+    ----------
+    far: Optional[dict]
+        quantile, rows (印の付いた行の数), groups (群の番号の順の group,
+        rows (群の印の付いた行の数), threshold (群の距離の上限)) の辞書.
+        遠さの上限を持たない一式は None
+
+    Raises
+    ----------
+    ValueError
+        群分けの一式でない場合と, 表に列が無い場合
+    """
+    # 上限を持たない一式は None
+    if not isinstance(bundle, Bundle):
+        bundle = load_bundle(bundle)
+    if not bundle.from_group:
+        raise ValueError("group_far は群分けの一式だけに使えます")
+    limits = bundle.info["group"].get("far")
+    if limits is None:
+        return None
+    missing = [c for c in ("status", "group", FAR_COLUMN)
+               if c not in prediction.columns]
+    if missing:
+        raise ValueError(
+            f"予測の表に {', '.join(missing)} の列がありません"
+        )
+
+    # 割り当てた行の印の, 群ごとの件数
+    done = prediction[prediction["status"] == OK]
+    labels = np.array([int(v) for v in done["group"]], dtype=np.int64)
+    marks = done[FAR_COLUMN].fillna(False).astype(bool).to_numpy()
+    groups = [{"group": key,
+               "rows": int((marks & (labels == key)).sum()),
+               "threshold": threshold}
+              for key, threshold in enumerate(limits["thresholds"])]
+    far = {"quantile": limits["quantile"], "rows": int(marks.sum()),
+           "groups": groups}
+
+    return far
+
+
+def far_sentence(far: dict) -> str:
+    """
+    群の中心から遠い行の件数を述べる文を返す関数
+
+    Parameters
+    ----------
+    far: dict
+        group_far の結果
+
+    Returns
+    ----------
+    sentence: str
+        遠い行の件数と, 印の付いた群ごとの件数 (無ければ無いこと)
+    """
+    # 分位点は百分率
+    point = f"{far['quantile'] * 100:g} % 点"
+    if not far["rows"]:
+        sentence = ("群の中心から学習のときより遠い行は無い (群ごとの学習の"
+                    f"行の距離の {point}まで)")
+        return sentence
+    counts = ", ".join(f"群 {row['group']} {row['rows']:,} 行"
+                       for row in far["groups"] if row["rows"])
+    sentence = (f"{far['rows']:,} 行は群の中心から学習のときより遠い (群ごと"
+                f"の学習の行の距離の {point}を超える. {counts})")
+
+    return sentence
 
 
 def stability_sentence(stability: dict) -> str:
@@ -1851,7 +2171,7 @@ def conclude_groups(bundle: Bundle, prediction: pd.DataFrame) -> dict:
     conclusion: dict
         frame (decision を足した表. 割り当てた行は空, しなかった行は
         予測なし), summary (rows, predicted, skipped, k, groups,
-        representatives, stability), sentences, rules (空)
+        representatives, stability, far), sentences, rules (空)
     """
     # 割り当てたかと, 群ごとの行の数
     frame = prediction.copy()
@@ -1865,6 +2185,7 @@ def conclude_groups(bundle: Bundle, prediction: pd.DataFrame) -> dict:
         "groups": groups,
         "representatives": group_representatives(bundle, prediction),
         "stability": copy.deepcopy(group["stability"]),
+        "far": group_far(bundle, prediction),
     }
     head = (f"{summary['rows']:,} 行のうち {summary['predicted']:,} 行を "
             f"{group['k']} 個の群に割り当てた")
@@ -1876,6 +2197,8 @@ def conclude_groups(bundle: Bundle, prediction: pd.DataFrame) -> dict:
             f"群 {row['group']} {row['rows']:,} 行 "
             f"({row['share'] * 100:.1f} %)" for row in groups[:-1]
         ))
+        if summary["far"] is not None:
+            sentences.append(far_sentence(summary["far"]))
     sentences.append(stability_sentence(group["stability"]))
     conclusion = {"frame": frame, "summary": summary,
                   "sentences": sentences, "rules": {}}

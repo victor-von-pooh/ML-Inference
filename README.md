@@ -26,7 +26,7 @@
 
 | 相手 | 使うもの |
 | --- | --- |
-| ML-Provide (推論) | 推論の一式の作成と確かめ (並べるの一式は `make_rank_bundle` と `rank_metrics`, 群分けの一式は `make_group_bundle`, `group_summary`, `group_representatives`, 異常の度合いの一式は `make_anomaly_bundle`, 効果の一式は `make_uplift_bundle`, 値段の一式は `make_price_bundle`, 需要の一式は `make_demand_bundle`), 人の確認の記録 (`record_review`, `read_reviews`), 版 2 のデータセットの説明 (`describe_items`), 予測と同じデータの読み込み (`read_source`), 正解の種類と出どころ (`target_of`, `origin_sentence`), 結論 (決め方の項目 `RULE_KEYS`, 件数だけの結論 `conclude_outputs`, まとめからの文 `summary_sentences`), 撮影の深度から点 (`backproject`), 意思決定, 先の予測と列の効き, 方策の一式. 自作の繰り返しの手順 (`register_procedure`, `PROCEDURES`) と自作の部品 (`register_units`) の登録. 問題の設定 (ML-Quest) の損得と今のやり方は, 画面が引数で渡す |
+| ML-Provide (推論) | 推論の一式の作成と確かめ (並べるの一式は `make_rank_bundle` と `rank_metrics`, 群分けの一式は `make_group_bundle`, `group_summary`, `group_representatives`, `group_far`, 異常の度合いの一式は `make_anomaly_bundle`, 効果の一式は `make_uplift_bundle`, 値段の一式は `make_price_bundle`, 需要の一式は `make_demand_bundle`), 人の確認の記録 (`record_review`, `read_reviews`), 版 2 のデータセットの説明 (`describe_items`), 予測と同じデータの読み込み (`read_source`), 正解の種類と出どころ (`target_of`, `origin_sentence`), 結論 (決め方の項目 `RULE_KEYS`, 件数だけの結論 `conclude_outputs`, まとめからの文 `summary_sentences`), 撮影の深度から点 (`backproject`), 意思決定, 先の予測と列の効き, 方策の一式. 自作の繰り返しの手順 (`register_procedure`, `PROCEDURES`) と自作の部品 (`register_units`) の登録. 問題の設定 (ML-Quest) の損得と今のやり方は, 画面が引数で渡す |
 | ML-Found の学習のスクリプト (ML-Quest の骨組みを含む) | 学習の後に `make_bundle` で実験のディレクトリの中に一式を作る |
 
 ## 導入
@@ -227,40 +227,42 @@ rank_metrics("bundles/shop", frame, truth=pd.read_csv("later.csv"),
              seen=seen)  # {'users': ..., 'k': 10, 'recall_at_k': ..., 'ndcg': ...}
 ```
 
-### 行を群に割り当てる (一式の版 9)
+### 行を群に割り当てる (一式の版 9 と 16)
 
-群分けの実験 (重み `final_model.pt`, 定義 `model_spec.yaml`, 列の符号化と群の中心 `group_centers.json`, 群の割り当て `group_assignments.csv`, 群の安定性と群の要約 `evaluations/group_stability.json`, `evaluations/group_summary.json`) から一式を作る. モデルの入力は符号化した行の特徴 `x`, 出力は埋め込み `embedding`. 学習に使った表を渡すと, 割り当て直して実験の割り当てと比べる.
+群分けの実験 (重み `final_model.pt`, 定義 `model_spec.yaml`, 列の符号化と群の中心 `group_centers.json`, 群の割り当て `group_assignments.csv`, 群の安定性と群の要約 `evaluations/group_stability.json`, `evaluations/group_summary.json`) から一式を作る. モデルの入力は符号化した行の特徴 `x`, 出力は埋め込み `embedding`. 学習に使った表を渡すと, 割り当て直して実験の割り当てと比べ, 群ごとの学習の行の距離の 99 % 点を群の中心から遠い行の上限として持つ一式 (版 16) になる. 上限より遠い行 (学習のときに無かった種類の行) には `far` の印が付く. 表を渡さない一式 (版 9) は印を付けない.
 
 ```python
 from ml_inference import (
-    group_representatives, group_summary, infer, make_group_bundle, predict
+    group_far, group_representatives, group_summary, infer,
+    make_group_bundle, predict
 )
 
 make_group_bundle("bundles/customers", "outputs/group_4/run",
                   data="data/customers.csv")
 
-# 行ごとの群 (元の列と status, reason, group, distance の表)
+# 行ごとの群 (元の列と status, reason, group, distance, far の表)
 frame = predict("bundles/customers", "new_customers.csv")
+group_far("bundles/customers", frame)   # 学習のときより遠い行の件数 (全体と群ごと) と群ごとの上限
 group_summary("bundles/customers", frame)   # 群ごとの行の数, 割合, 安定性と列の要約 (最後は「全体」)
 group_representatives("bundles/customers", frame, count=5)   # 群ごとに中心に近い行 (行の位置, 距離, 群を作る列の値) を 5 件まで
 
 result = infer("bundles/customers", "new_customers.csv")
-result["sentences"]   # ['500 行のうち 500 行を 4 個の群に割り当てた', '群 0 ...', '学習の群の安定性 ...']
+result["sentences"]   # ['500 行のうち 500 行を 4 個の群に割り当てた', '群 0 ...', '3 行は群の中心から学習のときより遠い ...', '学習の群の安定性 ...']
 result["summary"]["representatives"]   # 群ごとの代表の行 (既定の 3 件. 群の要約 result["summary"]["groups"] と並ぶ)
 ```
 
-### 写真を既製の埋め込みで群に分ける (一式の版 10)
+### 写真を既製の埋め込みで群に分ける (一式の版 10 と 17)
 
-学習しない torchvision の画像の分類のモデルの, 分類の最後の層の手前の出力 (埋め込み) で写真を群に分ける一式も作れる. 群の中心, 割り当て, 群の安定性と群の要約は ML-Quest の群分けの骨組みが成果物のディレクトリに書き (`group_centers.json` は列の符号化の代わりに既製のモデルの名前と重みの hash を持つ), 一式は重みを写さず出どころから読んで hash で確かめる.
+学習しない torchvision の画像の分類のモデルの, 分類の最後の層の手前の出力 (埋め込み) で写真を群に分ける一式も作れる. 群の中心, 割り当て, 群の安定性と群の要約は ML-Quest の群分けの骨組みが成果物のディレクトリに書き (`group_centers.json` は列の符号化の代わりに既製のモデルの名前と重みの hash を持つ), 一式は重みを写さず出どころから読んで hash で確かめる. 群に分けた写真を渡すと, 行の群分けと同じく遠い写真の上限を持つ一式 (版 17) になる.
 
 ```python
 from ml_inference import group_representatives, make_group_bundle, predict
 
-# 骨組みの成果物と, 群に分けた写真 (割り当て直して比べる)
+# 骨組みの成果物と, 群に分けた写真 (割り当て直して比べ, 遠さの上限を求める)
 make_group_bundle("bundles/products", "outputs/grouping",
                   data="data/photos")
 
-# 写真ごとの群 (path, width, height などと status, reason, group, distance の表)
+# 写真ごとの群 (path, width, height などと status, reason, group, distance, far の表)
 frame = predict("bundles/products", "new_photos/")
 group_representatives("bundles/products", frame)   # 群ごとに中心に近い写真 (path, width, height)
 ```

@@ -39,8 +39,9 @@ from ml_inference.weights import (
 # 版 7), 既製のモデルの一式は版 6, 並べるの一式は版 8, 群分けの一式は
 # 版 9, 既製の埋め込みの群分けの一式は版 10, 異常の度合いの一式は版 11,
 # 効果の一式は版 12, 値段の一式は版 13, 需要の一式は版 14, 検索の一式は版 15
-# で書く)
-BUNDLE_FORMAT_VERSION = 15
+# で書き, 群の中心から遠い行の上限を持つ群分けの一式は版 16 (既製の埋め込み
+# は版 17) で書く)
+BUNDLE_FORMAT_VERSION = 17
 COLUMN_BUNDLE_VERSION = 3
 ITEMS_BUNDLE_VERSION = 4
 NOISE_BUNDLE_VERSION = 5
@@ -54,23 +55,36 @@ UPLIFT_BUNDLE_VERSION = 12
 PRICE_BUNDLE_VERSION = 13
 DEMAND_BUNDLE_VERSION = 14
 SEARCH_BUNDLE_VERSION = 15
+FAR_GROUP_BUNDLE_VERSION = 16
+READY_FAR_GROUP_BUNDLE_VERSION = 17
 
-# 群分けの一式の版 (列の符号化か, 既製のモデルの埋め込み)
-GROUP_VERSIONS = (GROUP_BUNDLE_VERSION, READY_GROUP_BUNDLE_VERSION)
+# 群分けの一式の版 (列の符号化か, 既製のモデルの埋め込み. 後ろの 2 つは群の
+# 中心から遠い行の上限を持つ版)
+GROUP_VERSIONS = (GROUP_BUNDLE_VERSION, READY_GROUP_BUNDLE_VERSION,
+                  FAR_GROUP_BUNDLE_VERSION, READY_FAR_GROUP_BUNDLE_VERSION)
+
+# 既製の埋め込みの群分けの一式の版
+READY_GROUP_VERSIONS = (READY_GROUP_BUNDLE_VERSION,
+                        READY_FAR_GROUP_BUNDLE_VERSION)
+
+# 群の中心から遠い行の上限を持つ群分けの一式の版
+FAR_GROUP_VERSIONS = (FAR_GROUP_BUNDLE_VERSION,
+                      READY_FAR_GROUP_BUNDLE_VERSION)
 
 # データセットを持たない一式の版
 DATASETLESS_VERSIONS = (
     NOISE_BUNDLE_VERSION, READY_BUNDLE_VERSION, TABLE_BUNDLE_VERSION,
     RANK_BUNDLE_VERSION, GROUP_BUNDLE_VERSION, READY_GROUP_BUNDLE_VERSION,
     ANOMALY_BUNDLE_VERSION, UPLIFT_BUNDLE_VERSION, PRICE_BUNDLE_VERSION,
-    DEMAND_BUNDLE_VERSION, SEARCH_BUNDLE_VERSION
+    DEMAND_BUNDLE_VERSION, SEARCH_BUNDLE_VERSION, FAR_GROUP_BUNDLE_VERSION,
+    READY_FAR_GROUP_BUNDLE_VERSION
 )
 
 # 出力の形 ranking の一式の版 (並べるの一式と検索の一式)
 RANKING_VERSIONS = (RANK_BUNDLE_VERSION, SEARCH_BUNDLE_VERSION)
 
 # ready を持つ一式の版 (既製のモデル, 既製の埋め込みの群分け, 検索)
-READY_VERSIONS = (READY_BUNDLE_VERSION, READY_GROUP_BUNDLE_VERSION,
+READY_VERSIONS = (READY_BUNDLE_VERSION, *READY_GROUP_VERSIONS,
                   SEARCH_BUNDLE_VERSION)
 
 # 出力の形 effect の一式の版 (効果の一式と値段の一式)
@@ -380,9 +394,10 @@ class Bundle:
         Returns
         ----------
         group: bool
-            group (列の符号化と群の中心) を持つ一式 (版 9) なら True
+            group (列の符号化と群の中心) を持つ一式 (版 9, 10, 16, 17) なら
+            True
         """
-        # 版 9 の group の有無
+        # 版 9, 10, 16, 17 の group の有無
         group = self.info.get("group") is not None
 
         return group
@@ -1058,8 +1073,9 @@ def check_info(info: Any) -> list[str]:
     if info.get("ready") is not None and version not in READY_VERSIONS:
         errors.append(
             f"ready を持つ一式は版 {READY_BUNDLE_VERSION} にしてください "
-            f"(既製の埋め込みの群分けは版 {READY_GROUP_BUNDLE_VERSION}, 検索"
-            f"は版 {SEARCH_BUNDLE_VERSION})"
+            f"(既製の埋め込みの群分けは版 {READY_GROUP_BUNDLE_VERSION} か "
+            f"{READY_FAR_GROUP_BUNDLE_VERSION}, 検索は版 "
+            f"{SEARCH_BUNDLE_VERSION})"
         )
     if version == READY_BUNDLE_VERSION:
         errors.extend(check_ready_info(info))
@@ -1080,14 +1096,16 @@ def check_info(info: Any) -> list[str]:
         errors.extend(check_rank_info(info))
     if (output.get("form") == "cluster") != (version in GROUP_VERSIONS):
         errors.append(
-            f"出力の形 cluster は版 {GROUP_BUNDLE_VERSION} と "
-            f"{READY_GROUP_BUNDLE_VERSION} の群分けの一式だけで, この版の一式"
-            "の出力の形は cluster だけです"
+            "出力の形 cluster は版 "
+            f"{', '.join(map(str, GROUP_VERSIONS))} の群分けの一式だけで, "
+            "この版の一式の出力の形は cluster だけです"
         )
     if info.get("group") is not None and version not in GROUP_VERSIONS:
         errors.append(
             f"group を持つ一式は版 {GROUP_BUNDLE_VERSION} (既製の埋め込みは"
-            f"版 {READY_GROUP_BUNDLE_VERSION}) にしてください"
+            f"版 {READY_GROUP_BUNDLE_VERSION}. 遠さの上限を持てば版 "
+            f"{FAR_GROUP_BUNDLE_VERSION} と {READY_FAR_GROUP_BUNDLE_VERSION})"
+            " にしてください"
         )
     if version in GROUP_VERSIONS:
         # 群分けの一式の決まりは群分けのモジュールが持つ
