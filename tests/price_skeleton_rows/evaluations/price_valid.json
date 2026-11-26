@@ -1,0 +1,47 @@
+{
+  "name": "price_valid",
+  "split": "valid",
+  "kind": "table",
+  "x": null,
+  "columns": [
+    "rows",
+    "products",
+    "mae",
+    "rmse",
+    "elasticity",
+    "elasticity_counted",
+    "profit",
+    "current_profit",
+    "profit_gain",
+    "profit_ratio",
+    "changed",
+    "max_change"
+  ],
+  "rows": [
+    {
+      "rows": 10,
+      "products": 10,
+      "mae": 27.73798446059227,
+      "rmse": 31.574951023509016,
+      "elasticity": -0.5855773245207315,
+      "elasticity_counted": 10,
+      "profit": 1236.008118391037,
+      "current_profit": 1126.8764221668243,
+      "profit_gain": 109.13169622421265,
+      "profit_ratio": 1.0968444224029177,
+      "changed": 10,
+      "max_change": 0.1
+    }
+  ],
+  "description": "検証用の行 (10 行. 商品 10) の, 記録の値段での売れた数の予測の誤差 (mae, rmse. 小さいほど良い) と, 商品ごとの今の値段 (行の記録の値段) で 1 % 上げたときに予測した数が何 % 変わるかの平均 (elasticity), 値段の候補 [-0.1, 0, 0.1, 0.2] の中で変える幅の上限 0.1 を超えない, 見込みの利益が最も大きい値段を選んだときの見込みの利益 (商品ごとの 1 行あたりの売れた数の予測から数えた, 1 行あたりの利益) の和 (profit) と, 今の値段での和 (current_profit), その差 (profit_gain) と比 (profit_ratio. 大きいほど良い. 今の利益の和が 0 以下なら空). changed は値段を変える商品の数 (最良のモデル)",
+  "baseline": null,
+  "guard": false,
+  "better": {
+    "mae": "lower",
+    "rmse": "lower",
+    "profit_gain": "higher",
+    "profit_ratio": "higher"
+  },
+  "epoch": 8,
+  "created_at": "2026-11-26T13:08:22+09:00"
+}

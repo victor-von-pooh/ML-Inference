@@ -28,6 +28,7 @@ from ml_inference.policy import (
 from ml_inference.predict import (
     OK, SKIPPED, describe_bundle, predict, read_source, target_of
 )
+from ml_inference.price import make_price_bundle
 from ml_inference.procedures import (
     PROCEDURES, get_procedure, make_generator, procedure_options,
     register_procedure, run_procedure, start_noise
@@ -94,6 +95,7 @@ __all__ = [
     "make_bundle",
     "make_generator",
     "make_group_bundle",
+    "make_price_bundle",
     "make_rank_bundle",
     "make_ready_bundle",
     "make_sample_bundle",
