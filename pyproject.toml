@@ -32,3 +32,8 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# 重みをネットワークで取りに行くテストは, -m network を選んだときだけ
+addopts = "-m 'not network'"
+markers = [
+    "network: 本物の重みをネットワークで取りに行くテスト"
+]

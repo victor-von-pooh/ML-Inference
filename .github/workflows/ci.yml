@@ -4,6 +4,13 @@ on:
   push:
     branches: [main]
   pull_request:
+  # 手で起動すると, 本物の重みを取りに行くテスト (印 network) も動かせる
+  workflow_dispatch:
+    inputs:
+      network:
+        description: 本物の重みを取りに行くテストも動かす
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -38,6 +45,8 @@ jobs:
       - run: pip install ${{ matrix.torch }} torchvision --index-url https://download.pytorch.org/whl/cpu
       - run: pip install -e ".[${{ matrix.extras }}]"
       - run: pytest -q
+      - if: ${{ inputs.network }}
+        run: pytest -q -m network
       # 1 行 79 文字以内 (CODING_STYLE.md. 日本語も 1 文字と数える)
       - name: 行の長さの確認
         run: |

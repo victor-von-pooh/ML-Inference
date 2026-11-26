@@ -50,6 +50,8 @@ pip install -e ".[dev]"
 pytest
 ```
 
+本物の重み (torchvision の resnet18) を取りに行くテストは, 既定の `pytest` では動かない. `pip install torchvision` の後に `pytest -m network` で動かす.
+
 ## 使い方
 
 ### 推論の一式を作る
