@@ -1,0 +1,38 @@
+{
+  "format_version": 1,
+  "recipe": "demand_recipe.yaml",
+  "orders": "demand_orders.csv",
+  "features": [
+    "category",
+    "units_lag1",
+    "units_lag7",
+    "units_mean7",
+    "date_weekday"
+  ],
+  "product": "product_id",
+  "date": "date",
+  "units": "units",
+  "stock": "stock",
+  "id": "record_id",
+  "horizon": 7,
+  "interval": 7,
+  "levels": [
+    0.1,
+    0.25,
+    0.5,
+    0.75,
+    0.9
+  ],
+  "shortage_cost": 3,
+  "holding_cost": 1,
+  "max_order": 60,
+  "model": {
+    "input": "x",
+    "quantiles": "quantiles"
+  },
+  "train": {
+    "rows": 16,
+    "products": 4,
+    "demand_mean": 48.875
+  }
+}

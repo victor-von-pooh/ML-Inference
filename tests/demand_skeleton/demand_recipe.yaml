@@ -1,0 +1,69 @@
+format_version: 1
+task: demand
+target: units
+product: product_id
+date: date
+stock: stock
+horizon: 7
+id: record_id
+steps:
+- op: drop_columns
+  columns:
+  - waste
+  state:
+    columns:
+    - waste
+- op: lag
+  columns:
+  - units
+  lags:
+  - 1
+  - 7
+  windows:
+  - 7
+  by:
+  - product_id
+  time: date
+  freq: 1D
+  state:
+    columns:
+    - units
+- op: datetime_parts
+  columns:
+  - date
+  parts:
+  - weekday
+  state:
+    columns:
+    - date
+- op: standardize
+  columns: auto
+  state:
+    values:
+      category:
+      - 0.5
+      - 0.5163977794943222
+      units_lag1:
+      - 4.625
+      - 3.442382895611701
+      units_lag7:
+      - 5.9375
+      - 3.3954626587059775
+      units_mean7:
+      - 6.8125
+      - 3.531286308584632
+      date_weekday:
+      - 3.0
+      - 1.0
+    columns:
+    - category
+    - units_lag1
+    - units_lag7
+    - units_mean7
+    - date_weekday
+split:
+  method: time
+  valid: 0.2
+  test: 0.2
+  unlabeled: drop
+item_steps: []
