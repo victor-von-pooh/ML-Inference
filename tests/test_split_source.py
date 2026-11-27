@@ -7,6 +7,7 @@ import torch
 import yaml
 from conftest import linear_spec, save_weights
 from ml_eda import export_dataset, load_data, load_dataset
+from ml_modelcontrol import build_model
 from test_decision import regression_bundle
 from test_noise_bundle import diffusion_bundle
 
@@ -261,3 +262,174 @@ def test_split_refused_for_steps_and_other_bundles(tmp_path: Path) -> None:
     noise = diffusion_bundle(tmp_path / "noise", "ddim")
     with pytest.raises(ValueError, match="表と時系列の版 1"):
         predict(noise, source)
+
+
+def test_split_data_from_other_bundle(
+    tmp_path: Path, table_dataset: Path, table_csv: Path
+) -> None:
+    """
+    別の一式で読んだ印付きの Data と, 指紋の無い印付きの Data を断る
+    ことを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    table_dataset: Path
+        データセット
+    table_csv: Path
+        元の CSV
+
+    Returns
+    ----------
+    None
+    """
+    # 学習に使う列の名前は同じで, 当てはめた値の違うデータセットの一式
+    first = bundle_of(mkdir(tmp_path / "a"), table_dataset, 3)
+    recipe = yaml.safe_load(
+        (table_dataset / "recipe.yaml").read_text(encoding="utf-8")
+    )
+    recipe["split"]["seed"] = 1
+    for step in recipe["steps"]:
+        step.pop("state", None)
+    other = tmp_path / "other"
+    export_dataset(load_data(table_csv), recipe, other)
+    second = bundle_of(mkdir(tmp_path / "b"), other, 3)
+    assert load_dataset(other).features == load_dataset(
+        table_dataset
+    ).features
+
+    # 一式 A で読んだ Data は一式 B では断り, A では推論できる
+    data = read_source(load_bundle(first),
+                       {"dataset": table_dataset, "split": "test"})
+    with pytest.raises(ValueError, match="この一式で分割を読み直して"):
+        predict(second, data)
+    assert (predict(first, data)["status"] == "ok").all()
+
+    # 指紋の無い印付きの Data も断る
+    del data.source["fingerprint"]
+    with pytest.raises(ValueError, match="この一式で分割を読み直して"):
+        predict(first, data)
+
+
+def mkdir(place: Path) -> Path:
+    """
+    ディレクトリを作って返す関数
+
+    Parameters
+    ----------
+    place: Path
+        作るディレクトリ
+
+    Returns
+    ----------
+    place: Path
+        作ったディレクトリ
+    """
+    # 一式の重みを書く親の用意
+    place.mkdir(parents=True, exist_ok=True)
+
+    return place
+
+
+def test_split_broken_dataset(
+    tmp_path: Path, table_dataset: Path
+) -> None:
+    """
+    壊れた説明と形の違う説明を, 理由付きの ValueError で断ることを
+    確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    table_dataset: Path
+        データセット
+
+    Returns
+    ----------
+    None
+    """
+    # 一式を作った後に, 同じ場所の説明を壊す
+    path = bundle_of(tmp_path, table_dataset, 3)
+    file = table_dataset / "dataset.yaml"
+    info = yaml.safe_load(file.read_text(encoding="utf-8"))
+    source = {"dataset": str(table_dataset), "split": "test"}
+    file.write_text("format_version: [1\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="読めません"):
+        predict(path, source)
+    file.write_text(
+        yaml.safe_dump({**info, "splits": ["test"]}), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="読めません"):
+        predict(path, source)
+    file.write_text(yaml.safe_dump(info), encoding="utf-8")
+    (table_dataset / "test.parquet").write_bytes(b"broken")
+    with pytest.raises(ValueError, match="読めません"):
+        predict(path, source)
+
+
+def test_split_lag_and_transformed_target(
+    tmp_path: Path, regression_dataset: Path
+) -> None:
+    """
+    過去の値の列を作るレシピの分割を, 前処理をかけずに推論すること
+    (過去の値の列を作り直さない) と, 目的の列を変換したレシピで測り直し
+    とたどり直しができ, 何段も先の予測を断ることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    regression_dataset: Path
+        目的の列を対数と標準化で変換したデータセット
+
+    Returns
+    ----------
+    None
+    """
+    # 2 つの系列で y が 1 ずつ増え, 次の値は前の値 + 1 のモデル
+    series = mkdir(tmp_path / "series")
+    frame = pd.DataFrame({
+        "s": ["a"] * 30 + ["b"] * 30,
+        "y": np.r_[np.arange(30), 100 + np.arange(30)].astype(float),
+    })
+    frame.to_csv(series / "s.csv", index=False)
+    recipe = {
+        "format_version": 1, "target": "y", "task": "forecasting",
+        "steps": [
+            {"op": "lag", "columns": ["y"], "lags": [1], "by": ["s"]},
+            {"op": "drop_missing"},
+            {"op": "drop_columns", "columns": ["s"]},
+        ],
+        "split": {"method": "random", "valid": 0.2, "test": 0.2,
+                  "seed": 0},
+    }
+    export_dataset(load_data(series / "s.csv"), recipe, series / "ds")
+    spec = linear_spec(1, 1)
+    model = build_model(spec)
+    with torch.no_grad():
+        model.nodes["head"].weight.fill_(1.0)
+        model.nodes["head"].bias.fill_(1.0)
+    torch.save(model.state_dict(), series / "w.pt")
+    make_bundle(series / "bundle", spec, series / "ds", series / "w.pt")
+
+    # 分割の過去の値の列のままなので, 予測は目的の列と同じ
+    source = {"dataset": str(series / "ds"), "split": "test"}
+    result = predict(series / "bundle", source)
+    assert (result["status"] == "ok").all()
+    assert np.allclose(result["prediction"], result["y"])
+    with pytest.raises(ValueError, match="何段も先の予測は前処理の前の行"):
+        infer(series / "bundle", source, forecast=True)
+
+    # 目的の列を変換したレシピの回帰の一式で測り直しとたどり直し
+    path = bundle_of(mkdir(tmp_path / "reg"), regression_dataset, 1)
+    split = {"dataset": str(regression_dataset), "split": "train"}
+    measured = remeasure(path, split, write=False)
+    assert measured["rows"] == len(load_dataset(regression_dataset).frames[
+        "train"
+    ])
+    traced = backtest(
+        path, split, {"type": "quantity", "under_cost": 9, "over_cost": 1}
+    )
+    assert traced["rows"] == measured["rows"]

@@ -1,4 +1,6 @@
 import copy
+import hashlib
+import json
 from pathlib import Path
 from typing import Any, Optional, Union
 
@@ -63,6 +65,10 @@ SPLIT_KEYS = ("dataset", "split")
 
 # 前処理を済ませた分割の Data の印 (Data.source の鍵)
 PREPROCESSED = "preprocessed"
+
+# 前処理を済ませた分割の Data の, 読んだデータセットの指紋 (Data.source
+# の鍵. 説明の項目とレシピの sha256)
+FINGERPRINT = "fingerprint"
 
 # 分割を読むデータセットと一式のデータセットの写しで同じであるべき説明の
 # 項目 (前処理を済ませた値は, 同じレシピの当てはめでしか意味を持たない
@@ -380,25 +386,25 @@ def read_split(
         )
     root, name = split_request(source)
 
-    # データセットの中だけを読む (版 2 と 3, 外を指す場所は ML-EDA の誤り)
+    # データセットの中だけを読む (版 2 と 3, 外を指す場所は ML-EDA の誤り.
+    # 壊れた説明や分割のファイルの誤り (YAML, parquet など) も, 元の文を
+    # 添えた ValueError に)
     try:
         dataset = load_dataset(root)
-    except (OSError, KeyError, TypeError) as error:
-        raise ValueError(f"{root} を読めません ({error})") from error
+    except Exception as error:
+        raise ValueError(
+            f"{root} を読めません ({type(error).__name__}: {error})"
+        ) from error
     if name not in dataset.frames:
         names = ", ".join(dataset.frames) or "無し"
         raise ValueError(
             f"{root} に {name} の分割はありません (分割: {names})"
         )
 
-    # 一式のデータセットの写しと, 説明の項目とレシピが同じもの
-    own = bundle.dataset
-    different = [
-        key for key in SPLIT_MATCH
-        if dataset.info.get(key) != own.info.get(key)
-    ]
-    if dataset.recipe != own.recipe:
-        different.append("recipe")
+    # 一式のデータセットの写しと, 説明の項目とレシピが同じもの (欠損の値
+    # も等しく比べるため, 書き出した文字で)
+    own, theirs = match_items(bundle.dataset), match_items(dataset)
+    different = [key for key in own if own[key] != theirs[key]]
     if different:
         raise ValueError(
             f"{root} は一式を作ったデータセットと違います "
@@ -413,7 +419,8 @@ def read_split(
         frame[target] = original_target(bundle, frame[target])
     data = Data(
         kind=bundle.kind, frame=frame,
-        source={"dataset": str(root), "split": name, PREPROCESSED: True}
+        source={"dataset": str(root), "split": name, PREPROCESSED: True,
+                FINGERPRINT: fingerprint(bundle.dataset)}
     )
 
     return data
@@ -454,6 +461,85 @@ def original_target(bundle: Bundle, values: pd.Series) -> pd.Series:
     )
 
     return result
+
+
+def match_items(dataset: Any) -> dict:
+    """
+    分割と一式で同じであるべき説明の項目とレシピを, 比べられる文字にする
+    関数
+
+    Parameters
+    ----------
+    dataset: Any
+        ML-EDA のデータセット (説明 info とレシピ recipe を持つ)
+
+    Returns
+    ----------
+    items: dict
+        SPLIT_MATCH の項目と recipe から, 鍵の順をそろえた JSON の文字
+        (欠損の値 NaN も同じ文字になる)
+    """
+    # 数と文字の他 (日時など) も文字にして比べる
+    values = {key: dataset.info.get(key) for key in SPLIT_MATCH}
+    values["recipe"] = dataset.recipe
+    items = {
+        key: json.dumps(value, sort_keys=True, ensure_ascii=False,
+                        default=str)
+        for key, value in values.items()
+    }
+
+    return items
+
+
+def fingerprint(dataset: Any) -> str:
+    """
+    分割と一式で同じであるべき説明の項目とレシピの指紋を返す関数
+
+    Parameters
+    ----------
+    dataset: Any
+        ML-EDA のデータセット
+
+    Returns
+    ----------
+    digest: str
+        match_items の文字の sha256 (16 進)
+    """
+    # 鍵の順をそろえた文字の hash
+    text = json.dumps(match_items(dataset), sort_keys=True)
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    return digest
+
+
+def check_preprocessed(bundle: Bundle, data: Data) -> None:
+    """
+    印付きの Data が, この一式と同じデータセットから読んだものかを
+    確かめる関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+    data: Data
+        read_source が分割から作った Data
+
+    Returns
+    ----------
+    None
+
+    Raises
+    ----------
+    ValueError
+        読んだデータセットの指紋が一式のデータセットと違う場合 (別の一式で
+        読んだ Data と, 指紋の無い Data)
+    """
+    # 前処理を飛ばすので, 同じ前処理のデータセットの値だけ
+    if data.source.get(FINGERPRINT) != fingerprint(bundle.dataset):
+        raise ValueError(
+            "前処理を済ませた分割は, この一式を作ったデータセットと説明か"
+            "レシピが違います. この一式で分割を読み直してください"
+        )
 
 
 def refuse_preprocessed(source: Any, what: str) -> None:
@@ -506,6 +592,7 @@ def features_of(
     """
     # 前処理を済ませた分割は学習に使う列のまま
     if data.source.get(PREPROCESSED) is True:
+        check_preprocessed(bundle, data)
         lost = [c for c in bundle.dataset.features
                 if c not in data.frame.columns]
         if lost:
@@ -1592,6 +1679,8 @@ def predict(
         bundle = load_bundle(bundle)
     if is_preprocessed(source):
         require_split_bundle(bundle)
+        if isinstance(source, Data):
+            check_preprocessed(bundle, source)
         if options:
             raise ValueError(
                 "書き出したデータセットの分割には, 読み込みの設定 (options)"
