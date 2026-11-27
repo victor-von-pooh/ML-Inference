@@ -20,8 +20,9 @@ from ml_inference import (
     make_demand_bundle, predict, read_result, write_result
 )
 
-# 商品の数, 日の数, 先の期間の日数, 学ぶ水準, 損と上限 (ML_tester の
-# TASK_TYPES.md の 40 の発注の判断の例)
+# 商品の数, 日の数, 先の期間の日数, 学ぶ水準, 損と上限 (期間と水準は
+# ML-Quest の既定, 損と上限は ML-Quest の docs/DESIGN.md の発注の判断の
+# 例と同じ値)
 PRODUCTS = 4
 DAYS = 70
 HORIZON = 7
