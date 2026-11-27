@@ -606,6 +606,6 @@ def test_mixed_columns_given_types(tmp_path: Path) -> None:
 
     # 知らない新しい版は読まない
     newer = write_raw(tmp_path / "newer", "spend\n1\n",
-                      {"format_version": 5})
-    with pytest.raises(ValueError, match="format_version 5"):
+                      {"format_version": 6})
+    with pytest.raises(ValueError, match="format_version 6"):
         read_result(newer)

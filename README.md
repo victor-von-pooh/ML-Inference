@@ -120,6 +120,12 @@ write_result(result, "results/reviews")   # predictions.csv と result.yaml
 
 書き出した結果は `read_result(path)` で読み直せる (表は `frame`). 数に見える文字 (`"001"`) や欠けのある整数の列は, そのまま読み直すと値が変わるので, `write_result` がその列の型を `result.yaml` の `column_types` に残し (結果の形の版 3), `read_result` は文字と欠損を持てる整数 (`Int64`) で読む. 数と文字の混ざる列 (`962.8` と `"abc"` など) は `mixed` を残し (結果の形の版 4), 値ごとの型 (数は数, 文字は文字) で読む. どの一式の種類の結果も同じ (DESIGN の「書き出し」). 呼び手の都合の列の型は `read_result(path, override_types={"status": "text"}, fallback_types={"rank": "integer"})` のように渡す (`override_types` は `column_types` より強く当て, `fallback_types` は `column_types` に無い列だけに当てる. 型は `text` か `integer`).
 
+書き出したデータセットの分割 (学習に使わなかったテスト用の分割など) は, 名前で指して前処理をかけずに推論できる (表と時系列の一式だけ. 一式を作ったのと同じ前処理のデータセットに限る). 目的の列は元の値に戻るので, 同じ辞書を `remeasure` と `backtest` にも渡せる. 結果は `split` に分割を残す (結果の形の版 5).
+
+```python
+result = infer("bundles/churn", {"dataset": "outputs/dataset", "split": "test"})
+```
+
 ### 構造のある出力, ベクトル, 繰り返しの手順 (一式の版 3)
 
 一式は受け持ち (`role`) と出力の形 (`form`: `class`, `value`, `distribution`, `mask`, `point_cloud`, `vector`, `text`, `image`, `table`) を持ち, 出力の形ごとに読み方を変える. 省くとタスクから決める (分類は `class`, 回帰と予測は `value`). 版 1 と 2 の一式もそのまま読める.

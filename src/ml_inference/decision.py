@@ -2056,7 +2056,7 @@ def guard_result(
 
 def backtest(
     bundle: Union[str, Path, Bundle],
-    source: Union[str, Path, pd.DataFrame, Data], decision: dict,
+    source: Union[str, Path, pd.DataFrame, Data, dict], decision: dict,
     options: Optional[dict] = None, count: Optional[Any] = None,
     group: Any = "auto", guard: Optional[dict] = None
 ) -> dict:
@@ -2068,8 +2068,8 @@ def backtest(
     ----------
     bundle: Union[str, Path, Bundle]
         推論の一式かそのディレクトリ
-    source: Union[str, Path, pd.DataFrame, Data]
-        目的の列を持つ過去のデータ
+    source: Union[str, Path, pd.DataFrame, Data, dict]
+        目的の列を持つ過去のデータ (書き出したデータセットの分割の辞書も)
     decision: dict
         意思決定の決め方 (current は今のやり方の列の名前か決まり.
         決まりなら全ての行で値を作り, 値の無い行は数えない)
