@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import torch
 from ml_eda import (
-    Data, ItemSplit, load_data, load_items, transform_entry
+    Data, ItemSplit, load_data, load_dataset, load_items, transform_entry
 )
 
 from ml_inference.anomaly import anomaly_of_bundle, predict_anomaly
@@ -57,6 +57,17 @@ ITEM_LOADERS = {
 
 # 元の撮影に足した正規化の平行移動の列
 SHIFT_COLUMNS = ("shift_x", "shift_y", "shift_z")
+
+# 書き出したデータセットの分割を指す辞書の鍵 (データセットと分割の名前)
+SPLIT_KEYS = ("dataset", "split")
+
+# 前処理を済ませた分割の Data の印 (Data.source の鍵)
+PREPROCESSED = "preprocessed"
+
+# 分割を読むデータセットと一式のデータセットの写しで同じであるべき説明の
+# 項目 (前処理を済ませた値は, 同じレシピの当てはめでしか意味を持たない
+# ため. レシピも比べる)
+SPLIT_MATCH = ("kind", "task", "target", "features", "classes")
 
 
 def lag_settings(bundle: Bundle) -> dict:
@@ -114,7 +125,7 @@ def series_keys(frame: pd.DataFrame, settings: dict) -> pd.Series:
 
 
 def read_source(
-    bundle: Bundle, source: Union[str, Path, pd.DataFrame, Data],
+    bundle: Bundle, source: Union[str, Path, pd.DataFrame, Data, dict],
     options: Optional[dict] = None
 ) -> Data:
     """
@@ -124,8 +135,9 @@ def read_source(
     ----------
     bundle: Bundle
         推論の一式
-    source: Union[str, Path, pd.DataFrame, Data]
-        ファイルかディレクトリ, 表, ML-EDA で読んだデータ
+    source: Union[str, Path, pd.DataFrame, Data, dict]
+        ファイルかディレクトリ, 表, ML-EDA で読んだデータ, 書き出した
+        データセットの分割 ({"dataset": 場所, "split": 名前})
     options: Optional[dict] = None
         読み込みの設定 (学習のときの設定に上書きする. 場所を渡した場合
         だけ使う)
@@ -133,13 +145,18 @@ def read_source(
     Returns
     ----------
     data: Data
-        読み込んだデータ
+        読み込んだデータ (分割は前処理を済ませた印付き)
 
     Raises
     ----------
     ValueError
-        表で渡せない種類の場合と, 文の列が無い場合
+        表で渡せない種類の場合と, 文の列が無い場合, 分割を読めない場合
     """
+    # 書き出したデータセットの分割は前処理を済ませた印付き
+    if is_split(source):
+        data = read_split(bundle, source, options)
+        return data
+
     # 読んだデータと表はそのまま (文は文の列を持つ表)
     kind = bundle.kind
     if isinstance(source, Data):
@@ -188,6 +205,285 @@ def read_source(
     return data
 
 
+def is_split(source: Any) -> bool:
+    """
+    書き出したデータセットの分割を指す辞書かを返す関数
+
+    Parameters
+    ----------
+    source: Any
+        推論するデータ
+
+    Returns
+    ----------
+    result: bool
+        dataset か split の鍵を持つ辞書なら True (雑音だけの一式の件数と種
+        の辞書は False)
+    """
+    # 鍵のどれかを持つ辞書
+    result = isinstance(source, dict) and any(
+        key in source for key in SPLIT_KEYS
+    )
+
+    return result
+
+
+def is_preprocessed(source: Any) -> bool:
+    """
+    前処理を済ませた分割 (辞書か, 印付きの Data) かを返す関数
+
+    Parameters
+    ----------
+    source: Any
+        推論するデータ
+
+    Returns
+    ----------
+    result: bool
+        分割を指す辞書か, read_source が分割から作った Data なら True
+    """
+    # 印は真偽値の True だけ
+    result = is_split(source) or (
+        isinstance(source, Data) and source.source.get(PREPROCESSED) is True
+    )
+
+    return result
+
+
+def split_request(source: dict) -> tuple[Path, str]:
+    """
+    分割を指す辞書を確かめ, データセットの場所と分割の名前を返す関数
+
+    Parameters
+    ----------
+    source: dict
+        {"dataset": データセットのディレクトリ, "split": 分割の名前}
+
+    Returns
+    ----------
+    root: Path
+        データセットのディレクトリ (~ を広げ, たどった後の絶対パス)
+    name: str
+        分割の名前
+
+    Raises
+    ----------
+    ValueError
+        知らない鍵がある場合と, 場所か名前が空でない文字でない場合
+    """
+    # 鍵は dataset と split だけ, 値は空でない文字
+    unknown = [str(k) for k in source if k not in SPLIT_KEYS]
+    if unknown:
+        raise ValueError(
+            f"{', '.join(unknown)} は知らない項目です (dataset と split "
+            "だけ)"
+        )
+    place, name = source.get("dataset"), source.get("split")
+    if not isinstance(place, (str, Path)) or not str(place).strip():
+        raise ValueError("dataset (データセットのディレクトリ) を書いて"
+                         "ください")
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("split (分割の名前) を書いてください")
+    root = Path(place).expanduser().resolve()
+
+    return root, name
+
+
+def split_record(source: Union[dict, Data]) -> dict:
+    """
+    結果に残す, 推論した分割の記録を返す関数
+
+    Parameters
+    ----------
+    source: Union[dict, Data]
+        分割を指す辞書か, read_source が分割から作った Data
+
+    Returns
+    ----------
+    record: dict
+        dataset (たどった後の絶対パス) と name (分割の名前)
+    """
+    # 読み直せるように絶対パスで (Data は読んだときの場所と名前)
+    if isinstance(source, Data):
+        source = {key: source.source.get(key) for key in SPLIT_KEYS}
+    root, name = split_request(source)
+    record = {"dataset": str(root), "name": name}
+
+    return record
+
+
+def require_split_bundle(bundle: Bundle) -> None:
+    """
+    書き出したデータセットの分割を推論できる一式かを確かめる関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+
+    Returns
+    ----------
+    None
+
+    Raises
+    ----------
+    ValueError
+        表と時系列の, 版 1 のデータセットの列の推論の一式でない場合
+    """
+    # 一式ごとに読み方の違う一式と, 1 件の中身が列でない一式の除外
+    special = (
+        bundle.from_rank or bundle.from_search or bundle.from_group
+        or bundle.from_anomaly or bundle.from_uplift or bundle.from_price
+        or bundle.from_demand or bundle.from_items or bundle.from_ready
+        or bundle.from_noise
+    )
+    if special or bundle.kind not in TABLE_KINDS:
+        raise ValueError(
+            "書き出したデータセットの分割は, 表と時系列の版 1 のデータ"
+            "セットの一式だけに渡せます"
+        )
+
+
+def read_split(
+    bundle: Bundle, source: dict, options: Optional[dict] = None
+) -> Data:
+    """
+    書き出したデータセットの分割を, 前処理を済ませた印付きで読む関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+    source: dict
+        {"dataset": データセットのディレクトリ, "split": 分割の名前}
+    options: Optional[dict] = None
+        読み込みの設定 (分割には渡せない)
+
+    Returns
+    ----------
+    data: Data
+        分割の表 (前処理の後の列. 目的の列は元の値) と, source に
+        dataset, split, preprocessed (True)
+
+    Raises
+    ----------
+    ValueError
+        渡せない一式の場合, 読み込みの設定を渡した場合, データセットを
+        読めない場合, 無い分割の場合, 一式のデータセットと違う場合
+    """
+    # 一式と辞書の確かめ (読み込みの設定は場所を読むときだけ)
+    require_split_bundle(bundle)
+    if options:
+        raise ValueError(
+            "書き出したデータセットの分割には, 読み込みの設定 (options) は"
+            "使えません"
+        )
+    root, name = split_request(source)
+
+    # データセットの中だけを読む (版 2 と 3, 外を指す場所は ML-EDA の誤り)
+    try:
+        dataset = load_dataset(root)
+    except (OSError, KeyError, TypeError) as error:
+        raise ValueError(f"{root} を読めません ({error})") from error
+    if name not in dataset.frames:
+        names = ", ".join(dataset.frames) or "無し"
+        raise ValueError(
+            f"{root} に {name} の分割はありません (分割: {names})"
+        )
+
+    # 一式のデータセットの写しと, 説明の項目とレシピが同じもの
+    own = bundle.dataset
+    different = [
+        key for key in SPLIT_MATCH
+        if dataset.info.get(key) != own.info.get(key)
+    ]
+    if dataset.recipe != own.recipe:
+        different.append("recipe")
+    if different:
+        raise ValueError(
+            f"{root} は一式を作ったデータセットと違います "
+            f"({', '.join(different)} が違う). 前処理を済ませた分割は, 同じ"
+            "前処理のデータセットだけを推論できます"
+        )
+
+    # 目的の列は元の値 (分類はクラスの名前, 数はレシピの変換を戻した値)
+    frame = dataset.frames[name].reset_index(drop=True).copy()
+    target = dataset.target
+    if target and target in frame.columns:
+        frame[target] = original_target(bundle, frame[target])
+    data = Data(
+        kind=bundle.kind, frame=frame,
+        source={"dataset": str(root), "split": name, PREPROCESSED: True}
+    )
+
+    return data
+
+
+def original_target(bundle: Bundle, values: pd.Series) -> pd.Series:
+    """
+    分割の目的の列 (前処理の後の値) を元の値に戻す関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+    values: pd.Series
+        分割の目的の列
+
+    Returns
+    ----------
+    result: pd.Series
+        分類はクラスの名前 (番号でない行と範囲の外の番号は欠損), 回帰と
+        予測はレシピの変換を戻した値
+    """
+    # 分類の番号はクラスの順
+    if bundle.task == "classification":
+        classes = bundle.classes
+        codes = pd.to_numeric(values, errors="coerce")
+        names = [
+            classes[int(v)]
+            if pd.notna(v) and float(v).is_integer()
+            and 0 <= int(v) < len(classes) else None
+            for v in codes
+        ]
+        result = pd.Series(names, index=values.index, dtype=object)
+        return result
+    numbers = pd.to_numeric(values, errors="coerce").to_numpy(np.float64)
+    result = pd.Series(
+        inverse_target(bundle, numbers), index=values.index
+    )
+
+    return result
+
+
+def refuse_preprocessed(source: Any, what: str) -> None:
+    """
+    前処理の前の行が要る処理に, 前処理を済ませた分割を渡したら止める関数
+
+    Parameters
+    ----------
+    source: Any
+        渡したデータ
+    what: str
+        処理の名前 (誤りの文に使う)
+
+    Returns
+    ----------
+    None
+
+    Raises
+    ----------
+    ValueError
+        分割を指す辞書か, 分割から作った Data の場合
+    """
+    # 前処理の前の列から作り直す処理の拒否 (分割の列では動かないため)
+    if is_preprocessed(source):
+        raise ValueError(
+            f"{what}は前処理の前の行が要るので, 書き出したデータセットの"
+            "分割には使えません"
+        )
+
+
 def features_of(
     bundle: Bundle, data: Data
 ) -> tuple[np.ndarray, list[str]]:
@@ -208,24 +504,19 @@ def features_of(
     reasons: list[str]
         行ごとの予測できない理由 (予測できる行は空の文字)
     """
-    # 当てはめた値のままの前処理 (行は増減しない). 一部の行の値で全体が
-    # 失敗した場合は, 行ごとにかけて失敗した行を飛ばす (過去の値の列は
-    # 前の行が要るので行ごとにはかけない)
-    try:
-        frame = bundle.dataset.transform(data.frame)
-        failed = [""] * len(frame)
-        # 行を落とす手順で落ちた行 (ML-EDA が手順の名前を返す場合)
-        for row, op in (frame.attrs.get("dropped") or {}).items():
-            failed[int(row)] = (
-                f"前処理の手順 {op} で除く行です (学習でも使わない行)"
+    # 前処理を済ませた分割は学習に使う列のまま
+    if data.source.get(PREPROCESSED) is True:
+        lost = [c for c in bundle.dataset.features
+                if c not in data.frame.columns]
+        if lost:
+            raise ValueError(
+                "前処理を済ませた分割に学習に使う列がありません: "
+                + ", ".join(map(str, lost[:5]))
             )
-    except ValueError as error:
-        steps = [s["op"] for s in bundle.dataset.recipe.get("steps", [])]
-        if "lag" in steps or "前処理の後に, 学習に使う列が足りません" in str(
-            error
-        ) or "にかける列がありません" in str(error):
-            raise
-        frame, failed = transform_rows(bundle, data.frame)
+        frame = data.frame[bundle.dataset.features]
+        failed = [""] * len(frame)
+    else:
+        frame, failed = transformed(bundle, data)
     try:
         x = frame.to_numpy(dtype=np.float32, na_value=np.nan)
     except (TypeError, ValueError) as error:
@@ -244,6 +535,48 @@ def features_of(
     reasons = [a or b for a, b in zip(failed, reasons)]
 
     return x, reasons
+
+
+def transformed(
+    bundle: Bundle, data: Data
+) -> tuple[pd.DataFrame, list[str]]:
+    """
+    表の列に前処理をかけ, 学習に使う列の表と行ごとの失敗の理由を返す関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+    data: Data
+        読み込んだデータ
+
+    Returns
+    ----------
+    frame: pd.DataFrame
+        学習に使う列の表
+    failed: list[str]
+        行ごとの前処理で除いたか失敗した理由 (他の行は空の文字)
+    """
+    # 当てはめた値のままの前処理 (行は増減しない). 一部の行の値で全体が
+    # 失敗した場合は, 行ごとにかけて失敗した行を飛ばす (過去の値の列は
+    # 前の行が要るので行ごとにはかけない)
+    try:
+        frame = bundle.dataset.transform(data.frame)
+        failed = [""] * len(frame)
+        # 行を落とす手順で落ちた行 (ML-EDA が手順の名前を返す場合)
+        for row, op in (frame.attrs.get("dropped") or {}).items():
+            failed[int(row)] = (
+                f"前処理の手順 {op} で除く行です (学習でも使わない行)"
+            )
+    except ValueError as error:
+        steps = [s["op"] for s in bundle.dataset.recipe.get("steps", [])]
+        if "lag" in steps or "前処理の後に, 学習に使う列が足りません" in str(
+            error
+        ) or "にかける列がありません" in str(error):
+            raise
+        frame, failed = transform_rows(bundle, data.frame)
+
+    return frame, failed
 
 
 def transform_rows(
@@ -1215,7 +1548,9 @@ def predict(
         推論の一式かそのディレクトリ
     source: Union[str, Path, pd.DataFrame, Data, dict, list]
         推論するデータ (雑音だけの一式は件数と種の辞書 {"count": n,
-        "seed": s}. 並べるの一式は利用者の値の並びか利用者の列を持つ表)
+        "seed": s}. 並べるの一式は利用者の値の並びか利用者の列を持つ表.
+        書き出したデータセットの分割は {"dataset": 場所, "split": 名前}
+        で, 前処理をかけずに推論する)
     options: Optional[dict] = None
         読み込みの設定 (学習のときの設定に上書きする)
     batch_size: int = 256
@@ -1255,6 +1590,13 @@ def predict(
         raise ValueError("batch_size は 1 以上にしてください")
     if not isinstance(bundle, Bundle):
         bundle = load_bundle(bundle)
+    if is_preprocessed(source):
+        require_split_bundle(bundle)
+        if options:
+            raise ValueError(
+                "書き出したデータセットの分割には, 読み込みの設定 (options)"
+                " は使えません"
+            )
     if bundle.from_rank:
         if options:
             raise ValueError(
@@ -1311,7 +1653,7 @@ def predict(
             )
         result = predict_noise(bundle, source, batch_size, device)
         return result
-    if isinstance(source, dict):
+    if isinstance(source, dict) and not is_split(source):
         raise ValueError(
             "件数と種 (count, seed) は雑音だけの一式 (データセットを持たない"
             "一式) だけに渡せます. この一式にはデータを渡してください"

@@ -8,7 +8,8 @@ from ml_eda import Data
 from ml_inference.bundle import Bundle, load_bundle
 from ml_inference.decision import amount_text
 from ml_inference.predict import (
-    TABLE_KINDS, lag_settings, predict, read_source, series_keys
+    TABLE_KINDS, lag_settings, predict, read_source, refuse_preprocessed,
+    series_keys
 )
 
 # 系列ごとに選ぶときの, 系列ごとの行の数の下限
@@ -313,6 +314,7 @@ def explain(
             f"{bundle.kind} の一式は, 1 件の中身が列ではないので列の効きを"
             "求めません"
         )
+    refuse_preprocessed(source, "列の効き")
     rng = np.random.default_rng(seed)
     settings = lag_settings(bundle)
     data = read_source(bundle, source, options)
@@ -514,6 +516,7 @@ def explain_rows(
             f"{bundle.kind} の一式は, 1 件の中身が列ではないので行ごとの"
             "理由を求めません"
         )
+    refuse_preprocessed(source, "行ごとの予測の理由")
     rng = np.random.default_rng(seed)
     settings = lag_settings(bundle)
     data = read_source(bundle, source, options)

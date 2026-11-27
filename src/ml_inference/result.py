@@ -16,7 +16,8 @@ from ml_inference.conclude import conclude, conclude_outputs, origin_sentence
 from ml_inference.decision import decide
 from ml_inference.forecast import forecast as forecast_rows
 from ml_inference.predict import (
-    ARRAY_FORMS, OK, noise_request, predict, target_of
+    ARRAY_FORMS, OK, is_preprocessed, noise_request, predict,
+    split_record, target_of
 )
 from ml_inference.demand import conclude_demand
 from ml_inference.grouping import conclude_groups
@@ -25,9 +26,16 @@ from ml_inference.ranking import conclude_ranking, request_users
 from ml_inference.search import conclude_search
 from ml_inference.uplift import conclude_uplift
 
-# 結果のファイル (result.yaml) の形の版 (混ざる列を残せば 4, 列の型を
-# 残せば 3, 表に収まらない中身があれば 2, どれも無ければ 1)
-RESULT_FORMAT_VERSION = 4
+# 結果のファイル (result.yaml) の形の版 (入力が書き出したデータセットの
+# 分割なら 5, 混ざる列を残せば 4, 列の型を残せば 3, 表に収まらない中身が
+# あれば 2, どれも無ければ 1)
+RESULT_FORMAT_VERSION = 5
+
+# 混ざる列を残す結果の版 (入力が分割でない結果)
+MIXED_FORMAT_VERSION = 4
+
+# 入力の分割の記録の項目 (dataset と name)
+SPLIT_KEY = "split"
 
 # 列の型を残す結果の版 (混ざる列の無い結果)
 COLUMN_TYPES_FORMAT_VERSION = 3
@@ -63,6 +71,32 @@ TOKENS_COLUMN = "tokens"
 # 読んだ版と中身と列の型と数に見える文字の行の記録)
 RESULT_OWN_KEYS = ("frame", "form", "directory", "format_version",
                    "artifacts", COLUMN_TYPES_KEY, TEXT_ROWS_KEY)
+
+
+def source_fields(bundle: Bundle, source: Any) -> dict:
+    """
+    結果に残す入力の項目を返す関数
+
+    Parameters
+    ----------
+    bundle: Bundle
+        推論の一式
+    source: Any
+        推論したデータ
+
+    Returns
+    ----------
+    fields: dict
+        source (入力の説明). 書き出したデータセットの分割は source を空に
+        し, split (dataset と name) も
+    """
+    # 分割 (辞書か印付きの Data) は読み直せるように場所と名前を別に
+    if is_preprocessed(source):
+        fields: dict = {"source": None, SPLIT_KEY: split_record(source)}
+        return fields
+    fields = {"source": source_text(bundle, source)}
+
+    return fields
 
 
 def source_text(bundle: Bundle, source: Any) -> Optional[str]:
@@ -112,7 +146,8 @@ def infer(
         推論の一式かそのディレクトリ
     source: Union[str, Path, pd.DataFrame, Data, dict, list]
         推論するデータ (雑音だけの一式は件数と種の辞書. 並べるの一式は
-        利用者の値の並びか利用者の列を持つ表)
+        利用者の値の並びか利用者の列を持つ表. 書き出したデータセットの
+        分割は {"dataset": 場所, "split": 名前})
     rules: Optional[dict] = None
         結論の決め方 (一式の既定値に上書きする. 値を None にすると消す)
     options: Optional[dict] = None
@@ -137,7 +172,8 @@ def infer(
     Returns
     ----------
     result: dict
-        bundle (一式の名前と場所), source (入力), created_at, frame
+        bundle (一式の名前と場所), source (入力. 分割は空で split に
+        dataset と name), created_at, frame
         (予測と判断の表. 何段も先の予測は先の行だけで step 付き),
         summary, sentences, rules, (decision を渡すと) decision
         (summary, sentences, notes, decision. 表には action などの列)
@@ -185,7 +221,7 @@ def infer(
         result = {
             "bundle": {"name": bundle.info.get("name"),
                        "path": str(bundle.path)},
-            "source": source_text(bundle, source),
+            **source_fields(bundle, source),
             "created_at": dt.datetime.now().astimezone().isoformat(),
             "form": bundle.form,
             **(conclude_ranking(prediction) if bundle.from_rank
@@ -224,7 +260,7 @@ def infer(
         conclusion["decision"] = decided
     result = {
         "bundle": {"name": bundle.info.get("name"), "path": str(bundle.path)},
-        "source": str(source) if isinstance(source, (str, Path)) else None,
+        **source_fields(bundle, source),
         "created_at": dt.datetime.now().astimezone().isoformat(),
         **conclusion,
     }
@@ -412,10 +448,13 @@ def write_result(result: dict, path: Union[str, Path]) -> Path:
     frame.to_csv(root / "predictions.csv", index=False, encoding="utf-8-sig")
     types, rows = column_types(frame, root / "predictions.csv")
 
-    # 表以外の説明 (形の版を先頭に. 混ざる列があれば版 4, 型も中身も無け
-    # れば版 1 のまま. 読んだ結果の版と中身と型の記録は書き直し)
-    if MIXED in types.values():
+    # 表以外の説明 (形の版を先頭に. 入力が分割なら版 5, 混ざる列があれば
+    # 版 4, 型も中身も無ければ版 1 のまま. 読んだ結果の版と中身と型の記録
+    # は書き直し)
+    if result.get(SPLIT_KEY):
         version = RESULT_FORMAT_VERSION
+    elif MIXED in types.values():
+        version = MIXED_FORMAT_VERSION
     elif types:
         version = COLUMN_TYPES_FORMAT_VERSION
     else:

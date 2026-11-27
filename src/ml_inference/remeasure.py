@@ -11,7 +11,9 @@ from ml_eda import Data
 from ml_inference.bundle import Bundle, load_bundle
 from ml_inference.decision import amount_text, group_key, label_text
 from ml_inference.forecast import forecast
-from ml_inference.predict import lag_settings, predict, read_source
+from ml_inference.predict import (
+    lag_settings, predict, read_source, refuse_preprocessed
+)
 from ml_inference.uncertainty import (
     adjusted_levels, class_calibration, interval, residual_quantiles,
     residual_values
@@ -620,7 +622,7 @@ def write_uncertainty(bundle: Bundle, uncertainty: dict) -> None:
 
 def remeasure(
     bundle: Union[str, Path, Bundle],
-    source: Union[str, Path, pd.DataFrame, Data],
+    source: Union[str, Path, pd.DataFrame, Data, dict],
     options: Optional[dict] = None, count: Optional[Any] = None,
     write: bool = True, horizon: Optional[int] = None,
     time: Optional[str] = None, groups: Optional[str] = None
@@ -632,8 +634,8 @@ def remeasure(
     ----------
     bundle: Union[str, Path, Bundle]
         推論の一式かそのディレクトリ
-    source: Union[str, Path, pd.DataFrame, Data]
-        目的の列を持つ新しい実績
+    source: Union[str, Path, pd.DataFrame, Data, dict]
+        目的の列を持つ新しい実績 (書き出したデータセットの分割の辞書も)
     options: Optional[dict] = None
         読み込みの設定
     count: Optional[Any] = None
@@ -672,6 +674,8 @@ def remeasure(
     if not isinstance(bundle, Bundle):
         bundle = load_bundle(bundle)
     bundle.require_column("外れ方の測り直し")
+    if horizon is not None:
+        refuse_preprocessed(source, "何段も先の外れ方")
     data = read_source(bundle, source, options)
     table = predict(bundle, data)
     keep = counted_rows(bundle, table, count)

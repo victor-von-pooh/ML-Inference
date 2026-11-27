@@ -7,7 +7,8 @@ from ml_eda import Data
 
 from ml_inference.bundle import Bundle, load_bundle
 from ml_inference.predict import (
-    NOT_FINITE, lag_settings, predict, read_source, series_keys
+    NOT_FINITE, lag_settings, predict, read_source, refuse_preprocessed,
+    series_keys
 )
 
 # 先の行を予測できなかった理由
@@ -141,6 +142,7 @@ def forecast(
     bundle.require_column("何段も先の予測")
     if bundle.task == "classification":
         raise ValueError("何段も先の予測は, 回帰と予測の一式だけです")
+    refuse_preprocessed(source, "何段も先の予測")
     data = read_source(bundle, source, options)
     target = bundle.dataset.info.get("target")
     if not target or target not in data.frame.columns:

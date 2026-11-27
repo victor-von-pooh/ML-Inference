@@ -416,7 +416,7 @@ def test_vector_bundle_and_artifacts(
     (root / "artifacts" / "999999.npy").write_bytes(b"")
     write_result(out, root)
     assert not (root / "artifacts" / "999999.npy").exists()
-    meta["format_version"] = 5
+    meta["format_version"] = 6
     (root / "result.yaml").write_text(yaml.safe_dump(meta), encoding="utf-8")
     with pytest.raises(ValueError, match="読めません"):
         read_result(root)
