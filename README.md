@@ -35,10 +35,13 @@ Python 3.10 以上.
 
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cpu   # GPU を使う場合は PyTorch の案内に従う
-pip install "ml-inference @ git+https://github.com/victor-von-pooh/ML-Inference.git"
+pip install \
+    "ml-eda @ git+https://github.com/victor-von-pooh/ML-EDA.git" \
+    "ml-modelcontrol @ git+https://github.com/victor-von-pooh/ML-ModelControl.git" \
+    "ml-inference @ git+https://github.com/victor-von-pooh/ML-Inference.git"
 ```
 
-ML-EDA が書き出すデータセット (pyarrow があれば parquet) を読めるように, parquet を読む pyarrow は依存に含む. 画像, Excel, 部分語の文を読む場合は `pip install "ml-inference[all] @ git+https://github.com/victor-von-pooh/ML-Inference.git"` で ML-EDA の任意の依存も入れる. ML-EDA と ML-ModelControl は各リポジトリの `main` から入る.
+ML-EDA と ML-ModelControl は PyPI に無いので, 同じコマンドで各リポジトリの `main` から入れる. 依存の取りに行く先は `pyproject.toml` の `[tool.uv.sources]` に書き, uv はそれを読んで取りに行く. pip は `[tool.uv.sources]` を読まないので, 上のように 2 つを git の URL で並べて入れる. ML-EDA が書き出すデータセット (pyarrow があれば parquet) を読めるように, parquet を読む pyarrow は依存に含む. 画像, Excel, 部分語の文を読む場合は, 上のコマンドの最後を `"ml-inference[all] @ git+https://github.com/victor-von-pooh/ML-Inference.git"` にして ML-EDA の任意の依存も入れる.
 
 開発する場合は, リポジトリを取ってきて入れ, `pytest` でテストする.
 
@@ -46,7 +49,10 @@ ML-EDA が書き出すデータセット (pyarrow があれば parquet) を読�
 git clone https://github.com/victor-von-pooh/ML-Inference.git
 cd ML-Inference
 pip install torch --index-url https://download.pytorch.org/whl/cpu
-pip install -e ".[dev]"
+pip install \
+    "ml-eda @ git+https://github.com/victor-von-pooh/ML-EDA.git" \
+    "ml-modelcontrol @ git+https://github.com/victor-von-pooh/ML-ModelControl.git" \
+    -e ".[dev]"
 pytest
 ```
 
