@@ -7,6 +7,12 @@
 
 無し
 
+### ML-EDA と ML-ModelControl の依存を tool.uv.sources に移す
+- 何を: `pyproject.toml` の `dependencies` と `optional-dependencies` (`all`) に `@ git+` で書いた ML-EDA (`ml-eda[parquet]`, `ml-eda[all]`) と ML-ModelControl を `ml-eda[parquet]`, `ml-eda[all]`, `ml-modelcontrol` の形にし, 取りに行く先を `[tool.uv.sources]` の `git` に移す. `uv.lock` を作り直し, 版は変えない. README の導入 (`pip install ... @ git+` で入れる案内) が, `tool.uv.sources` を読まない pip でも ML-EDA と ML-ModelControl の `main` から入るように直す
+- なぜ: ML-Studio の docs/DESIGN.md (8 の節) は git の依存を `tool.uv.sources` に書き `dependencies` に `@ git+` の形で書かない決まりで, 殻の確かめが sources から git の依存を探すため. 今は ML-Provide の lock が版を決めるので害は無いが, 決まりと食い違っている
+- 終わりの条件: `dependencies` と `optional-dependencies` に ML-EDA と ML-ModelControl の `@ git+` が無く `tool.uv.sources` に `git` がある. `uv lock` の版が今と同じで, テストと CI が通る. README の導入の案内が今の動き (pip でも ML-EDA と ML-ModelControl が入る) と合う
+- つながり: ML-Studio の docs/DESIGN.md の 8 の節 (共通のライブラリの版) と R8
+
 ## 優先度 中
 
 無し
