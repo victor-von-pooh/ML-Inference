@@ -285,7 +285,7 @@ def test_model_error_falls_back(tmp_path: Path) -> None:
     result = policy.act([0.0, 0.0, 0.0, 0.0])
     assert result == {
         "action": None, "status": "handover",
-        "reasons": ["モデルのエラー (RuntimeError: 壊れた)"]
+        "reasons": ["モデルの計算の失敗 (RuntimeError: 壊れた)"]
     }
     assert policy.act("abc")["status"] == "handover"
 

@@ -471,7 +471,7 @@ def make_search_bundle(
     name: Optional[str] = None
         一式の名前 (省略するとディレクトリの名前)
     overwrite: bool = False
-        既にある一式を置き換えるか
+        既にある一式を上書きするか
     license: Optional[dict] = None
         既製のモデルの重みのライセンスの情報 (make_ready_bundle と同じ)
 
@@ -484,7 +484,7 @@ def make_search_bundle(
     ----------
     FileExistsError
         ディレクトリが既にあり, overwrite が False の場合と, 一式ではない
-        ディレクトリを置き換えようとした場合
+        ディレクトリを上書きしようとした場合
     FileNotFoundError
         成果物が無い場合
     ValueError
@@ -497,7 +497,7 @@ def make_search_bundle(
         if not overwrite:
             raise FileExistsError(f"{final} は既にあります")
         if not (final / "inference.yaml").is_file():
-            raise FileExistsError(f"{final} は推論の一式ではないので置き換えません")
+            raise FileExistsError(f"{final} は推論の一式ではないので上書きしません")
     sources = run_sources(run)
 
     # 出どころの重みの説明, 1 つのノードの定義, 出どころの重みの hash

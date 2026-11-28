@@ -853,7 +853,7 @@ class GuardedPolicy:
                 output = self.model(obs.unsqueeze(0))[0]
         except Exception as exc:
             result = fallback_result(
-                self.spec, [f"モデルのエラー ({type(exc).__name__}: {exc})"]
+                self.spec, [f"モデルの計算の失敗 ({type(exc).__name__}: {exc})"]
             )
             return result
         result = apply_guards(

@@ -13,7 +13,7 @@
 - **既製のモデルの一式**: 学習しない既製のモデル (torchvision の学習済みの画像の分類など) を, 重みの版と hash を固定し, 種類の名前の表と前処理を持たせて一式にする. 種類の予測の他に, 分類の最後の層の手前の出力を埋め込みとして返せる
 - **並べるの一式**: 利用者と品物の 2 塔のモデル (ML-Quest の並べるの骨組みの実験) から, 品物の埋め込みを索引に持つ一式を作り, 利用者ごとに上位 K 件の品物と点数を返す. 前に反応した品物を除くかを選べ, 後の反応から Recall@K と NDCG を数える
 - **群分けの一式**: 表の行の埋め込みと群の中心 (ML-Quest のまとめるの骨組みの実験) から, 列の符号化と群の安定性を持つ一式を作り, 新しい行を最も近い群に割り当てて, 群ごとの件数と特徴 (群の要約) と, 群の中心に近い行 (代表の行) を返す. 既製のモデルの埋め込みで写真を群に分ける一式も作れる
-- **異常の度合いの一式**: 正常の行が多い表の度合いの決め方 (ML-Quest の異常の検知の骨組みの実験. 自己符号化器か距離に基づく度合い) から一式を作り, 新しい行の異常の度合いを出して, 度合いの上位から人が確かめる件数の上限まで人の確認に回す. 人が確かめた結果は 1 件ごとに結果の隣に記録する
+- **異常の度合いの一式**: 正常の行が多い表の度合いの決め方 (ML-Quest の異常の検知の骨組みの実験. 自己符号化器か距離に基づく度合い) から一式を作り, 新しい行の異常の度合いを出して, 度合いの上位から人が確かめる件数の上限まで人の確かめに回す. 人が確かめた結果は 1 件ごとに結果の隣に記録する
 - **効果の一式**: 無作為に配った記録から学んだ, 処置の群と対照の群の 2 つの予測 (ML-Quest の効果の見積もりの骨組みの実験) から一式を作り, 新しい行の効果 (クーポンを配ったときに買う確率がどれだけ上がるか) を見積もって, 効果の高い順に配る数の上限まで配る. 実験の Qini の係数と上位 K 割の効果の差を結論に写し, 処置と結果のある表では数え直す
 - **値段の一式**: 試しに値段を変えた売れ行きの記録から学んだ, 値段を入力に入れて売れた数を予測するモデル (ML-Quest の値段を変える判断の骨組みの実験) から一式を作り, 新しい行の値段を今の値段として候補の値段ごとに売れた数を予測し, 変える幅の上限の中で見込みの利益 ((値段 − 原価) × 予測した数) が最も大きい値段を選ぶ. 実験の誤差, 弾力性, 見込みの利益の比べを結論に写し, 売れた数のある表では誤差を数え直す
 - **需要の一式**: 商品ごとの日ごとの売れた数の記録から学んだ, 先の期間の需要の分位点を予測するモデル (ML-Quest の時間をまたぐ量の判断の学習のスクリプトの実験) から一式を作り, 日ごとの記録の表の商品ごとに最後の日を発注を決める日として先の期間の需要の分位点を予測し, 品切れの損と売れ残りの損の比から決まる水準の分位点から在庫の数を引いた数を, 発注の数の上限の中で発注する. 見込みの損と, 前の期間と同じ数を発注する決め方との比べを結論に出す
@@ -26,7 +26,7 @@
 
 | 相手 | 使うもの |
 | --- | --- |
-| ML-Provide (推論) | 推論の一式の作成と確かめ (並べるの一式は `make_rank_bundle` と `rank_metrics`, 群分けの一式は `make_group_bundle`, `group_summary`, `group_representatives`, `group_far`, 異常の度合いの一式は `make_anomaly_bundle`, 効果の一式は `make_uplift_bundle`, 値段の一式は `make_price_bundle`, 需要の一式は `make_demand_bundle`), 人の確認の記録 (`record_review`, `read_reviews`), 版 2 のデータセットの説明 (`describe_items`), 予測と同じデータの読み込み (`read_source`), 正解の種類と出どころ (`target_of`, `origin_sentence`), 結論 (決め方の項目 `RULE_KEYS`, 件数だけの結論 `conclude_outputs`, まとめからの文 `summary_sentences`), 撮影の深度から点 (`backproject`), 意思決定, 先の予測と列の効き, 方策の一式. 自作の繰り返しの手順 (`register_procedure`, `PROCEDURES`) と自作の部品 (`register_units`) の登録. 問題の設定 (ML-Quest) の損得と今のやり方は, 画面が引数で渡す |
+| ML-Provide (推論) | 推論の一式の作成と確かめ (並べるの一式は `make_rank_bundle` と `rank_metrics`, 群分けの一式は `make_group_bundle`, `group_summary`, `group_representatives`, `group_far`, 異常の度合いの一式は `make_anomaly_bundle`, 効果の一式は `make_uplift_bundle`, 値段の一式は `make_price_bundle`, 需要の一式は `make_demand_bundle`), 人の確かめの記録 (`record_review`, `read_reviews`), 版 2 のデータセットの説明 (`describe_items`), 予測と同じデータの読み込み (`read_source`), 正解の種類と出どころ (`target_of`, `origin_sentence`), 結論 (決め方の項目 `RULE_KEYS`, 件数だけの結論 `conclude_outputs`, まとめからの文 `summary_sentences`), 撮影の深度から点 (`backproject`), 意思決定, 先の予測と列の効き, 方策の一式. 自作の繰り返しの手順 (`register_procedure`, `PROCEDURES`) と自作の部品 (`register_units`) の登録. 問題の設定 (ML-Quest) の損得と今のやり方は, 画面が引数で渡す |
 | ML-Found の学習のスクリプト (ML-Quest の骨組みを含む) | 学習の後に `make_bundle` で実験のディレクトリの中に一式を作る |
 
 ## 導入
@@ -80,7 +80,7 @@ make_bundle(
 
 ### 学習のスクリプトの最後に作る (勧める形)
 
-学習のスクリプトが前処理の外でしたこと (並びの先頭に足した番号, 目的の値の標準化など) は, レシピとモデルの定義からは分からない. それを知っている学習のスクリプトが, 学習の最後に実験のディレクトリの中に一式を作ると, 書き忘れが起きない (実験のディレクトリには, プロジェクトが自分のファイルを足してよい. ML-Found の約束).
+学習のスクリプトが前処理の外でしたこと (並びの先頭に足した番号, 目的の値の標準化など) は, レシピとモデルの定義からは分からない. それを知っている学習のスクリプトが, 学習の最後に実験のディレクトリの中に一式を作ると, 書き忘れが起きない (実験のディレクトリには, 学習のプロジェクトが自分のファイルを足してよい. ML-Found の約束).
 
 ```python
 # ML-Found の学習スクリプトの最後 (fit の後)
@@ -279,7 +279,7 @@ frame = predict("bundles/products", "new_photos/")
 group_representatives("bundles/products", frame)   # 群ごとに中心に近い写真 (path, width, height)
 ```
 
-### 異常の度合いで人の確認に回す (一式の版 11)
+### 異常の度合いで人の確かめに回す (一式の版 11)
 
 異常の検知の実験 (度合いの決め方 `anomaly_scorer.json`, 前処理のレシピの写し `anomaly_recipe.yaml`, 行ごとの度合い `anomaly_scores.csv`. 自己符号化器は重み `final_model.pt` と定義 `model_spec.yaml` も) から一式を作る. 学習に使った元の表を渡すと, 一式で出した度合いを実験の度合いと比べる. 振り分けは確率のしきい値でなく, 度合いの高い順に人が確かめる件数の上限 (`capacity`) まで回す.
 
@@ -292,10 +292,10 @@ make_anomaly_bundle("bundles/sensors", "outputs/anomaly/run",
                     data="data/readings.csv")
 
 # 行ごとの度合い (元の列と status, reason, score, rank, column, column_share) と,
-# 上位 20 件を人の確認に回す列 action
+# 上位 20 件を人の確かめに回す列 action
 result = infer("bundles/sensors", "new_readings.csv",
                decision={"type": "triage", "capacity": 20})
-result["decision"]["sentences"]   # ['度合いの高い順に 20 件を人の確認に回す ...', ...]
+result["decision"]["sentences"]   # ['度合いの高い順に 20 件を人の確かめに回す ...', ...]
 write_result(result, "results/sensors")
 
 # 人が確かめた結果を 1 件ずつ足し, 読み直す

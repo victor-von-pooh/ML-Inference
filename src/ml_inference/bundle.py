@@ -2101,7 +2101,7 @@ def make_bundle(
     copy_weights: bool = True
         重みを一式に写すか (写さない場合は絶対パスで指す)
     overwrite: bool = False
-        既にある一式を置き換えるか
+        既にある一式を上書きするか
     role: Optional[str] = None
         受け持ち (predict, generate, rank, group, effect. 省略すると
         predict. 雑音だけの一式は generate)
@@ -2139,7 +2139,7 @@ def make_bundle(
     ----------
     FileExistsError
         ディレクトリが既にあり, overwrite が False の場合と, 一式ではない
-        ディレクトリを置き換えようとした場合
+        ディレクトリを上書きしようとした場合
     ValueError
         定義, 重み, 入力と出力のつなぎ方が合わない場合
     """
@@ -2149,7 +2149,7 @@ def make_bundle(
         if not overwrite:
             raise FileExistsError(f"{final} は既にあります")
         if not (final / "inference.yaml").is_file():
-            raise FileExistsError(f"{final} は推論の一式ではないので置き換えません")
+            raise FileExistsError(f"{final} は推論の一式ではないので上書きしません")
 
     # 確率の補正の選び方
     if calibrate is not None and calibrate not in CALIBRATE_METHODS:
@@ -2405,7 +2405,7 @@ def make_ready_bundle(
     conclusion: Optional[dict] = None
         結論の決め方の既定値 (種類の予測の一式だけ)
     overwrite: bool = False
-        既にある一式を置き換えるか
+        既にある一式を上書きするか
     form: str = "class"
         出力の形 (class は種類の予測, vector は分類の最後の層の手前の
         出力の埋め込み)
@@ -2419,7 +2419,7 @@ def make_ready_bundle(
     ----------
     FileExistsError
         ディレクトリが既にあり, overwrite が False の場合と, 一式ではない
-        ディレクトリを置き換えようとした場合
+        ディレクトリを上書きしようとした場合
     ValueError
         出どころ, モデル, 重みの名前, 出力の形が無い場合と, 重みを読めない
         場合, hash が sha256 と違う場合, 埋め込みを取り出せない場合
@@ -2430,7 +2430,7 @@ def make_ready_bundle(
         if not overwrite:
             raise FileExistsError(f"{final} は既にあります")
         if not (final / "inference.yaml").is_file():
-            raise FileExistsError(f"{final} は推論の一式ではないので置き換えません")
+            raise FileExistsError(f"{final} は推論の一式ではないので上書きしません")
     if library not in READY_LIBRARIES:
         raise ValueError(
             f"既製のモデルの出どころ {library} はありません (出どころ: "

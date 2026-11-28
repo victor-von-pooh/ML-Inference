@@ -333,7 +333,7 @@ def test_anomaly_bundle(tmp_path: Path, raw: Path, score: str) -> None:
     assert decided["summary"]["lowest"] == pytest.approx(
         chosen["score"].min()
     )
-    assert "度合いの高い順に 3 件を人の確認に回す" in decided["sentences"][0]
+    assert "度合いの高い順に 3 件を人の確かめに回す" in decided["sentences"][0]
     assert any("確率ではない" in note for note in decided["notes"])
 
     # 上限より少ない行は全ての行, 空の辞書は振り分け無し
@@ -394,7 +394,7 @@ def test_anomaly_decision(tmp_path: Path, raw: Path) -> None:
 
 def test_anomaly_reviews(tmp_path: Path, raw: Path) -> None:
     """
-    人の確認の結果を 1 件ずつ結果の隣に足し, 読み直せることを確かめる関数
+    人の確かめの結果を 1 件ずつ結果の隣に足し, 読み直せることを確かめる関数
 
     Parameters
     ----------

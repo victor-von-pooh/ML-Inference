@@ -182,7 +182,7 @@ def make_sample_bundle(
     seed: int = 0
         重みの初期値の乱数の種
     overwrite: bool = False
-        既にある一式を置き換えるか
+        既にある一式を上書きするか
 
     Returns
     ----------
