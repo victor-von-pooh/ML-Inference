@@ -41,7 +41,7 @@ pip install \
     "ml-inference @ git+https://github.com/victor-von-pooh/ML-Inference.git"
 ```
 
-ML-EDA と ML-ModelControl は PyPI に無いので, 同じコマンドで各リポジトリの `main` から入れる. 依存の取りに行く先は `pyproject.toml` の `[tool.uv.sources]` に書き, uv はそれを読んで取りに行く. pip は `[tool.uv.sources]` を読まないので, 上のように 2 つを git の URL で並べて入れる. ML-EDA が書き出すデータセット (pyarrow があれば parquet) を読めるように, parquet を読む pyarrow は依存に含む. 画像, Excel, 部分語の文を読む場合は, 上のコマンドの最後を `"ml-inference[all] @ git+https://github.com/victor-von-pooh/ML-Inference.git"` にして ML-EDA の任意の依存も入れる.
+ML-EDA と ML-ModelControl は PyPI に無いので, 同じコマンドで各リポジトリの `main` から入れる. 依存の取りに行く先は `pyproject.toml` の `[tool.uv.sources]` に書き, uv はそれを読んで取りに行く. pip は `[tool.uv.sources]` を読まないので, 上のように 2 つを git の URL で並べて入れる. 並べ忘れると pip は PyPI に同じ名前を探しに行き, PyPI に無いので止まる. uv で入れる場合は `[tool.uv.sources]` が効くので並べなくてよい. ML-EDA が書き出すデータセット (pyarrow があれば parquet) を読めるように, parquet を読む pyarrow は依存に含む. 画像, Excel, 部分語の文を読む場合は, 上のコマンドの最後を `"ml-inference[all] @ git+https://github.com/victor-von-pooh/ML-Inference.git"` にして ML-EDA の任意の依存も入れる.
 
 開発する場合は, リポジトリを取ってきて入れ, `pytest` でテストする.
 
