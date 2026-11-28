@@ -15,17 +15,23 @@ dependencies = [
     "pandas>=2.0",
     "pyyaml",
     "torch>=2.2",
-    "ml-eda[parquet] @ git+https://github.com/victor-von-pooh/ML-EDA.git",
-    "ml-modelcontrol @ git+https://github.com/victor-von-pooh/ML-ModelControl.git"
+    "ml-eda[parquet]",
+    "ml-modelcontrol"
 ]
 
 [project.optional-dependencies]
 all = [
-    "ml-eda[all] @ git+https://github.com/victor-von-pooh/ML-EDA.git"
+    "ml-eda[all]"
 ]
 dev = [
     "pytest"
 ]
+
+# ML-EDA と ML-ModelControl は PyPI に無いので, 各リポジトリの main から取る
+# (uv が読む. pip は読まないので, README の導入のとおり git の URL で並べて入れる)
+[tool.uv.sources]
+ml-eda = { git = "https://github.com/victor-von-pooh/ML-EDA.git" }
+ml-modelcontrol = { git = "https://github.com/victor-von-pooh/ML-ModelControl.git" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
