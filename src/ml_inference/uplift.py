@@ -19,8 +19,8 @@ from ml_inference.anomaly import (
     refuse_constant, row_features, value_of
 )
 from ml_inference.bundle import (
-    UPLIFT_BUNDLE_VERSION, Bundle, bundle_notes, inside, load_bundle,
-    plan_weights, run_summary
+    SINGLE_UPLIFT_BUNDLE_VERSION, UPLIFT_BUNDLE_VERSION, Bundle,
+    bundle_notes, inside, load_bundle, plan_weights, run_summary
 )
 from ml_inference.conclude import NO_PREDICTION, is_number, plain
 from ml_inference.grouping import read_table
@@ -33,20 +33,28 @@ EFFECTS_FILE = "uplift_effects.csv"
 EVALUATION_FILE = "evaluations/uplift_{split}.json"
 CURVE_FILE = "evaluations/qini_curve_{split}.json"
 
-# 読める効果の決め方の成果物の版と, 効果の決め方
+# 読める効果の決め方の成果物の版と, 効果の決め方 (t_learner は処置の群と
+# 対照の群の 2 つの予測, s_learner は処置の列を入力の最後に足した 1 つの
+# 予測)
 ESTIMATOR_VERSION = 1
-LEARNERS = ("t_learner",)
+LEARNERS = ("t_learner", "s_learner")
+SINGLE = "s_learner"
+
+# 効果の決め方ごとの一式の版
+LEARNER_VERSIONS = {"t_learner": UPLIFT_BUNDLE_VERSION,
+                    SINGLE: SINGLE_UPLIFT_BUNDLE_VERSION}
 
 # 結果の種類と, 結果の種類ごとの出力を結果の予測にする決まりと, 効果の
 # 呼び名
 OUTCOME_LINKS = {"binary": "sigmoid", "amount": "identity"}
 EFFECT_NAMES = {"binary": "確率の差", "amount": "値の差"}
 
-# 効果の決め方の成果物の鍵と, モデルの名前の鍵と, 学習用の行の分布の鍵
+# 効果の決め方の成果物の鍵と, 効果の決め方ごとのモデルの出力の名前の鍵と,
+# 学習用の行の分布の鍵
 ESTIMATOR_KEYS = ("format_version", "learner", "outcome", "recipe",
                   "effects", "features", "id", "treatment", "budget", "k",
                   "model", "scale", "train")
-MODEL_NAMES = ("input", "treated", "control")
+OUTPUT_NAMES = {"t_learner": ("treated", "control"), SINGLE: ("outcome",)}
 TRAIN_KEYS = ("rows", "mean", "min", "p10", "p50", "p90", "max",
               "positive")
 
@@ -65,10 +73,13 @@ CURVE_COLUMNS = ("rows", "fraction", "qini", "random")
 # 分割の日本語の名前
 SPLIT_NAMES = {"valid": "検証用", "test": "テスト用"}
 
-# uplift の欄
-UPLIFT_KEYS = ("estimator", "recipe", "learner", "outcome", "features",
-               "id", "treatment", "input", "treated", "control", "budget",
-               "k", "rows", "train", "evaluations", "curves", "check")
+# uplift の欄 (モデルの出力の名前の鍵は効果の決め方ごと. s_learner の
+# output は成果物の model.outcome)
+UPLIFT_HEAD = ("estimator", "recipe", "learner", "outcome", "features",
+               "id", "treatment", "input")
+UPLIFT_OUTPUTS = {"t_learner": ("treated", "control"), SINGLE: ("output",)}
+UPLIFT_TAIL = ("budget", "k", "rows", "train", "evaluations", "curves",
+               "check")
 
 # 一式を作るときに 2 つの予測を確かめる 0 の行の数
 PROBE_ROWS = 2
@@ -191,15 +202,19 @@ def check_estimator(estimator: Any) -> list[str]:
     if not is_share(estimator["k"]):
         errors.append("k は 0 より大きく 1 以下の数にしてください")
 
-    # モデルの名前と結果の予測にする決まり, 標準化, 学習用の行の分布
+    # モデルの名前 (効果の決め方ごと) と結果の予測にする決まり, 標準化,
+    # 学習用の行の分布
     model = estimator["model"]
-    if not isinstance(model, dict) or not all(
-        isinstance(model.get(key), str) and model[key]
-        for key in MODEL_NAMES
-    ):
-        errors.append("model は input, treated, control の名前にして"
-                      "ください")
-    elif isinstance(outcome, str) and outcome in OUTCOME_LINKS and (
+    learner = estimator["learner"]
+    keys = ("input", *OUTPUT_NAMES[learner]) if learner in LEARNERS else ()
+    if keys and (not isinstance(model, dict) or not all(
+        isinstance(model.get(key), str) and model[key] for key in keys
+    )):
+        errors.append(f"learner が {learner} の model は "
+                      f"{', '.join(keys)} の名前にしてください")
+    elif isinstance(model, dict) and isinstance(outcome, str) and (
+        outcome in OUTCOME_LINKS
+    ) and (
         model.get("link") != OUTCOME_LINKS[outcome]
     ):
         errors.append(f"結果の種類 {outcome} の model.link は "
@@ -468,7 +483,7 @@ def run_sources(run: Union[str, Path]) -> dict:
     effects = read_effects(inside(root, estimator["effects"]),
                            estimator["id"])
 
-    # 2 つの予測の重みと定義 (仮のモデルで学習した実験は定義無し)
+    # 効果のモデルの重みと定義 (仮のモデルで学習した実験は定義無し)
     weights = root / "final_model.pt"
     if not weights.is_file():
         raise ValueError(f"重み {weights} がありません")
@@ -490,35 +505,62 @@ def run_sources(run: Union[str, Path]) -> dict:
     return sources
 
 
+def uplift_keys(learner: str) -> tuple:
+    """
+    効果の決め方ごとの uplift の欄の鍵を返す関数
+
+    Parameters
+    ----------
+    learner: str
+        効果の決め方 (t_learner か s_learner)
+
+    Returns
+    ----------
+    keys: tuple
+        uplift の欄の鍵の並び
+    """
+    # 共通の鍵の間にモデルの出力の名前の鍵
+    keys = (*UPLIFT_HEAD, *UPLIFT_OUTPUTS[learner], *UPLIFT_TAIL)
+
+    return keys
+
+
 def check_uplift_info(info: dict) -> list[str]:
     """
-    版 12 の一式の uplift の欄と, 受け持ちと出力の形を確かめる関数
+    版 12 と 18 の一式の uplift の欄と, 受け持ちと出力の形を確かめる関数
 
     Parameters
     ----------
     info: dict
-        inference.yaml の中身
+        inference.yaml の中身 (format_version は 12 か 18)
 
     Returns
     ----------
     errors: list[str]
         誤りの一覧 (無ければ空)
     """
-    # 欄, 受け持ち, 出力の形
+    # 版ごとの効果の決め方と欄, 受け持ち, 出力の形
+    version = info.get("format_version")
+    learner = next(key for key, value in LEARNER_VERSIONS.items()
+                   if value == version)
     uplift = info.get("uplift")
     if not isinstance(uplift, dict):
-        return [f"版 {UPLIFT_BUNDLE_VERSION} の一式には uplift が要ります"]
+        return [f"版 {version} の一式には uplift が要ります"]
+    keys = uplift_keys(learner)
     errors = [f"uplift に {key} がありません"
-              for key in UPLIFT_KEYS if key not in uplift]
-    unknown = [str(key) for key in uplift if key not in UPLIFT_KEYS]
+              for key in keys if key not in uplift]
+    unknown = [str(key) for key in uplift if key not in keys]
     if unknown:
         errors.append(f"uplift に知らない項目があります: "
                       f"{', '.join(unknown)}")
     if info.get("role") != "effect":
-        errors.append(f"版 {UPLIFT_BUNDLE_VERSION} の一式の受け持ちは "
-                      "effect (効果を見積もる) にしてください")
+        errors.append(f"版 {version} の一式の受け持ちは effect (効果を"
+                      "見積もる) にしてください")
     if errors:
         return errors
+    if uplift["learner"] != learner:
+        errors.append(f"版 {version} の一式の uplift.learner は {learner} "
+                      "にしてください")
 
     # 結果の種類, ファイルの名前, 配る数の上限と K
     if not isinstance(uplift["outcome"], str) or uplift["outcome"] not in (
@@ -537,16 +579,38 @@ def check_uplift_info(info: dict) -> list[str]:
     return errors
 
 
-def check_uplift_spec(spec: dict, names: dict) -> None:
+def input_width(estimator: dict) -> int:
     """
-    2 つの予測のモデルの定義の入力と出力が約束に合うかを確かめる関数
+    効果のモデルの入力の幅を返す関数
+
+    Parameters
+    ----------
+    estimator: dict
+        効果の決め方 (learner, features)
+
+    Returns
+    ----------
+    width: int
+        見積もりに使う列の数 (s_learner は処置の列の 1 を足した数)
+    """
+    # s_learner は入力の最後に処置の列
+    width = len(estimator["features"]) + (
+        1 if estimator["learner"] == SINGLE else 0
+    )
+
+    return width
+
+
+def check_uplift_spec(spec: dict, estimator: dict) -> None:
+    """
+    効果のモデルの定義の入力と出力が約束に合うかを確かめる関数
 
     Parameters
     ----------
     spec: dict
         モデルの定義 (ML-ModelControl の形)
-    names: dict
-        input, treated, control (成果物の model)
+    estimator: dict
+        効果の決め方 (learner, features, model)
 
     Returns
     ----------
@@ -555,18 +619,34 @@ def check_uplift_spec(spec: dict, names: dict) -> None:
     Raises
     ----------
     ValueError
-        入力が成果物の入力の名前の 1 つでない場合と, 2 つの出力の名前が
-        無い場合
+        入力が成果物の入力の名前の 1 つでない場合と, 入力の形の最後の
+        大きさが入力の幅と違う場合と, 出力の名前 (t_learner は 2 つ,
+        s_learner は 1 つ) が無い場合
     """
-    # 入力は行の特徴の 1 つ, 出力に処置したときとしないときの予測
-    inputs = list(spec.get("inputs") or {})
-    if inputs != [names["input"]]:
+    # 入力は行の特徴 (s_learner は最後に処置の列) の 1 つ
+    names = estimator["model"]
+    inputs = spec.get("inputs") or {}
+    if list(inputs) != [names["input"]]:
         raise ValueError(
             f"効果のモデルの入力は {names['input']} の 1 つにしてください "
-            f"(今は {', '.join(inputs) or '無し'})"
+            f"(今は {', '.join(map(str, inputs)) or '無し'})"
         )
+    item = inputs[names["input"]]
+    shape = item.get("shape") if isinstance(item, dict) else None
+    width = input_width(estimator)
+    if isinstance(shape, list) and shape and is_whole(shape[-1], 1) and (
+        shape[-1] != width
+    ):
+        what = ("見積もりに使う列の数と処置の列の 1 の和"
+                if estimator["learner"] == SINGLE else "見積もりに使う列の数")
+        raise ValueError(
+            f"効果のモデルの入力 {names['input']} の幅 {shape[-1]} が, "
+            f"{what} {width} と違います"
+        )
+
+    # 出力に処置したときとしないときの予測 (s_learner は結果の予測)
     outputs = spec.get("outputs") or {}
-    lost = [names[key] for key in ("treated", "control")
+    lost = [names[key] for key in OUTPUT_NAMES[estimator["learner"]]
             if names[key] not in outputs]
     if lost:
         raise ValueError(
@@ -607,8 +687,61 @@ def uplift_dataset(
     return dataset
 
 
+def chunk_outputs(model: Any, chunk: torch.Tensor, estimator: dict) -> dict:
+    """
+    まとまりの行の特徴をモデルに渡し, 2 つの群の予測を返す関数
+
+    Parameters
+    ----------
+    model: Any
+        効果のモデル
+    chunk: torch.Tensor
+        (件数, 見積もりに使う列の数) の float32 の行の特徴 (処置の列は
+        入れない)
+    estimator: dict
+        効果の決め方 (learner, model)
+
+    Returns
+    ----------
+    found: dict
+        treated, control から (誤りの文の予測の呼び名, 予測のテンソル) の
+        組 (呼び名は t_learner は出力の名前, s_learner は出力の名前と処置
+        の列の値)
+
+    Raises
+    ----------
+    ValueError
+        t_learner の出力が名前の辞書でない場合
+    """
+    # t_learner は出力の名前の辞書の 2 つの予測
+    names = estimator["model"]
+    if estimator["learner"] != SINGLE:
+        outputs = model(**{names["input"]: chunk})
+        if not isinstance(outputs, dict):
+            raise ValueError("効果のモデルの出力が名前の辞書ではありません")
+        found = {key: (names[key], outputs[names[key]])
+                 for key in ("treated", "control")}
+        return found
+
+    # s_learner は処置の列を 1 と 0 にして入力の最後に足した 2 回の予測
+    # (出力が 1 つの定義はテンソル. 骨組みと同じ)
+    found = {}
+    for key, value in (("treated", 1.0), ("control", 0.0)):
+        column = torch.full((len(chunk), 1), value, dtype=chunk.dtype,
+                            device=chunk.device)
+        outputs = model(**{names["input"]: torch.cat([chunk, column],
+                                                     dim=1)})
+        if isinstance(outputs, dict):
+            outputs = outputs[names["outcome"]]
+        found[key] = (f"{names['outcome']} (処置の列が {int(value)})",
+                      outputs)
+
+    return found
+
+
 def raw_outputs(
-    model: Any, x: np.ndarray, names: dict, batch_size: int, device: str
+    model: Any, x: np.ndarray, estimator: dict, batch_size: int,
+    device: str
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     行の特徴をモデルに渡し, 2 つの群の予測を, まとまりごとに求める関数
@@ -616,11 +749,13 @@ def raw_outputs(
     Parameters
     ----------
     model: Any
-        2 つの予測のモデル
+        効果のモデル (t_learner は 2 つの予測, s_learner は処置の列を
+        入力の最後に足した 1 つの予測)
     x: np.ndarray
-        (件数, 列の数) の float32 の行の特徴
-    names: dict
-        input, treated, control
+        (件数, 見積もりに使う列の数) の float32 の行の特徴 (処置の列は
+        入れない)
+    estimator: dict
+        効果の決め方 (learner, model)
     batch_size: int
         1 回に渡す行の数
     device: str
@@ -635,26 +770,23 @@ def raw_outputs(
     Raises
     ----------
     ValueError
-        出力が名前の辞書でない場合と, 予測の形が (件数,) か (件数, 1)
-        でない場合
+        t_learner の出力が名前の辞書でない場合と, 予測の形が (件数,) か
+        (件数, 1) でない場合
     """
-    # 出力の名前の辞書の 2 つの予測 (float32 から float64 へ. 骨組みと同じ)
+    # 2 つの予測 (float32 から float64 へ. 骨組みと同じ)
     pairs: dict = {"treated": [], "control": []}
     model = model.to(device)
     try:
         with torch.no_grad():
             for start in range(0, len(x), batch_size):
                 chunk = torch.tensor(x[start:start + batch_size]).to(device)
-                outputs = model(**{names["input"]: chunk})
-                if not isinstance(outputs, dict):
-                    raise ValueError("効果のモデルの出力が名前の辞書では"
-                                     "ありません")
+                found = chunk_outputs(model, chunk, estimator)
                 for key in pairs:
-                    value = outputs[names[key]]
+                    label, value = found[key]
                     if tuple(value.shape) not in ((len(chunk),),
                                                   (len(chunk), 1)):
                         raise ValueError(
-                            f"予測 {names[key]} の形 {tuple(value.shape)} "
+                            f"予測 {label} の形 {tuple(value.shape)} "
                             f"が ({len(chunk)},) か ({len(chunk)}, 1) では"
                             "ありません"
                         )
@@ -695,7 +827,7 @@ def estimate(
     """
     # 0 と 1 はシグモイドで確率にしてから, 量は元の単位に戻してからの差
     estimator = bundle.cache["uplift_estimator"]
-    treated, control = raw_outputs(bundle.model(), x, estimator["model"],
+    treated, control = raw_outputs(bundle.model(), x, estimator,
                                    batch_size, device)
     if estimator["model"]["link"] == "sigmoid":
         treated = torch.sigmoid(torch.tensor(treated)).numpy()
@@ -917,10 +1049,36 @@ def probe_model(bundle: Bundle, width: int, batch_size: int) -> None:
     # 予測の形の確かめ (raw_outputs の中) と, 値が数かの確かめ
     treated, control = raw_outputs(
         bundle.model(), np.zeros((PROBE_ROWS, width), dtype=np.float32),
-        bundle.cache["uplift_estimator"]["model"], batch_size, "cpu"
+        bundle.cache["uplift_estimator"], batch_size, "cpu"
     )
     if not (np.isfinite(treated).all() and np.isfinite(control).all()):
         raise ValueError("0 の行の 2 つの予測が数ではありません")
+
+
+def section_names(estimator: dict) -> dict:
+    """
+    成果物のモデルの名前を, 一式の uplift の欄の鍵で返す関数
+
+    Parameters
+    ----------
+    estimator: dict
+        効果の決め方 (learner, model)
+
+    Returns
+    ----------
+    names: dict
+        input と, t_learner は treated と control, s_learner は output
+        (成果物の model.outcome)
+    """
+    # s_learner の結果の予測の名前は output (uplift.outcome は結果の種類)
+    model = estimator["model"]
+    names = {"input": model["input"]}
+    if estimator["learner"] == SINGLE:
+        names["output"] = model["outcome"]
+    else:
+        names.update(treated=model["treated"], control=model["control"])
+
+    return names
 
 
 def uplift_section(sources: dict) -> dict:
@@ -940,7 +1098,6 @@ def uplift_section(sources: dict) -> dict:
     # 成果物の写し (標準化の値と結果の予測にする決まりは
     # uplift_estimator.json の中だけ)
     estimator = sources["estimator"]
-    model = estimator["model"]
     budget = estimator["budget"]
     uplift = {
         "estimator": ESTIMATOR_FILE,
@@ -950,9 +1107,7 @@ def uplift_section(sources: dict) -> dict:
         "features": list(estimator["features"]),
         "id": estimator["id"],
         "treatment": estimator["treatment"],
-        "input": model["input"],
-        "treated": model["treated"],
-        "control": model["control"],
+        **section_names(estimator),
         "budget": None if budget is None else int(budget),
         "k": float(estimator["k"]),
         "rows": int(len(sources["effects"])),
@@ -1029,7 +1184,7 @@ def make_uplift_bundle(
     estimator = sources["estimator"]
     spec_dict = load_spec(sources["spec"])
     check_units(spec_dict)
-    check_uplift_spec(spec_dict, estimator["model"])
+    check_uplift_spec(spec_dict, estimator)
     spec_dict, records, kept, weight_notes = plan_weights(
         spec_dict, sources["weights"], pretrained, copy_weights
     )
@@ -1051,7 +1206,7 @@ def make_uplift_bundle(
         budget = estimator["budget"]
         empty = Dataset(path=writing, info={}, frames={}, recipe={})
         info = {
-            "format_version": UPLIFT_BUNDLE_VERSION,
+            "format_version": LEARNER_VERSIONS[estimator["learner"]],
             "name": name or final.name,
             "created_at": dt.datetime.now().astimezone().isoformat(),
             "role": "effect",
@@ -1132,17 +1287,13 @@ def check_uplift_bundle(bundle: Bundle) -> None:
     uplift = bundle.info["uplift"]
     estimator = read_estimator(inside(bundle.path, uplift["estimator"]))
     recipe = read_recipe(inside(bundle.path, uplift["recipe"]))
-    model = estimator["model"]
-    mismatch = [
-        key for key, value in (
-            ("learner", estimator["learner"]),
-            ("outcome", estimator["outcome"]),
-            ("features", estimator["features"]), ("id", estimator["id"]),
-            ("treatment", estimator["treatment"]),
-            ("input", model["input"]), ("treated", model["treated"]),
-            ("control", model["control"]),
-        ) if uplift[key] != value
-    ]
+    copied = {key: estimator[key]
+              for key in ("learner", "outcome", "features", "id",
+                          "treatment")}
+    copied.update(section_names(estimator)
+                  if estimator["learner"] == uplift["learner"] else {})
+    mismatch = [key for key, value in copied.items()
+                if uplift[key] != value]
     if mismatch:
         raise ValueError(
             f"uplift の {', '.join(mismatch)} が効果の決め方 "
@@ -1153,7 +1304,7 @@ def check_uplift_bundle(bundle: Bundle) -> None:
                                                     estimator)
 
     # モデルの定義の入力と出力
-    check_uplift_spec(bundle.spec, model)
+    check_uplift_spec(bundle.spec, estimator)
 
 
 def tie_order(scores: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

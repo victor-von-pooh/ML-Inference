@@ -260,14 +260,17 @@ def test_newer_bundle_stops(tmp_path: Path, table_dataset: Path) -> None:
     ----------
     None
     """
-    # 版ごとの要る項目 (版 18 は読めない. 版 17 と 16 は group, 版 15 は
-    # search, 版 14 は demand. 版 13 と 12 は効果の出力の形だけ, 版 11 は
-    # anomaly, 版 10 と 9 は group, 版 8 は rank. 版 7 は表の出力だけ. 版 6
-    # は ready. 版 5 は dataset 無し. 版 4 は items)
+    # 版ごとの要る項目 (版 19 は読めない. 版 18 は効果の出力の形だけ, 版 17
+    # と 16 は group, 版 15 は search, 版 14 は demand. 版 13 と 12 は効果の
+    # 出力の形だけ, 版 11 は anomaly, 版 10 と 9 は group, 版 8 は rank. 版 7
+    # は表の出力だけ. 版 6 は ready. 版 5 は dataset 無し. 版 4 は items)
     path = table_bundle(tmp_path, table_dataset)
     original = read_info(path)
+    rewrite(path, {**original, "format_version": 19})
+    with pytest.raises(ValueError, match="format_version 19 .*読めません"):
+        load_bundle(path)
     rewrite(path, {**original, "format_version": 18})
-    with pytest.raises(ValueError, match="format_version 18 .*読めません"):
+    with pytest.raises(ValueError, match="effect だけ"):
         load_bundle(path)
     rewrite(path, {**original, "format_version": 17})
     with pytest.raises(ValueError, match="版 17 の一式には group"):
