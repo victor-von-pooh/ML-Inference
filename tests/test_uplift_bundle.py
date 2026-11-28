@@ -85,19 +85,29 @@ def coupon_rows(outcome: str) -> pd.DataFrame:
     return frame
 
 
-def uplift_spec() -> dict:
+def uplift_spec(learner: str = "t_learner") -> dict:
     """
-    列の数に合わせた 2 つの予測のモデルの定義を返す関数
+    列の数に合わせた効果のモデルの定義を返す関数
 
     Parameters
     ----------
-    None
+    learner: str = "t_learner"
+        効果の決め方 (t_learner か s_learner)
 
     Returns
     ----------
     spec: dict
-        ML-ModelControl の同梱の例 tabular_uplift の入力の幅を変えたもの
+        ML-ModelControl の同梱の例 tabular_uplift (s_learner は
+        tabular_uplift_s) の入力の幅を変えたもの
     """
+    # s_learner は列の数と処置の列の 1 の和の幅の 1 つの枝
+    if learner == "s_learner":
+        spec = load_example("tabular_uplift_s")
+        width = len(FEATURES) + 1
+        spec["inputs"]["x"]["shape"] = [8, width]
+        spec["nodes"]["outcome1"]["params"]["in_features"] = width
+        return spec
+
     # 入力の幅と, 2 つの枝の最初の全結合の入力の幅
     spec = load_example("tabular_uplift")
     width = len(FEATURES)
@@ -109,7 +119,8 @@ def uplift_spec() -> dict:
 
 
 def skeleton_estimate(
-    model: torch.nn.Module, x: np.ndarray, scale: dict
+    model: torch.nn.Module, x: np.ndarray, scale: dict,
+    learner: str = "t_learner"
 ) -> dict:
     """
     骨組みと同じ式で, 行ごとの 2 つの群の予測と効果を求める関数
@@ -117,22 +128,34 @@ def skeleton_estimate(
     Parameters
     ----------
     model: torch.nn.Module
-        2 つの予測のモデル
+        効果のモデル
     x: np.ndarray
         (行の数, 列の数) の float32
     scale: dict
         量の標準化の mean と std (0 と 1 は None)
+    learner: str = "t_learner"
+        効果の決め方 (s_learner は処置の列を 1 と 0 にして入力の最後に
+        足した 2 回の予測)
 
     Returns
     ----------
     found: dict
         treated, control, effect の float64 の配列
     """
-    # 0 と 1 はシグモイド, 量は元の単位に戻してからの差
+    # 2 つの予測と, 0 と 1 はシグモイド, 量は元の単位に戻してからの差
     with torch.no_grad():
-        outputs = model(x=torch.tensor(x))
-    treated = outputs["treated"].reshape(-1).double()
-    control = outputs["control"].reshape(-1).double()
+        if learner == "s_learner":
+            pair = [
+                model(x=torch.tensor(np.column_stack([
+                    x, np.full(len(x), value, dtype=np.float32)
+                ]))).reshape(-1).double()
+                for value in (1.0, 0.0)
+            ]
+            treated, control = pair
+        else:
+            outputs = model(x=torch.tensor(x))
+            treated = outputs["treated"].reshape(-1).double()
+            control = outputs["control"].reshape(-1).double()
     if scale is None:
         treated, control = torch.sigmoid(treated), torch.sigmoid(control)
     else:
@@ -146,7 +169,7 @@ def skeleton_estimate(
 
 def write_uplift_run(
     root: Path, raw: Path, outcome: str, spec: bool = True,
-    budget: object = BUDGET
+    budget: object = BUDGET, learner: str = "t_learner"
 ) -> Path:
     """
     効果の見積もりの骨組みと同じ成果物を持つ実験のディレクトリを作る関数
@@ -163,6 +186,8 @@ def write_uplift_run(
         モデルの定義を実験に置くか (置かなければ仮のモデルの実験)
     budget: object = BUDGET
         成果物の配る数の上限
+    learner: str = "t_learner"
+        効果の決め方 (t_learner か s_learner)
 
     Returns
     ----------
@@ -191,12 +216,12 @@ def write_uplift_run(
         }
 
     # 学習しない重みのモデルと, 量の標準化の値
-    model = build_model(uplift_spec(), seed=0, load_weights=False)
+    model = build_model(uplift_spec(learner), seed=0, load_weights=False)
     model.eval()
     torch.save(model.state_dict(), run / "final_model.pt")
     if spec:
         (run / "model_spec.yaml").write_text(
-            yaml.safe_dump(uplift_spec(), allow_unicode=True),
+            yaml.safe_dump(uplift_spec(learner), allow_unicode=True),
             encoding="utf-8"
         )
     train_y = splits["train"]["y"]
@@ -207,7 +232,7 @@ def write_uplift_run(
     # 行ごとの効果, 効果の決め方, レシピの写し, 評価
     tables = []
     for split, part in splits.items():
-        part.update(skeleton_estimate(model, part["x"], scale))
+        part.update(skeleton_estimate(model, part["x"], scale, learner))
         tables.append(pd.DataFrame({
             "customer_id": part["ids"], "split": split,
             "effect": part["effect"], "treated": part["treated"],
@@ -222,12 +247,14 @@ def write_uplift_run(
         train[f"p{point}"] = float(np.percentile(effects, point))
     train["max"] = float(effects.max())
     train["positive"] = float((effects > 0).mean())
+    names = ({"input": "x", "outcome": "outcome"} if learner == "s_learner"
+             else {"input": "x", "treated": "treated", "control": "control"})
     estimator = {
-        "format_version": 1, "learner": "t_learner", "outcome": outcome,
+        "format_version": 1, "learner": learner, "outcome": outcome,
         "recipe": "uplift_recipe.yaml", "effects": "uplift_effects.csv",
         "features": FEATURES, "id": "customer_id", "treatment": "coupon",
         "budget": budget, "k": K,
-        "model": {"input": "x", "treated": "treated", "control": "control",
+        "model": {**names,
                   "link": "sigmoid" if outcome == "binary" else "identity"},
         "scale": scale, "train": train,
     }
@@ -611,7 +638,8 @@ def test_uplift_sources(
     model = estimator["model"]
     for change, words in (({"format_version": 2}, "版 2"),
                           ({"outcome": ["binary"]}, "outcome"),
-                          ({"learner": "s_learner"}, "learner"),
+                          ({"learner": "x_learner"}, "learner"),
+                          ({"learner": "s_learner"}, "input, outcome の"),
                           ({"budget": 0}, "budget"),
                           ({"k": 1.5}, "k は"),
                           ({"k": True}, "k は"),
@@ -643,7 +671,13 @@ def test_uplift_sources(
         make_uplift_bundle(tmp_path / "y", run)
     evaluation.write_text(original, encoding="utf-8")
 
-    # 出力の 1 つ欠けた定義
+    # 入力の幅が列の数と違う定義と, 出力の 1 つ欠けた定義
+    spec = uplift_spec()
+    spec["inputs"]["x"]["shape"] = [8, len(FEATURES) + 1]
+    (run / "model_spec.yaml").write_text(yaml.safe_dump(spec),
+                                         encoding="utf-8")
+    with pytest.raises(ValueError, match="幅 3 が, 見積もりに使う列の数 2"):
+        make_uplift_bundle(tmp_path / "y", run)
     spec = uplift_spec()
     spec["outputs"].pop("control")
     (run / "model_spec.yaml").write_text(yaml.safe_dump(spec),
@@ -678,3 +712,129 @@ def test_uplift_sources(
                                        allow_unicode=True), encoding="utf-8")
         with pytest.raises(ValueError, match=words):
             load_bundle(tmp_path / "bundle")
+
+
+def test_s_learner_bundle(
+    tmp_path: Path, outcome: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    処置の列を入力に入れる 1 つの予測 (s_learner) の効果の一式を確かめる
+    関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    outcome: str
+        結果の種類
+    monkeypatch: pytest.MonkeyPatch
+        読める版を古くする
+
+    Returns
+    ----------
+    None
+    """
+    # 版 18 の一式 (出力の名前は output) と, 実験の効果との一致
+    raw = raw_table(tmp_path, outcome)
+    run = write_uplift_run(tmp_path / "work", raw, outcome,
+                           learner="s_learner")
+    info = make_uplift_bundle(tmp_path / "bundle", run, data=raw,
+                              batch_size=7)
+    assert info["format_version"] == 18
+    assert (info["role"], info["output"]) == ("effect", {"form": "effect"})
+    assert info["decision"] == {"type": "treat", "budget": BUDGET}
+    uplift = info["uplift"]
+    assert uplift["learner"] == "s_learner"
+    assert (uplift["input"], uplift["output"]) == ("x", "outcome")
+    assert "treated" not in uplift and "control" not in uplift
+    assert uplift["check"]["rows"] == CUSTOMERS
+    assert uplift["check"]["agreement"] == 1.0
+    assert uplift["check"]["max_diff"] < (1e-6 if outcome == "binary"
+                                          else 1e-3)
+
+    # 新しい行の 2 つの予測は処置の列を 1 と 0 にした予測 (実験と同じ)
+    bundle = load_bundle(tmp_path / "bundle")
+    assert describe_bundle(bundle)["uplift"]["output"] == "outcome"
+    rows = coupon_rows(outcome).drop(columns=["coupon", "purchased"])
+    frame = predict(bundle, rows)
+    assert (frame["status"] == "ok").all()
+    np.testing.assert_allclose(frame["effect"],
+                               frame["treated"] - frame["control"])
+    recorded = pd.read_csv(run / "uplift_effects.csv").set_index(
+        "customer_id"
+    ).loc[frame["customer_id"]]
+    for key in ("treated", "control"):
+        np.testing.assert_allclose(frame[key], recorded[key],
+                                   rtol=1e-4, atol=1e-6)
+    if outcome == "binary":
+        assert frame["treated"].between(0, 1).all()
+    result = infer(bundle, rows)
+    acted = result["frame"]["action"]
+    assert int(acted.sum()) == min(BUDGET, int((frame["effect"] > 0).sum()))
+
+    # 版 17 までしか知らない読む側と, 版と食い違う一式
+    monkeypatch.setattr(bundle_module, "BUNDLE_FORMAT_VERSION", 17)
+    with pytest.raises(ValueError, match="format_version 18 の一式"):
+        load_bundle(tmp_path / "bundle")
+    monkeypatch.undo()
+    path = tmp_path / "bundle" / "inference.yaml"
+    info = yaml.safe_load(path.read_text("utf-8"))
+    for change, words in (({"uplift": {**info["uplift"],
+                                       "learner": "t_learner"}},
+                           "uplift.learner は s_learner"),
+                          ({"uplift": {**info["uplift"],
+                                       "treated": "outcome"}},
+                           "知らない項目"),
+                          ({"uplift": {**info["uplift"], "output": "y"}},
+                           "output"),
+                          ({"format_version": 12}, "treated")):
+        path.write_text(yaml.safe_dump({**info, **change},
+                                       allow_unicode=True), encoding="utf-8")
+        with pytest.raises(ValueError, match=words):
+            load_bundle(tmp_path / "bundle")
+
+
+def test_s_learner_refusals(tmp_path: Path) -> None:
+    """
+    s_learner の成果物のモデルの名前の欠けと, 入力の幅の食い違いが, 一式を
+    作る前に誤りになることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 結果の予測の名前の欠けた成果物 (t_learner の名前だけも)
+    raw = raw_table(tmp_path, "binary")
+    run = write_uplift_run(tmp_path / "work", raw, "binary",
+                           learner="s_learner")
+    path = run / "uplift_estimator.json"
+    estimator = json.loads(path.read_text("utf-8"))
+    for model in ({"input": "x", "link": "sigmoid"},
+                  {"input": "x", "treated": "treated",
+                   "control": "control", "link": "sigmoid"}):
+        path.write_text(json.dumps({**estimator, "model": model}),
+                        encoding="utf-8")
+        with pytest.raises(ValueError, match="input, outcome の名前"):
+            make_uplift_bundle(tmp_path / "x", run)
+    path.write_text(json.dumps(estimator), encoding="utf-8")
+
+    # 定義に無い出力の名前と, 処置の列の 1 を足していない入力の幅
+    path.write_text(json.dumps({**estimator, "model": {
+        **estimator["model"], "outcome": "y"
+    }}), encoding="utf-8")
+    with pytest.raises(ValueError, match="出力に y がありません"):
+        make_uplift_bundle(tmp_path / "x", run)
+    path.write_text(json.dumps(estimator), encoding="utf-8")
+    spec = uplift_spec("s_learner")
+    spec["inputs"]["x"]["shape"] = [8, len(FEATURES)]
+    (run / "model_spec.yaml").write_text(yaml.safe_dump(spec),
+                                         encoding="utf-8")
+    with pytest.raises(ValueError,
+                       match="幅 2 が, 見積もりに使う列の数と処置の列の 1"):
+        make_uplift_bundle(tmp_path / "x", run)
+    assert not (tmp_path / "x").exists()

@@ -40,8 +40,8 @@ from ml_inference.weights import (
 # 版 9, 既製の埋め込みの群分けの一式は版 10, 異常の度合いの一式は版 11,
 # 効果の一式は版 12, 値段の一式は版 13, 需要の一式は版 14, 検索の一式は版 15
 # で書き, 群の中心から遠い行の上限を持つ群分けの一式は版 16 (既製の埋め込み
-# は版 17) で書く)
-BUNDLE_FORMAT_VERSION = 17
+# は版 17), 処置の列を入力に入れる効果の一式は版 18 で書く)
+BUNDLE_FORMAT_VERSION = 18
 COLUMN_BUNDLE_VERSION = 3
 ITEMS_BUNDLE_VERSION = 4
 NOISE_BUNDLE_VERSION = 5
@@ -57,6 +57,7 @@ DEMAND_BUNDLE_VERSION = 14
 SEARCH_BUNDLE_VERSION = 15
 FAR_GROUP_BUNDLE_VERSION = 16
 READY_FAR_GROUP_BUNDLE_VERSION = 17
+SINGLE_UPLIFT_BUNDLE_VERSION = 18
 
 # 群分けの一式の版 (列の符号化か, 既製のモデルの埋め込み. 後ろの 2 つは群の
 # 中心から遠い行の上限を持つ版)
@@ -77,7 +78,7 @@ DATASETLESS_VERSIONS = (
     RANK_BUNDLE_VERSION, GROUP_BUNDLE_VERSION, READY_GROUP_BUNDLE_VERSION,
     ANOMALY_BUNDLE_VERSION, UPLIFT_BUNDLE_VERSION, PRICE_BUNDLE_VERSION,
     DEMAND_BUNDLE_VERSION, SEARCH_BUNDLE_VERSION, FAR_GROUP_BUNDLE_VERSION,
-    READY_FAR_GROUP_BUNDLE_VERSION
+    READY_FAR_GROUP_BUNDLE_VERSION, SINGLE_UPLIFT_BUNDLE_VERSION
 )
 
 # 出力の形 ranking の一式の版 (並べるの一式と検索の一式)
@@ -87,8 +88,12 @@ RANKING_VERSIONS = (RANK_BUNDLE_VERSION, SEARCH_BUNDLE_VERSION)
 READY_VERSIONS = (READY_BUNDLE_VERSION, *READY_GROUP_VERSIONS,
                   SEARCH_BUNDLE_VERSION)
 
+# 効果の一式の版 (2 つの予測 (t_learner) と, 処置の列を入力に入れる 1 つの
+# 予測 (s_learner))
+UPLIFT_VERSIONS = (UPLIFT_BUNDLE_VERSION, SINGLE_UPLIFT_BUNDLE_VERSION)
+
 # 出力の形 effect の一式の版 (効果の一式と値段の一式)
-EFFECT_VERSIONS = (UPLIFT_BUNDLE_VERSION, PRICE_BUNDLE_VERSION)
+EFFECT_VERSIONS = (*UPLIFT_VERSIONS, PRICE_BUNDLE_VERSION)
 
 # inference.yaml の一番上の項目
 TOP_KEYS = (
@@ -260,8 +265,8 @@ class Bundle:
             一式), anomaly (異常の度合いの一式), uplift (効果の一式),
             price (値段の一式), demand (需要の一式), search (検索の一式)
         """
-        # 効果の一式 (版 12) の uplift, 値段の一式 (版 13) の price, 需要の
-        # 一式 (版 14) の demand
+        # 効果の一式 (版 12 と 18) の uplift, 値段の一式 (版 13) の price,
+        # 需要の一式 (版 14) の demand
         if self.from_uplift:
             kind = "uplift"
             return kind
@@ -434,10 +439,10 @@ class Bundle:
         Returns
         ----------
         uplift: bool
-            uplift (効果の決め方と前処理のレシピ) を持つ一式 (版 12) なら
-            True
+            uplift (効果の決め方と前処理のレシピ) を持つ一式 (版 12 と 18)
+            なら True
         """
-        # 版 12 の uplift の有無
+        # 版 12 と 18 の uplift の有無
         uplift = self.info.get("uplift") is not None
 
         return uplift
@@ -1123,15 +1128,17 @@ def check_info(info: Any) -> list[str]:
         errors.extend(check_anomaly_info(info))
     if (output.get("form") == "effect") != (version in EFFECT_VERSIONS):
         errors.append(
-            f"出力の形 effect は版 {UPLIFT_BUNDLE_VERSION} の効果の一式と版 "
+            f"出力の形 effect は版 {UPLIFT_BUNDLE_VERSION} と "
+            f"{SINGLE_UPLIFT_BUNDLE_VERSION} の効果の一式と版 "
             f"{PRICE_BUNDLE_VERSION} の値段の一式だけで, この版の一式の出力の"
             "形は effect だけです"
         )
-    if info.get("uplift") is not None and version != UPLIFT_BUNDLE_VERSION:
+    if info.get("uplift") is not None and version not in UPLIFT_VERSIONS:
         errors.append(
-            f"uplift を持つ一式は版 {UPLIFT_BUNDLE_VERSION} にしてください"
+            f"uplift を持つ一式は版 {UPLIFT_BUNDLE_VERSION} か "
+            f"{SINGLE_UPLIFT_BUNDLE_VERSION} にしてください"
         )
-    if version == UPLIFT_BUNDLE_VERSION:
+    if version in UPLIFT_VERSIONS:
         # 効果の一式の決まりは効果のモジュールの受け持ち
         from ml_inference.uplift import check_uplift_info
 
