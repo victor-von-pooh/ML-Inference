@@ -13,7 +13,11 @@
 
 ## 優先度 低
 
-無し
+### S-learner の効果の一式を読む
+- 何を: 効果の一式 (`make_uplift_bundle`) で, ML-Quest の効果の見積もりの骨組みが書く `learner` が `s_learner` の成果物 (`model` が `{input: x, outcome: outcome}`. 入力は特徴の終わりに処置の列) も読む. 効果は処置の列を 1 にした `outcome` から 0 にした `outcome` を引いた値 (結果が 0 と 1 ならそれぞれをシグモイドで確率にしてからの差) にし, 推論の表の `treated` と `control` もその 2 つの予測にする
+- なぜ: 今の一式は `t_learner` の成果物だけを読み, `s_learner` の実験では骨組みが一式を作らないので, S-learner で学んだ効果を推論の段階で配る判断に使えないため. 型の追加なので低に置く
+- 終わりの条件: `s_learner` の成果物で一式を作れ, 一式の効果が実験の `uplift_effects.csv` と合う (`uplift.check` の一致の割合 1) ことと, `model` の名前の欠けか入力の幅の食い違いが作る前に誤りになることをテストで確かめる. `t_learner` の一式の形と結果は変わらない. docs/DESIGN.md の効果の一式の節に書く
+- つながり: ML-Quest の効果の見積もりの骨組み (`s_learner` の実験でも一式を作るようにする), ML-ModelControl の同梱の例 `tabular_uplift_s`
 
 ## 条件待ち
 
