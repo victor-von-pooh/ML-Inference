@@ -626,7 +626,7 @@ def check_uplift_spec(spec: dict, estimator: dict) -> None:
     # 入力は行の特徴 (s_learner は最後に処置の列) の 1 つ
     names = estimator["model"]
     inputs = spec.get("inputs") or {}
-    if list(inputs) != [names["input"]]:
+    if not isinstance(inputs, dict) or list(inputs) != [names["input"]]:
         raise ValueError(
             f"効果のモデルの入力は {names['input']} の 1 つにしてください "
             f"(今は {', '.join(map(str, inputs)) or '無し'})"
