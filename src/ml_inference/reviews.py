@@ -12,7 +12,7 @@ import yaml
 
 from ml_inference.result import read_result
 
-# 人の確認の記録のファイル (結果のディレクトリの中) と列
+# 人の確かめの記録のファイル (結果のディレクトリの中) と列
 REVIEWS_FILE = "reviews.csv"
 REVIEW_COLUMNS = ("id", "judgment", "reviewer", "reviewed_at")
 
@@ -25,7 +25,7 @@ ANOMALY_SUMMARY_KEYS = ("id", "score")
 
 def check_header(path: Path) -> None:
     """
-    前からある人の確認の記録の列が決まりと同じかを確かめる関数
+    前からある人の確かめの記録の列が決まりと同じかを確かめる関数
 
     Parameters
     ----------
@@ -154,7 +154,7 @@ def row_key(result: Path, row: Any) -> str:
 
 def create_reviews(path: Path) -> None:
     """
-    見出しの行だけの人の確認の記録を, 無ければ排他で作る関数
+    見出しの行だけの人の確かめの記録を, 無ければ排他で作る関数
 
     Parameters
     ----------
@@ -186,7 +186,7 @@ def record_review(
     reviewed_at: Any = None
 ) -> dict:
     """
-    人の確認の結果を 1 件, 結果のディレクトリの記録に足す関数
+    人の確かめの結果を 1 件, 結果のディレクトリの記録に足す関数
 
     Parameters
     ----------
@@ -243,7 +243,7 @@ def record_review(
 
 def read_reviews(result: Union[str, Path]) -> pd.DataFrame:
     """
-    結果のディレクトリの人の確認の記録を読む関数
+    結果のディレクトリの人の確かめの記録を読む関数
 
     Parameters
     ----------

@@ -1431,7 +1431,7 @@ def make_group_bundle(
         重みを一式に写すか (写さない場合は絶対パスで指す. 既製の埋め込みは
         いつも写さない)
     overwrite: bool = False
-        既にある一式を置き換えるか
+        既にある一式を上書きするか
     pretrained: Optional[dict] = None
         ノードの名前ごとの重みのライセンスの情報 (make_bundle と同じ. 既製
         の埋め込みは license)
@@ -1450,7 +1450,7 @@ def make_group_bundle(
     ----------
     FileExistsError
         ディレクトリが既にあり, overwrite が False の場合と, 一式ではない
-        ディレクトリを置き換えようとした場合
+        ディレクトリを上書きしようとした場合
     FileNotFoundError
         成果物が無い場合
     ValueError
@@ -1462,7 +1462,7 @@ def make_group_bundle(
         if not overwrite:
             raise FileExistsError(f"{final} は既にあります")
         if not (final / "inference.yaml").is_file():
-            raise FileExistsError(f"{final} は推論の一式ではないので置き換えません")
+            raise FileExistsError(f"{final} は推論の一式ではないので上書きしません")
     if batch_size < 1:
         raise ValueError("batch_size は 1 以上にしてください")
 

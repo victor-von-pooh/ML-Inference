@@ -417,7 +417,7 @@ def test_uplift_bundle(tmp_path: Path, outcome: str) -> None:
     plain = infer(bundle, rows, decision={})
     assert "decision" not in plain and "action" not in plain["frame"]
 
-    # 書き出しと読み直し (人の確認の記録は異常の度合いの結果だけ)
+    # 書き出しと読み直し (人の確かめの記録は異常の度合いの結果だけ)
     write_result(result, tmp_path / "result")
     back = read_result(tmp_path / "result")
     assert back["summary"]["id"] == "customer_id"

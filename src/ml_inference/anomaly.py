@@ -1038,7 +1038,7 @@ def make_anomaly_bundle(
     copy_weights: bool = True
         自己符号化器の重みを一式に写すか (写さない場合は絶対パスで指す)
     overwrite: bool = False
-        既にある一式を置き換えるか
+        既にある一式を上書きするか
     pretrained: Optional[dict] = None
         ノードの名前ごとの重みのライセンスの情報 (make_bundle と同じ)
     batch_size: int = 256
@@ -1053,7 +1053,7 @@ def make_anomaly_bundle(
     ----------
     FileExistsError
         ディレクトリが既にあり, overwrite が False の場合と, 一式ではない
-        ディレクトリを置き換えようとした場合
+        ディレクトリを上書きしようとした場合
     FileNotFoundError
         成果物が無い場合
     ValueError
@@ -1065,7 +1065,7 @@ def make_anomaly_bundle(
         if not overwrite:
             raise FileExistsError(f"{final} は既にあります")
         if not (final / "inference.yaml").is_file():
-            raise FileExistsError(f"{final} は推論の一式ではないので置き換えません")
+            raise FileExistsError(f"{final} は推論の一式ではないので上書きしません")
     if batch_size < 1:
         raise ValueError("batch_size は 1 以上にしてください")
 
@@ -1420,7 +1420,7 @@ def decide_anomaly(
     bundle: Bundle, prediction: pd.DataFrame, decision: dict
 ) -> dict:
     """
-    度合いの高い順に, 件数の上限まで人の確認に回す行を決める関数
+    度合いの高い順に, 件数の上限まで人の確かめに回す行を決める関数
 
     Parameters
     ----------
@@ -1477,7 +1477,7 @@ def decide_anomaly(
     frame[ACTION_COLUMN] = action
 
     # 回す件数と度合いの下限, 上限で回さない外れた行の文と前提
-    sentence = (f"度合いの高い順に {summary['acted']:,} 件を人の確認に回す "
+    sentence = (f"度合いの高い順に {summary['acted']:,} 件を人の確かめに回す "
                 f"(人が 1 回に確かめる件数の上限 {capacity:,} 件)")
     if summary["lowest"] is not None:
         sentence += f". 回す行の度合いは {summary['lowest']:.3g} 以上"
@@ -1491,7 +1491,7 @@ def decide_anomaly(
         "度合いは確率ではないので, 回す件数は損得のしきい値でなく人手の上限"
         "で決めた",
         "学習用の正常の行の分布から外れた度合いは異常の目安で, 異常かは人の"
-        "確認で決める (機械学習の結果は判断の材料)",
+        "確かめで決める (機械学習の結果は判断の材料)",
     ]
     result = {"frame": frame, "summary": summary, "sentences": sentences,
               "notes": notes, "decision": decision}
